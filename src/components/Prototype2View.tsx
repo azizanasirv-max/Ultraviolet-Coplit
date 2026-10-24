@@ -309,7 +309,9 @@ export const Prototype2View: React.FC = () => {
     el.muted = false;
     el.volume = 1;
     try {
-      if (!audioUnlockedRef.current && !el.srcObject) {
+      // Always re-prime when no remote stream is attached yet (for example when
+      // rejoining a room after the previous peer connection was closed).
+      if (!el.srcObject) {
         el.src = getSilentClipUrl();
         el.loop = true;
         el.load();
@@ -783,6 +785,7 @@ export const Prototype2View: React.FC = () => {
           setPeerPresent(true);
           // Autoplay may have been blocked before the connection completed.
           if (remoteAudioRef.current?.srcObject && remoteAudioRef.current.paused) {
+            remoteAudioRef.current.muted = false;
             remoteAudioRef.current
               .play()
               .then(() => setPlaybackBlocked(false))
