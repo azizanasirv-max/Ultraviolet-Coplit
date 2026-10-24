@@ -196,6 +196,16 @@ async function startServer() {
 
   // Health check endpoint
   app.get('/api/health', (_req, res) => {
+    // Explicit public deployment URL used to build customer invitation links.
+    // Ignored when unset or left at the placeholder value.
+    const configuredAppUrl = process.env.APP_URL?.trim();
+    const publicAppUrl =
+      configuredAppUrl &&
+      /^https?:\/\//i.test(configuredAppUrl) &&
+      configuredAppUrl !== 'MY_APP_URL'
+        ? configuredAppUrl.replace(/\/+$/, '')
+        : null;
+
     res.json({
       status: 'ok',
       hasUltravoxKey: Boolean(
@@ -203,6 +213,7 @@ async function startServer() {
       ),
       activeRooms: rooms.size,
       model: 'ultravox-v0.7',
+      publicAppUrl,
       timestamp: new Date().toISOString(),
     });
   });

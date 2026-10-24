@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { UltravoxSession, UltravoxSessionStatus, Role, Medium } from 'ultravox-client';
+import { buildCustomerInviteUrl, isAistudioDevPreview } from '../lib/inviteUrl';
 import {
   Mic,
   Square,
@@ -40,6 +41,7 @@ export const Prototype2View: React.FC = () => {
   const [ultravoxStatus, setUltravoxStatus] = useState<UltravoxSessionStatus>(UltravoxSessionStatus.DISCONNECTED);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [customKey, setCustomKey] = useState<string>('');
+  const [publicAppUrl, setPublicAppUrl] = useState<string | null>(null);
 
   // AI Suggestions & Speech
   const [aiSuggestions, setAiSuggestions] = useState<SuggestionCard[]>([]);
@@ -76,6 +78,18 @@ export const Prototype2View: React.FC = () => {
     }
   }, []);
 
+  // Load the configured public deployment URL (APP_URL) for customer invites
+  useEffect(() => {
+    fetch('/api/health')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.publicAppUrl) setPublicAppUrl(data.publicAppUrl);
+      })
+      .catch(() => {
+        // Invitation links fall back to the current origin when config is unavailable.
+      });
+  }, []);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -84,19 +98,13 @@ export const Prototype2View: React.FC = () => {
   }, []);
 
   // Helper: Get shareable public customer invitation URL
-  const getCustomerInviteUrl = () => {
-    let origin = window.location.origin;
-    // Map development workspace URL (-dev-) to public shared deployment URL (-pre-)
-    if (origin.includes('ais-dev-')) {
-      origin = origin.replace('ais-dev-', 'ais-pre-');
-    }
-    // Force HTTPS protocol for external devices if loaded on HTTP non-localhost
-    if (origin.startsWith('http://') && !origin.includes('localhost') && !origin.includes('127.0.0.1')) {
-      origin = origin.replace('http://', 'https://');
-    }
-    const pathname = window.location.pathname;
-    return `${origin}${pathname}?prototype=2&room=${encodeURIComponent(roomId)}&role=customer`;
-  };
+  const getCustomerInviteUrl = () =>
+    buildCustomerInviteUrl({
+      configuredPublicUrl: publicAppUrl,
+      currentOrigin: window.location.origin,
+      currentPathname: window.location.pathname,
+      roomId,
+    });
 
   const handleCopyInviteLink = () => {
     navigator.clipboard.writeText(getCustomerInviteUrl());
@@ -516,6 +524,13 @@ export const Prototype2View: React.FC = () => {
                 <div className="font-mono text-[10px] text-slate-400 bg-slate-900 p-2 rounded-lg truncate border border-slate-800/80">
                   {getCustomerInviteUrl()}
                 </div>
+                {isAistudioDevPreview(getCustomerInviteUrl()) && (
+                  <p className="text-[10px] leading-relaxed text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg p-2">
+                    This is an AI Studio development preview URL and requires a Google sign-in, so
+                    customers cannot open it. Publish the app and set <span className="font-mono">APP_URL</span> to
+                    the public deployment URL to generate a working invitation link.
+                  </p>
+                )}
               </div>
 
               {/* Join Action Button */}
