@@ -18,6 +18,8 @@ type ParticipantRole = 'customer' | 'salesperson';
 interface RoomClient {
   /** Server-generated identity for this specific WebSocket connection. */
   participantId: string;
+  /** Private, connection-scoped token used only to authorize reconnection. */
+  resumeToken: string;
   ws: WebSocket;
   role: ParticipantRole;
   roomId: string;
@@ -390,13 +392,13 @@ async function startServer() {
 
           if (occupied) {
             // A reconnecting client may legitimately replace its own previous
-            // connection, but only by presenting the participant ID the server
-            // generated for that connection. Any other duplicate is rejected so
-            // the existing conversation is never silently evicted.
-            const resumeParticipantId =
-              typeof data.resumeParticipantId === 'string' ? data.resumeParticipantId : null;
+            // connection, but only by presenting the private resume token the
+            // server generated for that connection. The public participant ID
+            // is shared with the peer and therefore is NOT sufficient.
+            const resumeToken =
+              typeof data.resumeToken === 'string' ? data.resumeToken : null;
 
-            if (resumeParticipantId && occupied.participantId === resumeParticipantId) {
+            if (resumeToken && occupied.resumeToken === resumeToken) {
               removeParticipant(occupied, 'replaced');
               safeSend(occupied.ws, { type: 'session_replaced', role, roomId });
               occupied.ws.close(4002, 'session_replaced');
@@ -425,6 +427,7 @@ async function startServer() {
 
           const client: RoomClient = {
             participantId: randomUUID(),
+            resumeToken: randomUUID(),
             ws,
             role,
             roomId,
@@ -438,6 +441,8 @@ async function startServer() {
           safeSend(ws, {
             type: 'joined',
             participantId: client.participantId,
+            // Private to this connection; never broadcast to the peer.
+            resumeToken: client.resumeToken,
             roomId,
             role,
             participants: room.clients.map((c) => ({

@@ -171,6 +171,7 @@ export const Prototype2View: React.FC = () => {
   const joinTimeoutRef = useRef<number | null>(null);
   const joinedThisSocketRef = useRef<boolean>(false);
   const participantIdRef = useRef<string | null>(null);
+  const resumeTokenRef = useRef<string | null>(null);
   const remoteParticipantIdRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const pendingIceCandidatesRef = useRef<PendingIceCandidate[]>([]);
@@ -647,9 +648,10 @@ export const Prototype2View: React.FC = () => {
           type: 'join_room',
           roomId: roomIdRef.current,
           role: roleRef.current,
-          // The server only accepts this as a resume token for the exact
-          // participant ID it generated; otherwise the join is rejected.
-          resumeParticipantId: participantIdRef.current ?? undefined,
+          // The server only accepts this private token as proof that this is
+          // the same participant reconnecting; the public participant ID is
+          // not sufficient and duplicates are otherwise rejected.
+          resumeToken: resumeTokenRef.current ?? undefined,
         })
       );
 
@@ -881,6 +883,9 @@ export const Prototype2View: React.FC = () => {
     const wasReconnect = Boolean(previousId) || reconnectAttemptRef.current > 0;
 
     participantIdRef.current = data.participantId;
+    if (typeof data.resumeToken === 'string') {
+      resumeTokenRef.current = data.resumeToken;
+    }
     if (wasReconnect) {
       // The server issues a new participant ID per connection, so the old
       // negotiation session is always obsolete after a reconnect.
@@ -946,6 +951,7 @@ export const Prototype2View: React.FC = () => {
     closePeerConnection('join rejected');
     releaseLocalMedia('join rejected');
     participantIdRef.current = null;
+    resumeTokenRef.current = null;
     setWsStatus('disconnected');
     setPeerPresent(false);
     setRemoteRole(null);
@@ -1252,6 +1258,7 @@ export const Prototype2View: React.FC = () => {
     }
 
     participantIdRef.current = null;
+    resumeTokenRef.current = null;
     remoteParticipantIdRef.current = null;
     sessionIdRef.current = null;
     joinedThisSocketRef.current = false;
