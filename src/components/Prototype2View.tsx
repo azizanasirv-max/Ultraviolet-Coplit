@@ -58,13 +58,88 @@ interface PendingIceCandidate {
   sessionId: string | null;
 }
 
-const RTC_CONFIGURATION: RTCConfiguration = {
+/**
+ * Fallback ICE configuration. The live configuration is fetched from
+ * `/api/ice-config` because a deployment may provide a TURN relay; without a
+ * TURN server the peer-to-peer call can only work when both devices can reach
+ * each other directly (never across carrier-grade NAT / mobile data).
+ */
+const DEFAULT_RTC_CONFIGURATION: RTCConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
   ],
 };
+
+/**
+ * A silent WAV generated at runtime. Playing this inside the "Join" click
+ * handler unlocks the remote-audio element on browsers that require a user
+ * gesture per media element (notably iOS Safari). The clip loops so the element
+ * is already in a playing state when the real MediaStream is attached later.
+ */
+let silentClipUrl: string | null = null;
+const getSilentClipUrl = (): string => {
+  if (silentClipUrl) return silentClipUrl;
+  const sampleRate = 8000;
+  const frameCount = Math.floor(sampleRate * 0.5);
+  const buffer = new ArrayBuffer(44 + frameCount);
+  const view = new DataView(buffer);
+  const writeString = (offset: number, value: string) => {
+    for (let i = 0; i < value.length; i += 1) view.setUint8(offset + i, value.charCodeAt(i));
+  };
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + frameCount, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate, true);
+  view.setUint16(32, 1, true);
+  view.setUint16(34, 8, true);
+  writeString(36, 'data');
+  view.setUint32(40, frameCount, true);
+  new Uint8Array(buffer, 44).fill(128); // 8-bit PCM silence
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+  silentClipUrl = `data:audio/wav;base64,${btoa(binary)}`;
+  return silentClipUrl;
+};
+
+interface IceConfigResponse {
+  iceServers: RTCIceServer[];
+  hasTurn: boolean;
+  hasStun: boolean;
+  iceTransportPolicy?: RTCIceTransportPolicy;
+}
+
+interface PeerDiagnostics {
+  signaling: WsStatus;
+  peerId: string | null;
+  peerRole: ParticipantRole | null;
+  pcState: string;
+  iceState: string;
+  iceGatheringState: string;
+  candidates: { host: number; srflx: number; relay: number };
+  selectedLocalType: string;
+  selectedRemoteType: string;
+  bytesSent: number;
+  bytesReceived: number;
+  sendBitrateKbps: number;
+  receiveBitrateKbps: number;
+  localTrack: string;
+  remoteTracks: number;
+  audioPaused: boolean;
+  audioMuted: boolean;
+  audioCurrentTime: number;
+  audioSrcAttached: boolean;
+  hasTurn: boolean;
+  relayPath: boolean;
+  updatedAt: string;
+}
 
 const RECONNECT_BASE_DELAY_MS = 800;
 const RECONNECT_MAX_DELAY_MS = 8000;
@@ -117,6 +192,13 @@ const STATUS_TONE_CLASS: Record<CallStatusMeta['tone'], string> = {
   slate: 'bg-slate-800 text-slate-300 border-slate-700',
 };
 
+const DiagRow: React.FC<{ label: string; value: string }> = ({ label, value }) => (
+  <div className="flex items-baseline justify-between gap-2 border-b border-slate-800/60 py-0.5">
+    <span className="text-slate-500">{label}</span>
+    <span className="text-slate-200 text-right break-all">{value}</span>
+  </div>
+);
+
 export const Prototype2View: React.FC = () => {
   // Navigation & Room Parameters
   // Initialize synchronously from the URL so an invitation never renders (or
@@ -150,6 +232,12 @@ export const Prototype2View: React.FC = () => {
   const [latestSpeechText, setLatestSpeechText] = useState<string>('');
   const [salesContextInput, setSalesContextInput] = useState<string>('');
   const [isMuted, setIsMuted] = useState<boolean>(false);
+  const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
+  const [iceInfo, setIceInfo] = useState<{ hasTurn: boolean; hasStun: boolean }>({
+    hasTurn: false,
+    hasStun: true,
+  });
+  const [diagnostics, setDiagnostics] = useState<PeerDiagnostics | null>(null);
 
   // Logs
   const [logs, setLogs] = useState<string[]>([]);
@@ -160,6 +248,13 @@ export const Prototype2View: React.FC = () => {
   const ultravoxRef = useRef<UltravoxSession | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const rtcConfigRef = useRef<RTCConfiguration>(DEFAULT_RTC_CONFIGURATION);
+  const iceCandidateTypesRef = useRef({ host: 0, srflx: 0, relay: 0 });
+  const diagnosticsRef = useRef<PeerDiagnostics | null>(null);
+  const lastStatsRef = useRef<{ at: number; bytesSent: number; bytesReceived: number } | null>(null);
+  const audioUnlockedRef = useRef<boolean>(false);
+  const micRecoveryInFlightRef = useRef<boolean>(false);
+  const micRecoveryTimerRef = useRef<number | null>(null);
 
   // Lifecycle & negotiation refs
   const mountedRef = useRef<boolean>(true);
@@ -200,6 +295,61 @@ export const Prototype2View: React.FC = () => {
     setLogs((prev) => [...prev.slice(-30), formatted]);
   };
 
+  /**
+   * Unlocks the remote-audio element while the user gesture is still active.
+   *
+   * Browsers that require a gesture per media element (iOS Safari in
+   * particular) reject a play() call issued later from an async `ontrack`
+   * handler, which silently produces "connected but no audio". Priming the
+   * element here makes the later swap to the real MediaStream audible.
+   */
+  const unlockRemoteAudio = async () => {
+    const el = remoteAudioRef.current;
+    if (!el) return;
+    el.muted = false;
+    el.volume = 1;
+    try {
+      if (!audioUnlockedRef.current && !el.srcObject) {
+        el.src = getSilentClipUrl();
+        el.loop = true;
+        el.load();
+      }
+      await el.play();
+      audioUnlockedRef.current = true;
+      addLog('Remote audio element unlocked by user gesture.');
+    } catch (err: any) {
+      addLog(`Remote audio unlock rejected: ${err?.name || 'Error'} - ${err?.message || err}`);
+    }
+  };
+
+  /** Attaches the peer's MediaStream to the audio element and starts playback. */
+  const attachRemoteStream = (stream: MediaStream) => {
+    const el = remoteAudioRef.current;
+    if (!el) {
+      addLog('Remote audio element is not mounted; cannot play remote stream.');
+      return;
+    }
+    el.muted = false;
+    el.volume = 1;
+    el.loop = false;
+    if (el.src) {
+      // An explicit src (the silent unlock clip) takes precedence over srcObject
+      // until it is removed.
+      el.pause();
+      el.removeAttribute('src');
+    }
+    el.srcObject = stream;
+    el.play()
+      .then(() => {
+        setPlaybackBlocked(false);
+        addLog('Playing remote audio stream live.');
+      })
+      .catch((err: any) => {
+        setPlaybackBlocked(true);
+        addLog(`Remote audio playback blocked: ${err?.name || 'Error'} - ${err?.message || err}`);
+      });
+  };
+
   // Load the configured public deployment URL (APP_URL) for customer invites
   useEffect(() => {
     fetch('/api/health')
@@ -210,6 +360,35 @@ export const Prototype2View: React.FC = () => {
       .catch(() => {
         // Invitation links fall back to the current origin when config is unavailable.
       });
+  }, []);
+
+  // Load the deployment's ICE servers (STUN/TURN) for the human-to-human call.
+  // TURN is what makes the call work when the two devices are on different
+  // networks and no direct path exists.
+  useEffect(() => {
+    let cancelled = false;
+    const applyIceConfig = (payload: Partial<IceConfigResponse> | null) => {
+      if (cancelled || !payload) return;
+      if (Array.isArray(payload.iceServers) && payload.iceServers.length > 0) {
+        rtcConfigRef.current = {
+          iceServers: payload.iceServers,
+          iceTransportPolicy: payload.iceTransportPolicy ?? 'all',
+        };
+      }
+      setIceInfo({ hasTurn: Boolean(payload.hasTurn), hasStun: payload.hasStun !== false });
+    };
+
+    fetch('/api/ice-config')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => applyIceConfig(data))
+      .catch(() => {
+        // Fall back to the built-in STUN-only configuration.
+        applyIceConfig(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Cleanup on unmount: always close the socket, cancel timers and release media.
@@ -253,7 +432,154 @@ export const Prototype2View: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Helper: Get shareable public customer invitation URL
+  // ---------------------------------------------------------------------------
+  // Media diagnostics
+  //
+  // The two-device failure mode this reports on is "connected but silent": the
+  // connection state alone cannot distinguish a blocked autoplay element from a
+  // muted microphone track or from RTP that never arrives. These counters can.
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    (window as any).__p2pDiagnostics = () => diagnosticsRef.current;
+  }, []);
+
+  useEffect(() => {
+    if (!isJoined) {
+      diagnosticsRef.current = null;
+      setDiagnostics(null);
+      return;
+    }
+
+    let cancelled = false;
+    let running = false;
+
+    const tick = async () => {
+      if (running || cancelled) return;
+      running = true;
+      try {
+        const pc = pcRef.current;
+        const el = remoteAudioRef.current;
+        const next: PeerDiagnostics = {
+          signaling: wsStatus,
+          peerId: remoteParticipantIdRef.current,
+          peerRole: remoteRole,
+          pcState: pc?.connectionState ?? 'none',
+          iceState: pc?.iceConnectionState ?? 'none',
+          iceGatheringState: pc?.iceGatheringState ?? 'none',
+          candidates: { ...iceCandidateTypesRef.current },
+          selectedLocalType: 'none',
+          selectedRemoteType: 'none',
+          bytesSent: 0,
+          bytesReceived: 0,
+          sendBitrateKbps: 0,
+          receiveBitrateKbps: 0,
+          localTrack: 'none',
+          remoteTracks: 0,
+          audioPaused: el ? el.paused : true,
+          audioMuted: el ? el.muted : true,
+          audioCurrentTime: el ? Number(el.currentTime.toFixed(2)) : 0,
+          audioSrcAttached: Boolean(el?.srcObject),
+          hasTurn: iceInfo.hasTurn,
+          relayPath: false,
+          updatedAt: new Date().toLocaleTimeString(),
+        };
+
+        const localTrack = localStreamRef.current?.getAudioTracks()[0];
+        if (localTrack) {
+          next.localTrack = `${localTrack.readyState}/${localTrack.enabled ? 'enabled' : 'disabled'}/${
+            localTrack.muted ? 'muted' : 'live'
+          }`;
+        }
+
+        if (pc) {
+          next.remoteTracks = pc.getReceivers().filter((receiver) => receiver.track?.kind === 'audio').length;
+          try {
+            const stats = await pc.getStats();
+            const candidates = new Map<string, any>();
+            let pair: any = null;
+            stats.forEach((report) => {
+              if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
+                candidates.set(report.id, report);
+              }
+            });
+            stats.forEach((report) => {
+              if (report.type === 'candidate-pair' && (report.nominated || report.selected) && report.state === 'succeeded') {
+                pair = report;
+              }
+              if (report.type === 'inbound-rtp' && report.kind === 'audio') {
+                next.bytesReceived = report.bytesReceived ?? 0;
+              }
+              if (report.type === 'outbound-rtp' && report.kind === 'audio') {
+                next.bytesSent = report.bytesSent ?? 0;
+              }
+            });
+            if (pair) {
+              const local = candidates.get(pair.localCandidateId);
+              const remote = candidates.get(pair.remoteCandidateId);
+              next.selectedLocalType = local?.candidateType ?? 'unknown';
+              next.selectedRemoteType = remote?.candidateType ?? 'unknown';
+              next.relayPath = local?.candidateType === 'relay' || remote?.candidateType === 'relay';
+            }
+
+            const now = Date.now();
+            const previous = lastStatsRef.current;
+            if (previous) {
+              const seconds = Math.max((now - previous.at) / 1000, 0.001);
+              next.sendBitrateKbps = Math.round(((next.bytesSent - previous.bytesSent) * 8) / seconds / 1000);
+              next.receiveBitrateKbps = Math.round(
+                ((next.bytesReceived - previous.bytesReceived) * 8) / seconds / 1000
+              );
+            }
+            lastStatsRef.current = { at: now, bytesSent: next.bytesSent, bytesReceived: next.bytesReceived };
+          } catch (err: any) {
+            addLog(`getStats failed: ${err?.message || err}`);
+          }
+        } else {
+          lastStatsRef.current = null;
+        }
+
+        if (cancelled) return;
+        diagnosticsRef.current = next;
+        setDiagnostics(next);
+      } finally {
+        running = false;
+      }
+    };
+
+    void tick();
+    const timer = window.setInterval(() => void tick(), 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isJoined, wsStatus, remoteRole, iceInfo.hasTurn]);
+
+  // Any tap on the page is a chance to recover blocked remote audio. Kept as a
+  // document-level listener because the reported failure is easy to miss.
+  useEffect(() => {
+    const resume = () => {
+      const el = remoteAudioRef.current;
+      if (el?.srcObject && el.paused) {
+        el.muted = false;
+        el.play()
+          .then(() => {
+            setPlaybackBlocked(false);
+            addLog('Remote audio resumed after user interaction.');
+          })
+          .catch(() => {
+            setPlaybackBlocked(true);
+          });
+      }
+    };
+    document.addEventListener('pointerdown', resume);
+    document.addEventListener('keydown', resume);
+    return () => {
+      document.removeEventListener('pointerdown', resume);
+      document.removeEventListener('keydown', resume);
+    };
+  }, []);
+
   const getCustomerInviteUrl = () =>
     buildCustomerInviteUrl({
       configuredPublicUrl: publicAppUrl,
@@ -392,7 +718,18 @@ export const Prototype2View: React.FC = () => {
     pcGenerationRef.current = generation;
 
     addLog(`Initializing RTCPeerConnection for peer ${peer.role} (${peer.participantId.slice(0, 8)}).`);
-    const pc = new RTCPeerConnection(RTC_CONFIGURATION);
+    const iceServers = rtcConfigRef.current.iceServers ?? [];
+    const turnConfigured = iceServers.some((server) => {
+      const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+      return urls.some((url) => typeof url === 'string' && /^turns?:/i.test(url));
+    });
+    addLog(
+      `ICE configuration: ${iceServers.length} server entr${iceServers.length === 1 ? 'y' : 'ies'}, TURN ${
+        turnConfigured ? 'configured' : 'NOT configured (direct paths only)'
+      }.`
+    );
+    iceCandidateTypesRef.current = { host: 0, srflx: 0, relay: 0 };
+    const pc = new RTCPeerConnection(rtcConfigRef.current);
     pcRef.current = pc;
     remoteParticipantIdRef.current = peer.participantId;
     sessionIdRef.current = buildSessionId(participantIdRef.current, peer.participantId);
@@ -411,8 +748,29 @@ export const Prototype2View: React.FC = () => {
     pc.onicecandidate = (event) => {
       if (pcRef.current !== pc || pcGenerationRef.current !== generation) return;
       if (event.candidate) {
+        const type = event.candidate.type;
+        if (type === 'host' || type === 'srflx' || type === 'relay') {
+          iceCandidateTypesRef.current[type] += 1;
+        }
         sendSignal({ type: 'ice_candidate', candidate: event.candidate });
+      } else {
+        const gathered = iceCandidateTypesRef.current;
+        addLog(
+          `ICE gathering complete: host=${gathered.host}, srflx=${gathered.srflx}, relay=${gathered.relay}.`
+        );
+        if (gathered.relay === 0) {
+          addLog(
+            'No relay candidate was gathered: the peer-to-peer audio can only connect when both devices can reach each other directly (no TURN server configured).'
+          );
+        }
       }
+    };
+
+    pc.onicecandidateerror = (event: any) => {
+      if (pcRef.current !== pc || pcGenerationRef.current !== generation) return;
+      addLog(
+        `ICE server error (${event?.url || 'unknown'}): ${event?.errorCode || ''} ${event?.errorText || ''}`.trim()
+      );
     };
 
     pc.onconnectionstatechange = () => {
@@ -462,19 +820,13 @@ export const Prototype2View: React.FC = () => {
       if (pcRef.current !== pc || pcGenerationRef.current !== generation) return;
       addLog(`Received remote audio track from peer (${event.track.kind}).`);
       const stream = event.streams[0] ?? new MediaStream([event.track]);
-      if (remoteAudioRef.current) {
-        remoteAudioRef.current.srcObject = stream;
-        remoteAudioRef.current
-          .play()
-          .then(() => {
-            setPlaybackBlocked(false);
-            addLog('Playing remote audio stream live.');
-          })
-          .catch((err: any) => {
-            setPlaybackBlocked(true);
-            addLog(`Remote audio playback blocked: ${err?.message || err}`);
-          });
-      }
+      attachRemoteStream(stream);
+
+      // A remote track that mutes/unmutes mid-call explains "connected silence"
+      // far better than the connection state does, so surface it.
+      event.track.onmute = () => addLog('Remote audio track muted (no media arriving).');
+      event.track.onunmute = () => addLog('Remote audio track unmuted (media arriving).');
+      event.track.onended = () => addLog('Remote audio track ended.');
     };
 
     return pc;
@@ -543,9 +895,86 @@ export const Prototype2View: React.FC = () => {
     await makeOffer({ iceRestart: true, reason: 'ice failure recovery' });
   };
 
+  /**
+   * Replaces the track the peer connection is sending with a freshly captured
+   * microphone track. Used when the browser mutes/ends the original track,
+   * which happens on mobile when a second capture (the Ultravox AI session on
+   * the customer device) takes over the microphone.
+   */
+  const recoverP2PAudioTrack = async (reason: string) => {
+    if (micRecoveryInFlightRef.current) return;
+    const pc = pcRef.current;
+    if (!pc) return;
+
+    micRecoveryInFlightRef.current = true;
+    try {
+      addLog(`Recovering local microphone track for the peer connection (${reason})...`);
+      const stream = await ensureLocalStream(true);
+      const track = stream?.getAudioTracks()[0];
+      if (!track) {
+        addLog('Microphone recovery failed: no capture track available.');
+        return;
+      }
+      if (pcRef.current !== pc) return;
+
+      const audioSenders = pc.getSenders().filter((sender) => sender.track?.kind === 'audio');
+      if (audioSenders.length === 0) {
+        pc.addTrack(track, stream!);
+        addLog('Re-attached a local microphone track after the previous one was lost.');
+        return;
+      }
+      for (const sender of audioSenders) {
+        await sender.replaceTrack(track);
+      }
+      addLog('Replaced the outbound microphone track on the peer connection.');
+      if (roleRef.current === 'salesperson' && audioSenders.length > 0) {
+        // A replacement track needs a fresh offer for the peer to accept it on
+        // browsers that cannot renegotiate in place.
+        void makeOffer({ reason: 'microphone track recovery' });
+      }
+    } catch (err: any) {
+      addLog(`Microphone track recovery failed: ${err?.name || 'Error'} - ${err?.message || err}`);
+    } finally {
+      micRecoveryInFlightRef.current = false;
+    }
+  };
+
+  /**
+   * Watches the microphone track that feeds the peer connection. Silent
+   * "connected but no audio" failures are caused by the browser muting or
+   * ending this track after a second capture starts, so every transition is
+   * logged and recoverable.
+   */
+  const watchLocalTrack = (stream: MediaStream) => {
+    stream.getAudioTracks().forEach((track) => {
+      track.addEventListener('mute', () => {
+        addLog('Local microphone track was muted by the browser.');
+        if (micRecoveryTimerRef.current !== null) window.clearTimeout(micRecoveryTimerRef.current);
+        micRecoveryTimerRef.current = window.setTimeout(() => {
+          micRecoveryTimerRef.current = null;
+          if (track.muted && track.readyState === 'live') {
+            void recoverP2PAudioTrack('track muted');
+          }
+        }, 2000);
+      });
+      track.addEventListener('unmute', () => {
+        addLog('Local microphone track unmuted.');
+        if (micRecoveryTimerRef.current !== null) {
+          window.clearTimeout(micRecoveryTimerRef.current);
+          micRecoveryTimerRef.current = null;
+        }
+      });
+      track.addEventListener('ended', () => {
+        addLog('Local microphone track ended by the browser.');
+        void recoverP2PAudioTrack('track ended');
+      });
+    });
+  };
+
   /** Acquires the microphone only when there is no reusable live track. */
-  const ensureLocalStream = async (): Promise<MediaStream | null> => {
-    if (hasLiveAudioTrack(localStreamRef.current)) {
+  const ensureLocalStream = async (force = false): Promise<MediaStream | null> => {
+    if (!force && hasLiveAudioTrack(localStreamRef.current)) {
+
       addLog('Reusing existing live microphone stream (no new permission prompt).');
       return localStreamRef.current;
     }
@@ -558,7 +987,12 @@ export const Prototype2View: React.FC = () => {
       localStreamRef.current = stream;
       const track = stream.getAudioTracks()[0];
       setIsMuted(track ? !track.enabled : false);
-      addLog('Acquired local microphone stream for WebRTC conversation.');
+      watchLocalTrack(stream);
+      addLog(
+        `Acquired local microphone stream for WebRTC conversation (track ${track?.readyState ?? 'missing'}${
+          track?.muted ? ', muted' : ''
+        }).`
+      );
       return stream;
     } catch (err: any) {
       addLog(`Microphone access error: ${err?.name || 'Error'} - ${err?.message || err}`);
@@ -582,6 +1016,10 @@ export const Prototype2View: React.FC = () => {
     setReconnectAttempt(0);
     setAiSuggestions([]);
     addLog(`Joining Prototype 2 Room: "${roomId}" as Role: "${role.toUpperCase()}"`);
+
+    // Must run synchronously inside the click gesture: this is what allows the
+    // remote microphone to be played back later without a second tap.
+    void unlockRemoteAudio();
 
     const stream = await ensureLocalStream();
     if (!stream) {
@@ -1211,6 +1649,10 @@ export const Prototype2View: React.FC = () => {
 
   /** Stops microphone capture and releases the device. */
   const releaseLocalMedia = (reason: string) => {
+    if (micRecoveryTimerRef.current !== null) {
+      window.clearTimeout(micRecoveryTimerRef.current);
+      micRecoveryTimerRef.current = null;
+    }
     const stream = localStreamRef.current;
     localStreamRef.current = null;
     if (stream) {
@@ -1294,6 +1736,8 @@ export const Prototype2View: React.FC = () => {
     setWsStatus('connecting');
     closePeerConnection('manual retry');
 
+    void unlockRemoteAudio();
+
     const stream = await ensureLocalStream();
     if (!stream) {
       setCallState('mic_denied');
@@ -1321,6 +1765,24 @@ export const Prototype2View: React.FC = () => {
       if (audioTrack) {
         audioTrack.enabled = !audioTrack.enabled;
         setIsMuted(!audioTrack.enabled);
+        addLog(`Local microphone track ${audioTrack.enabled ? 'enabled' : 'disabled'} by user.`);
+      }
+    }
+
+    // The customer device captures the microphone twice (P2P call + Ultravox AI
+    // session). Muting only the P2P track would leave the AI listening, so the
+    // AI input is muted with the same control.
+    if (roleRef.current === 'customer' && ultravoxRef.current) {
+      try {
+        if (localStreamRef.current?.getAudioTracks()[0]?.enabled === false) {
+          ultravoxRef.current.muteMic();
+          addLog('Ultravox customer microphone muted.');
+        } else {
+          ultravoxRef.current.unmuteMic();
+          addLog('Ultravox customer microphone unmuted.');
+        }
+      } catch (err: any) {
+        addLog(`Ultravox mute toggle failed: ${err?.message || err}`);
       }
     }
   };
@@ -1340,8 +1802,38 @@ export const Prototype2View: React.FC = () => {
 
   return (
     <div className="flex-1 flex flex-col h-full min-h-0 bg-slate-950 text-slate-100 font-sans">
-      {/* Hidden audio element for remote peer audio playback */}
-      <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
+      {/*
+        Remote peer audio output. Kept in the DOM and NOT display:none so that
+        mobile browsers keep it eligible for playback; it is visually hidden but
+        still mounted.
+      */}
+      <audio
+        ref={remoteAudioRef}
+        autoPlay
+        playsInline
+        aria-hidden="true"
+        style={{ position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none' }}
+      />
+
+      {/* Blocking remote-audio banner: "connected but silent" is otherwise invisible. */}
+      {isJoined && playbackBlocked && (
+        <div className="bg-amber-500/15 border-b border-amber-500/40 px-4 py-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 shrink-0">
+          <div className="flex items-center gap-2">
+            <VolumeX className="w-4 h-4 text-amber-400 shrink-0" />
+            <span className="text-xs text-amber-100">
+              Your browser blocked playback of the other participant's microphone. Until you enable
+              it you will not hear them even though the call is connected.
+            </span>
+          </div>
+          <button
+            onClick={handleEnableRemoteAudio}
+            className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs flex items-center gap-1.5 shrink-0"
+          >
+            <Volume2 className="w-4 h-4" />
+            Enable Audio
+          </button>
+        </div>
+      )}
 
       {/* Error Alert */}
       {errorMessage && (
@@ -1506,12 +1998,44 @@ export const Prototype2View: React.FC = () => {
               {playbackBlocked && (
                 <button
                   onClick={handleEnableRemoteAudio}
-                  className="px-3 py-1 bg-amber-600 hover:bg-amber-500 text-white font-semibold rounded-lg text-xs flex items-center gap-1 shadow transition-colors"
+                  className="px-3 py-1 bg-amber-600 hover:bg-amber-500 text-white font-semibold rounded-lg text-xs flex items-center gap-1 shadow transition-colors sm:hidden"
                 >
                   <Volume2 className="w-3.5 h-3.5" />
-                  Enable Remote Audio
+                  Enable Audio
                 </button>
               )}
+
+              {isMuted && (
+                <span className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase bg-red-500/15 text-red-300 border border-red-500/40">
+                  Mic Muted
+                </span>
+              )}
+
+              <button
+                onClick={handleToggleMute}
+                className={`px-3 py-1 border font-semibold rounded-lg text-xs flex items-center gap-1 shadow transition-colors ${
+                  isMuted
+                    ? 'bg-red-600 hover:bg-red-500 text-white border-red-500'
+                    : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+                }`}
+                title={isMuted ? 'Unmute your microphone' : 'Mute your microphone'}
+              >
+                {isMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                {isMuted ? 'Unmute' : 'Mute'}
+              </button>
+
+              <button
+                onClick={() => setShowDiagnostics((prev) => !prev)}
+                className={`px-3 py-1 border font-semibold rounded-lg text-xs flex items-center gap-1 transition-colors ${
+                  showDiagnostics
+                    ? 'bg-slate-700 text-white border-slate-600'
+                    : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
+                }`}
+                title="Show live audio-path diagnostics"
+              >
+                <Radio className="w-3.5 h-3.5" />
+                Diagnostics
+              </button>
 
               {(callState === 'failed' || wsStatus === 'disconnected') && (
                 <button
@@ -1533,6 +2057,77 @@ export const Prototype2View: React.FC = () => {
               </button>
             </div>
           </header>
+
+          {/* Live audio-path diagnostics (both roles) */}
+          {showDiagnostics && (
+            <div className="bg-slate-900/95 border-b border-slate-800 px-4 py-3 text-[11px] font-mono shrink-0 max-h-64 overflow-y-auto">
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-bold uppercase tracking-wider text-slate-300">
+                  Audio Path Diagnostics
+                </span>
+                <span className="text-slate-500">{diagnostics?.updatedAt ?? 'collecting...'}</span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-1">
+                <DiagRow label="Signaling WS" value={diagnostics?.signaling ?? wsStatus} />
+                <DiagRow label="Peer" value={diagnostics?.peerRole ?? 'none'} />
+                <DiagRow label="PC / ICE state" value={`${diagnostics?.pcState ?? '-'} / ${diagnostics?.iceState ?? '-'}`} />
+                <DiagRow
+                  label="ICE candidates"
+                  value={
+                    diagnostics
+                      ? `host ${diagnostics.candidates.host} · srflx ${diagnostics.candidates.srflx} · relay ${diagnostics.candidates.relay}`
+                      : '-'
+                  }
+                />
+                <DiagRow
+                  label="Selected path"
+                  value={
+                    diagnostics
+                      ? `${diagnostics.selectedLocalType} → ${diagnostics.selectedRemoteType}${
+                          diagnostics.relayPath ? ' (TURN relay)' : ''
+                        }`
+                      : '-'
+                  }
+                />
+                <DiagRow label="TURN configured" value={iceInfo.hasTurn ? 'yes' : 'NO — direct paths only'} />
+                <DiagRow label="Local mic track" value={diagnostics?.localTrack ?? 'none'} />
+                <DiagRow label="Remote audio tracks" value={String(diagnostics?.remoteTracks ?? 0)} />
+                <DiagRow
+                  label="Audio element"
+                  value={
+                    diagnostics
+                      ? `${diagnostics.audioSrcAttached ? 'attached' : 'empty'} · ${
+                          diagnostics.audioMuted ? 'muted' : 'unmuted'
+                        } · ${diagnostics.audioPaused ? 'PAUSED' : 'playing'}`
+                      : '-'
+                  }
+                />
+                <DiagRow
+                  label="RTP send / receive"
+                  value={
+                    diagnostics
+                      ? `${diagnostics.sendBitrateKbps} kbps / ${diagnostics.receiveBitrateKbps} kbps`
+                      : '-'
+                  }
+                />
+                <DiagRow
+                  label="Audio clock"
+                  value={diagnostics ? `${diagnostics.audioCurrentTime}s` : '-'}
+                />
+                <DiagRow label="Role" value={role} />
+              </div>
+              {diagnostics &&
+                diagnostics.sendBitrateKbps === 0 &&
+                diagnostics.receiveBitrateKbps === 0 &&
+                diagnostics.pcState !== 'connected' && (
+                  <p className="mt-2 text-amber-300">
+                    No media path yet. If this stays at 0/0 while the AI text keeps working, the two
+                    devices cannot reach each other directly — configure TURN_URLS / TURN_USERNAME /
+                    TURN_CREDENTIAL on the server.
+                  </p>
+                )}
+            </div>
+          )}
 
           {/* Main Content View Split */}
           {role === 'salesperson' ? (

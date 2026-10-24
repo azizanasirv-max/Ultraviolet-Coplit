@@ -38,6 +38,57 @@ interface RoomState {
 const MAX_CLIENTS_PER_ROOM = 2;
 const MAX_ROOM_ID_LENGTH = 128;
 
+const DEFAULT_STUN_URLS = [
+  'stun:stun.l.google.com:19302',
+  'stun:stun1.l.google.com:19302',
+  'stun:stun2.l.google.com:19302',
+];
+
+const parseUrlList = (value: unknown): string[] =>
+  typeof value === 'string'
+    ? value
+        .split(',')
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+    : [];
+
+/**
+ * ICE server list for the peer-to-peer (human to human) audio call.
+ *
+ * STUN alone only works when the two devices can reach each other directly.
+ * When either side is behind a symmetric NAT / carrier-grade NAT (for example a
+ * phone on mobile data) no direct path exists and media can never flow, even
+ * though signalling and the AI pipeline keep working. A TURN relay is the only
+ * fix for that case, so it must be configurable per deployment.
+ */
+const buildIceServers = (): RTCIceServerLike[] => {
+  const stunUrls = parseUrlList(process.env.STUN_URLS);
+  const turnUrls = parseUrlList(process.env.TURN_URLS);
+  const turnUsername = process.env.TURN_USERNAME || '';
+  const turnCredential = process.env.TURN_CREDENTIAL || '';
+
+  const iceServers: RTCIceServerLike[] = [
+    { urls: stunUrls.length > 0 ? stunUrls : DEFAULT_STUN_URLS },
+  ];
+
+  if (turnUrls.length > 0) {
+    iceServers.push({ urls: turnUrls, username: turnUsername, credential: turnCredential });
+  }
+
+  return iceServers;
+};
+
+interface RTCIceServerLike {
+  urls: string | string[];
+  username?: string;
+  credential?: string;
+}
+
+/** Optional relay-only mode for deployments whose networks block direct media. */
+const resolveIceTransportPolicy = (): 'all' | 'relay' =>
+  process.env.ICE_TRANSPORT_POLICY === 'relay' ? 'relay' : 'all';
+
+
 const isValidRole = (value: unknown): value is ParticipantRole =>
   value === 'customer' || value === 'salesperson';
 
@@ -317,6 +368,29 @@ async function startServer() {
     }
   });
 
+  // ICE configuration for the peer-to-peer human-to-human audio call. The
+  // browser cannot read deployment secrets directly, so STUN/TURN servers are
+  // resolved here (and only here) from the server environment.
+  app.get('/api/ice-config', (_req, res) => {
+    const iceServers = buildIceServers();
+    const hasTurn = iceServers.some((server) => {
+      const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+      return urls.some((url) => typeof url === 'string' && /^turns?:/i.test(url));
+    });
+
+    res.json({
+      iceServers,
+      hasTurn,
+      hasStun: iceServers.some((server) => {
+        const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+        return urls.some((url) => typeof url === 'string' && /^stuns?:/i.test(url));
+      }),
+      // Advertised so both devices can show the same ICE policy in diagnostics.
+      iceTransportPolicy: resolveIceTransportPolicy(),
+      timestamp: new Date().toISOString(),
+    });
+  });
+
   // Health check endpoint
   app.get('/api/health', (_req, res) => {
     // Explicit public deployment URL used to build customer invitation links.
@@ -334,6 +408,7 @@ async function startServer() {
       hasUltravoxKey: Boolean(
         process.env.ULTRAVOX_API_KEY && process.env.ULTRAVOX_API_KEY !== 'MY_ULTRAVOX_API_KEY'
       ),
+      hasTurn: Boolean(parseUrlList(process.env.TURN_URLS).length),
       activeRooms: rooms.size,
       model: 'ultravox-v0.7',
       publicAppUrl,
