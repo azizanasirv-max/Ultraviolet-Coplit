@@ -1,0 +1,6 @@
+{
+  "name": "Sales Copilot - Prototype 1",
+  "description": "Minimal single-speaker voice copilot using Ultravox ultravox-v0.7 API with live audio transcript inspection, connection diagnostics, and validation logging.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
