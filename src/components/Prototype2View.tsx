@@ -119,8 +119,17 @@ const STATUS_TONE_CLASS: Record<CallStatusMeta['tone'], string> = {
 
 export const Prototype2View: React.FC = () => {
   // Navigation & Room Parameters
-  const [roomId, setRoomId] = useState<string>('room-101');
-  const [role, setRole] = useState<ParticipantRole>('salesperson');
+  // Initialize synchronously from the URL so an invitation never renders (or
+  // joins) the default room for a frame before the query parameters apply.
+  const [roomId, setRoomId] = useState<string>(() => {
+    const roomParam = new URLSearchParams(window.location.search).get('room');
+    return roomParam || 'room-101';
+  });
+  const [role, setRole] = useState<ParticipantRole>(() =>
+    new URLSearchParams(window.location.search).get('role') === 'customer'
+      ? 'customer'
+      : 'salesperson'
+  );
   const [isJoined, setIsJoined] = useState<boolean>(false);
   const [copiedLink, setCopiedLink] = useState<boolean>(false);
 
@@ -189,18 +198,6 @@ export const Prototype2View: React.FC = () => {
     console.log(formatted);
     setLogs((prev) => [...prev.slice(-30), formatted]);
   };
-
-  // Parse URL query parameters on load
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const roomParam = params.get('room');
-    const roleParam = params.get('role');
-
-    if (roomParam) setRoomId(roomParam);
-    if (roleParam === 'customer' || roleParam === 'salesperson') {
-      setRole(roleParam);
-    }
-  }, []);
 
   // Load the configured public deployment URL (APP_URL) for customer invites
   useEffect(() => {
