@@ -45,6 +45,7 @@ export interface SessionSignalingCounters {
   offers: number;
   answers: number;
   iceCandidates: number;
+  restartRequests: number;
   aiSuggestions: number;
   rejectedMessages: number;
   relayFailures: number;
@@ -230,6 +231,7 @@ export class SessionStore {
         offers: 0,
         answers: 0,
         iceCandidates: 0,
+        restartRequests: 0,
         aiSuggestions: 0,
         rejectedMessages: 0,
         relayFailures: 0,
@@ -580,7 +582,14 @@ export class SessionStore {
 
   countSignal(
     sessionId: string,
-    kind: 'offers' | 'answers' | 'iceCandidates' | 'aiSuggestions' | 'rejectedMessages' | 'relayFailures'
+    kind:
+      | 'offers'
+      | 'answers'
+      | 'iceCandidates'
+      | 'restartRequests'
+      | 'aiSuggestions'
+      | 'rejectedMessages'
+      | 'relayFailures'
   ): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;

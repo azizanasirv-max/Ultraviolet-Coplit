@@ -78,6 +78,7 @@ export interface SessionDiagnosticsResponse {
       offers: number;
       answers: number;
       iceCandidates: number;
+      restartRequests: number;
       aiSuggestions: number;
       rejectedMessages: number;
       relayFailures: number;

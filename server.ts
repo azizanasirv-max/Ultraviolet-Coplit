@@ -1020,6 +1020,28 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
         return;
       }
 
+      /**
+       * The customer may ask the salesperson to restart the media path. The
+       * customer is the answerer, so only the salesperson can create the
+       * ICE-restart offer; this message is role-checked and relayed, never
+       * broadcast, and carries no media or private data.
+       */
+      if (type === 'restart_request') {
+        if (state.role !== 'customer') {
+          rejectMessage(
+            session.sessionId,
+            'INVALID_SIGNALING_ROLE',
+            'Only the customer may request a connection restart.'
+          );
+          return;
+        }
+        store.countSignal(session.sessionId, 'restartRequests');
+        relayToCounterpart(session, current, 'restart_request', {
+          reason: typeof data.reason === 'string' ? data.reason.slice(0, 120) : 'customer requested',
+        });
+        return;
+      }
+
       if (type === 'offer') {
         if (state.role !== 'salesperson') {
           rejectMessage(session.sessionId, 'INVALID_SIGNALING_ROLE', 'Only the salesperson may send an offer.');

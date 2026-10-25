@@ -76,9 +76,14 @@ const waitFor = async <T>(fn: () => Promise<T | null>, predicate: (value: T) => 
   throw new Error(`Condition not met within ${timeoutMs}ms. Last value: ${JSON.stringify(last)}`);
 };
 
-const openContext = async (browser: Browser): Promise<BrowserContext> => {
+const openContext = async (
+  browser: Browser,
+  options: { delayIceMs?: number } = {}
+): Promise<BrowserContext> => {
   const context = await browser.newContext({ permissions: ['microphone'] });
   await context.addInitScript(() => {
+    // esbuild/tsx keepNames can emit `__name(...)` in evaluated functions.
+    if (typeof (window as any).__name !== 'function') (window as any).__name = (fn: any) => fn;
     const Original = window.RTCPeerConnection;
     (window as any).__pcs = [];
     (window as any).RTCPeerConnection = function (...args: any[]) {
@@ -87,7 +92,59 @@ const openContext = async (browser: Browser): Promise<BrowserContext> => {
       return pc;
     };
     (window as any).RTCPeerConnection.prototype = Original.prototype;
+
+    // Count outgoing signaling messages without changing their content.
+    const OriginalWs = window.WebSocket;
+    (window as any).__wsSent = [];
+    const Wrapped = function (url: string, protocols?: string | string[]) {
+      const socket = protocols === undefined ? new OriginalWs(url) : new OriginalWs(url, protocols);
+      const send = socket.send.bind(socket);
+      socket.send = (data: string) => {
+        try {
+          const parsed = JSON.parse(String(data));
+          (window as any).__wsSent.push(parsed.type);
+        } catch {
+          // Ignore non-JSON payloads.
+        }
+        return send(data);
+      };
+      (window as any).__ws = socket;
+      return socket;
+    } as any;
+    Wrapped.prototype = OriginalWs.prototype;
+    Wrapped.CONNECTING = 0;
+    Wrapped.OPEN = 1;
+    Wrapped.CLOSING = 2;
+    Wrapped.CLOSED = 3;
+    (window as any).WebSocket = Wrapped;
   });
+  if (options.delayIceMs) {
+    // Hold trickled candidates so ICE setup stays in `connecting` long enough
+    // for the server's presence updates to arrive (the original defect window).
+    await context.routeWebSocket(/\/ws(?:\?.*)?$/, (ws) => {
+      const server = ws.connectToServer();
+      ws.onMessage((message) => server.send(message));
+      server.onMessage((message) => {
+        let text = '';
+        try {
+          text = typeof message === 'string' ? message : Buffer.from(message as any).toString();
+        } catch {
+          // Ignore binary decode errors.
+        }
+        if (text.includes('"type":"ice_candidate"')) {
+          setTimeout(() => {
+            try {
+              ws.send(message);
+            } catch {
+              // Socket closed.
+            }
+          }, options.delayIceMs);
+        } else {
+          ws.send(message);
+        }
+      });
+    });
+  }
   return context;
 };
 
@@ -831,4 +888,136 @@ test('relay-only mode without TURN refuses to start instead of silently using ST
   assert.equal(await page.locator('[data-testid="ice-error"]').count(), 1);
 
   await context.close();
+});
+
+test('presence refreshes during slow ICE setup do not create duplicate offers', async (t) => {
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const base = `http://127.0.0.1:${server.port}`;
+  const browser = await launchBrowser();
+  t.after(async () => {
+    await browser.close();
+    await server.close();
+  });
+
+  // Delay trickled candidates so the PC stays in `connecting` while the server
+  // sends presence updates (the window that used to trigger a second offer).
+  const salespersonContext = await openContext(browser, { delayIceMs: 1500 });
+  const customerContext = await openContext(browser, { delayIceMs: 1500 });
+  const salespersonPage = await salespersonContext.newPage();
+  const customerPage = await customerContext.newPage();
+
+  await salespersonPage.goto(`${base}/sales`, { waitUntil: 'domcontentloaded' });
+  const inviteUrl = await readInvitationAndOpenDashboard(salespersonPage);
+  await customerPage.goto(inviteUrl, { waitUntil: 'domcontentloaded' });
+  await customerPage.waitForSelector('[data-testid="customer-prejoin"]', { timeout: 20000 });
+  await salespersonPage.click('[data-testid="join-call"]');
+  await customerPage.click('[data-testid="join-call"]');
+
+  const connected = await waitFor(
+    () => snapshot(salespersonPage),
+    (value) => value.callState === 'connected' && value.mediaFlowing,
+    45000
+  );
+
+  const sales = await salespersonPage.evaluate(() => ({
+    pcs: ((window as any).__pcs as any[]).map((pc) => ({
+      connectionState: pc.connectionState,
+      signalingState: pc.signalingState,
+    })),
+  }));
+  const customer = await customerPage.evaluate(() => ({
+    pcs: ((window as any).__pcs as any[]).map((pc) => ({
+      connectionState: pc.connectionState,
+      signalingState: pc.signalingState,
+    })),
+  }));
+
+  const stored = await salespersonPage.evaluate(() =>
+    JSON.parse(localStorage.getItem('sc.prototype2.salesperson') || '{}')
+  );
+  const diagnosticsResponse = await fetch(`${base}/api/sessions/${stored.sessionId}/diagnostics`, {
+    headers: { Authorization: `Bearer ${stored.salespersonKey}` },
+  });
+  assert.equal(diagnosticsResponse.status, 200);
+  const diagnostics = (await diagnosticsResponse.json()).diagnostics;
+
+  assert.equal(connected.diagnostics.bytesSent > 0, true);
+  assert.equal(sales.pcs.length, 1, 'exactly one peer connection on the offerer');
+  assert.equal(customer.pcs.length, 1, 'exactly one peer connection on the answerer');
+  assert.equal(sales.pcs[0].signalingState, 'stable');
+  assert.equal(customer.pcs[0].signalingState, 'stable');
+  assert.equal(diagnostics.signals.offers, 1, 'the server relayed exactly one offer');
+  assert.equal(diagnostics.signals.restartRequests, 0);
+  assert.equal(
+    connected.logs.some((line: string) => /presence refresh: session_state\]/i.test(line)),
+    false,
+    'presence refresh must not send an offer'
+  );
+  const customerSnapshot = await snapshot(customerPage);
+  assert.equal(
+    customerSnapshot.logs.some((line: string) => /Ignoring duplicate offer/i.test(line)),
+    false,
+    'the answerer must not have received a duplicate offer'
+  );
+});
+
+test('an unreachable relay ends in a terminal, actionable failure without peer-connection churn', async (t) => {
+  const restoreEnv = applyIceEnv({
+    TURN_URLS: 'turn:127.0.0.1:9?transport=udp',
+    TURN_USERNAME: 'mock-turn-user',
+    TURN_CREDENTIAL: 'mock-turn-pass',
+    TURN_SECRET: null,
+    ICE_TRANSPORT_POLICY: 'relay',
+    STUN_URLS: null,
+  });
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const base = `http://127.0.0.1:${server.port}`;
+  const browser = await launchBrowser();
+  t.after(async () => {
+    await browser.close();
+    await server.close();
+    restoreEnv();
+  });
+
+  const salespersonContext = await openContext(browser);
+  const customerContext = await openContext(browser);
+  const salespersonPage = await salespersonContext.newPage();
+  const customerPage = await customerContext.newPage();
+
+  await salespersonPage.goto(`${base}/sales`, { waitUntil: 'domcontentloaded' });
+  const inviteUrl = await readInvitationAndOpenDashboard(salespersonPage);
+  await customerPage.goto(inviteUrl, { waitUntil: 'domcontentloaded' });
+  await customerPage.waitForSelector('[data-testid="customer-prejoin"]', { timeout: 20000 });
+  await salespersonPage.click('[data-testid="join-call"]');
+  await customerPage.click('[data-testid="join-call"]');
+
+  // ICE failure is detected after ~15 s; the bounded restarts then run to
+  // exhaustion. This is intentionally the longest browser test.
+  const failed = await waitFor(
+    () => snapshot(salespersonPage),
+    (value) => value.callState === 'failed' && Boolean(value.lastError),
+    120000
+  );
+
+  assert.match(String(failed.lastError), /Could not restore|did not answer|Retry the connection/i);
+  assert.equal(failed.recovery.phase, 'exhausted');
+  assert.equal(failed.mediaFlowing, false);
+  assert.notEqual(failed.callState, 'connected');
+
+  const readPcs = () =>
+    salespersonPage.evaluate(() => ({
+      total: ((window as any).__pcs as any[]).length,
+      open: ((window as any).__pcs as any[]).filter((pc) => pc.connectionState !== 'closed').length,
+    }));
+
+  const first = await readPcs();
+  assert.equal(first.total, 1, 'terminal failure must not recreate the peer connection');
+  assert.equal(first.open, 0, 'the failed connection is closed');
+
+  // Presence updates continue; none may recreate the PC after terminal failure.
+  await sleep(6000);
+  const second = await readPcs();
+  assert.equal(second.total, 1, 'no peer-connection churn after terminal failure');
+  assert.equal((await snapshot(salespersonPage)).callState, 'failed');
+  assert.equal((await snapshot(salespersonPage)).mediaFlowing, false);
 });

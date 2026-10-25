@@ -1145,3 +1145,55 @@ test('prototype2 AI status reaches the salesperson and never leaks connection se
   assert.equal(fresh.body.session.ai.connected, false);
 });
 
+
+test('customer connection-restart requests are role-checked and relayed only to the salesperson', async (t) => {
+  const harness = await startServer();
+  t.after(async () => {
+    await harness.close();
+  });
+
+  const fixture = await createFixture(harness.base, 'Restart');
+  const salesperson = await openSocket(harness.base);
+  const customer = await openSocket(harness.base);
+  t.after(() => {
+    salesperson.close();
+    customer.close();
+  });
+
+  const salesJoin = await join(salesperson, {
+    sessionId: fixture.sessionId,
+    role: 'salesperson',
+    credential: fixture.salespersonKey,
+  });
+  const customerJoin = await join(customer, {
+    sessionId: fixture.sessionId,
+    role: 'customer',
+    credential: fixture.customerKey,
+  });
+  assert.equal(salesJoin.type, 'joined');
+  assert.equal(customerJoin.type, 'joined');
+
+  // Only the customer may ask for a media restart.
+  salesperson.send({ type: 'restart_request', sessionId: fixture.sessionId, reason: 'spoofed' });
+  const rejection = await salesperson.next(
+    (message) => message.type === 'error' && message.code === 'INVALID_SIGNALING_ROLE'
+  );
+  assert.match(rejection.message, /Only the customer/);
+
+  // The request is relayed to the counterpart only, with a bounded reason.
+  customer.send({
+    type: 'restart_request',
+    sessionId: fixture.sessionId,
+    reason: `media failed ${'x'.repeat(300)}`,
+  });
+  const relayed = await salesperson.next((message) => message.type === 'restart_request');
+  assert.equal(relayed.from, customerJoin.participantId);
+  assert.equal(relayed.reason.length, 120);
+  assert.doesNotMatch(JSON.stringify(relayed), /salespersonKey|customerKey|sdp|credential/i);
+
+  // The customer never receives its own request.
+  await assert.rejects(
+    customer.next((message) => message.type === 'restart_request', 500),
+    /timed out/i
+  );
+});
