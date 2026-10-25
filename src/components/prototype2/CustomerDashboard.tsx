@@ -55,6 +55,18 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
     };
   }, []);
 
+  // Exposed for diagnostics tooling and automated browser tests (read-only).
+  useEffect(() => {
+    (window as any).__prototype2 = {
+      role: 'customer',
+      getSnapshot: () => engineRef.current?.getSnapshot() ?? null,
+      getSessionId: () => redeemed?.sessionId ?? null,
+    };
+    return () => {
+      delete (window as any).__prototype2;
+    };
+  }, [redeemed]);
+
   const redeem = useCallback(async () => {
     if (legacyInvitation) {
       setStatus('invalid');
@@ -193,7 +205,9 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
             </div>
             <div>
               <h1 className="text-base font-bold text-slate-100">Customer call</h1>
-              <p className="text-[11px] text-slate-400 font-mono">session {redeemed?.sessionId.slice(0, 10)}</p>
+              <p className="text-[11px] text-slate-400 font-mono">
+                {customerName ? `${customerName} · ` : ''}session {redeemed?.sessionId.slice(0, 10)}
+              </p>
             </div>
           </div>
           <span className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${

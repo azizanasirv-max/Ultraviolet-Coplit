@@ -152,6 +152,8 @@ export class SessionStore {
   private readonly sessions = new Map<string, SessionRecord>();
   /** invitation token hash -> session id, for O(1) redemption. */
   private readonly invitationIndex = new Map<string, string>();
+  /** revoked/replaced token hash -> session id, so clients get a precise error. */
+  private readonly revokedInvitationIndex = new Map<string, string>();
   /** participant id -> session id. */
   private readonly participantIndex = new Map<string, string>();
   private readonly sessionTtlMs: number;
@@ -250,6 +252,7 @@ export class SessionStore {
     if (session.invitation) {
       session.invitation.status = 'revoked';
       this.invitationIndex.delete(session.invitation.tokenHash);
+      this.revokedInvitationIndex.set(session.invitation.tokenHash, session.sessionId);
     }
 
     const token = secret();
@@ -281,6 +284,14 @@ export class SessionStore {
     // A customer key alone cannot redeem a *different* invitation, but it does
     // allow the same customer to rejoin after the link was consumed.
     if (!sessionId) {
+      const revokedSessionId = this.revokedInvitationIndex.get(tokenHash);
+      if (revokedSessionId) {
+        return {
+          ok: false,
+          code: 'INVITE_REVOKED',
+          message: 'This invitation was replaced or revoked by the salesperson.',
+        };
+      }
       if (existingCustomerKey) {
         for (const session of this.sessions.values()) {
           if (
@@ -550,6 +561,7 @@ export class SessionStore {
     if (!session || !session.invitation) return false;
     session.invitation.status = 'revoked';
     this.invitationIndex.delete(session.invitation.tokenHash);
+    this.revokedInvitationIndex.set(session.invitation.tokenHash, session.sessionId);
     return true;
   }
 
@@ -630,6 +642,10 @@ export class SessionStore {
         if (session.customer) this.participantIndex.delete(session.customer.participantId);
         this.sessions.delete(session.sessionId);
       }
+    }
+
+    for (const [tokenHash, sessionId] of this.revokedInvitationIndex) {
+      if (!this.sessions.has(sessionId)) this.revokedInvitationIndex.delete(tokenHash);
     }
   }
 

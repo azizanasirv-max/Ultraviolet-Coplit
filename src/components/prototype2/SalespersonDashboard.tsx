@@ -120,6 +120,18 @@ export const SalespersonDashboard: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [createFreshSession]);
 
+  // Exposed for diagnostics tooling and automated browser tests (read-only).
+  useEffect(() => {
+    (window as any).__prototype2 = {
+      role: 'salesperson',
+      getSnapshot: () => engineRef.current?.getSnapshot() ?? null,
+      getServerSession: () => sessionState,
+    };
+    return () => {
+      delete (window as any).__prototype2;
+    };
+  }, [sessionState]);
+
   useEffect(() => {
     void boot();
     // eslint-disable-next-line react-hooks/exhaustive-deps

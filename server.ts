@@ -289,13 +289,6 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     const session = requireSalesperson(req, res);
     if (!session) return;
     const diagnostics = store.diagnostics(session);
-    for (const participant of diagnostics.participants) {
-      if (!participant.connected) {
-        console.warn(
-          `[session:${session.sessionId.slice(0, 8)}] diagnostics: ${participant.role} not connected`
-        );
-      }
-    }
     res.json({
       diagnostics,
       ice: {
@@ -389,10 +382,10 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       return;
     }
 
+    // The prompt is operator-controlled: a customer must not be able to steer the
+    // paid model with arbitrary instructions.
     const systemPrompt =
-      typeof req.body?.systemPrompt === 'string' && req.body.systemPrompt.trim()
-        ? req.body.systemPrompt.slice(0, 4000)
-        : 'You are an AI sales copilot assisting a salesperson in a live sales call. Listen attentively to the customer statements, questions, and objections. Generate concise, natural, 1-2 sentence ready-to-read sales responses and qualification questions for the salesperson to read aloud.';
+      'You are an AI sales copilot assisting a salesperson in a live sales call. Listen attentively to the customer statements, questions, and objections. Generate concise, natural, 1-2 sentence ready-to-read sales responses and qualification questions for the salesperson to read aloud.';
 
     try {
       const response = await fetchImpl('https://api.ultravox.ai/api/calls', {

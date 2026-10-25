@@ -12,6 +12,7 @@
  * always the answerer. This removes glare by construction.
  */
 import { UltravoxSession, UltravoxSessionStatus, Role, Medium } from 'ultravox-client';
+import { getIceConfig } from './sessionApi';
 
 export type ParticipantRole = 'customer' | 'salesperson';
 export type WsStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
@@ -433,7 +434,11 @@ export class CallEngine {
   setSpeakerMuted(muted: boolean): void {
     this.speakerMuted = muted;
     if (this.audioElement) this.audioElement.muted = muted;
-    this.log(muted ? 'Salesperson audio playback muted locally.' : 'Salesperson audio playback unmuted.');
+    this.log(
+      muted
+        ? `${this.options.role === 'customer' ? 'Salesperson' : 'Customer'} audio playback muted locally.`
+        : `${this.options.role === 'customer' ? 'Salesperson' : 'Customer'} audio playback unmuted.`
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -449,6 +454,8 @@ export class CallEngine {
 
     this.setState({ callState: 'requesting_mic', lastError: null });
     void this.unlockAudio();
+
+    await this.loadIceConfig();
 
     const stream = await this.ensureLocalStream();
     if (!stream) {
@@ -493,6 +500,35 @@ export class CallEngine {
     this.wsStatus = 'disconnected';
     this.callState = 'ended';
     this.log(`Call stopped (${reason}).`);
+  }
+
+  /**
+   * Loads the deployment's STUN/TURN configuration. Without this the browser
+   * would only use STUN and every mobile-data / symmetric-NAT pair would be
+   * silent in both directions.
+   */
+  private async loadIceConfig(): Promise<void> {
+    try {
+      const config = await getIceConfig();
+      this.iceConfig = {
+        iceServers: Array.isArray(config.iceServers) && config.iceServers.length
+          ? config.iceServers
+          : DEFAULT_ICE.iceServers,
+        hasTurn: Boolean(config.hasTurn),
+        hasStun: Boolean(config.hasStun),
+        iceTransportPolicy: config.iceTransportPolicy === 'relay' ? 'relay' : 'all',
+      };
+      this.diagnostics = {
+        ...this.diagnostics,
+        hasTurn: this.iceConfig.hasTurn,
+        iceTransportPolicy: this.iceConfig.iceTransportPolicy,
+      };
+      this.log(
+        `ICE configuration loaded (TURN ${this.iceConfig.hasTurn ? 'configured' : 'not configured'}, policy ${this.iceConfig.iceTransportPolicy}).`
+      );
+    } catch (err) {
+      this.log(`ICE configuration unavailable, using STUN defaults: ${(err as Error)?.message || err}`);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -559,6 +595,15 @@ export class CallEngine {
       } catch {
         // Ignore unsupported transitions before the AI session is live.
       }
+    }
+
+    const track = this.localStream?.getAudioTracks()[0];
+    if (track) {
+      // Keep the diagnostics view truthful immediately, not at the next sample.
+      this.diagnostics = {
+        ...this.diagnostics,
+        localTrackState: `${track.readyState}${track.enabled ? '' : ' (disabled)'}${track.muted ? ' (muted)' : ''}`,
+      };
     }
 
     this.log(
@@ -840,7 +885,8 @@ export class CallEngine {
         pc.ontrack = null;
         pc.onconnectionstatechange = null;
         pc.oniceconnectionstatechange = null;
-        pc.getSenders().forEach((sender) => sender.track?.stop && sender.track.stop());
+        // The sender tracks belong to this.localStream and may be reused by the
+        // next peer connection, so they are stopped only in releaseLocalMedia().
         pc.close();
       } catch {
         // Ignore close errors.
@@ -1075,7 +1121,8 @@ export class CallEngine {
 
   private applyPeers(
     peers: Array<{ participantId: string; role: ParticipantRole }>,
-    source: string
+    source: string,
+    options: { forceRecreate?: boolean } = {}
   ): void {
     const counterpart =
       peers.find((peer) => peer.participantId !== this.participantId && peer.role !== this.options.role) ??
@@ -1092,6 +1139,7 @@ export class CallEngine {
 
     const pc = this.pc;
     if (
+      !options.forceRecreate &&
       this.peerParticipantId === counterpart.participantId &&
       pc &&
       pc.connectionState !== 'failed' &&
@@ -1181,9 +1229,12 @@ export class CallEngine {
       if (peer.participantId === this.participantId) return;
       this.log(`Peer joined: ${peer.role}.`);
       this.participants = Array.isArray(data.participants) ? data.participants : this.participants;
-      this.applyPeers([
-        { participantId: peer.participantId, role: peer.role === 'customer' ? 'customer' : 'salesperson' },
-      ], 'peer_joined');
+      this.applyPeers(
+        [{ participantId: peer.participantId, role: peer.role === 'customer' ? 'customer' : 'salesperson' }],
+        'peer_joined',
+        // peer_joined always announces a fresh connection for that identity.
+        { forceRecreate: true }
+      );
       this.emit();
       return;
     }
@@ -1476,11 +1527,11 @@ export class CallEngine {
     const session = this.ultravox;
     this.ultravox = null;
     if (!session) return;
-    try {
-      await session.leaveCall();
-    } catch {
-      // Ignore teardown errors.
-    }
+    // leaveCall() can wait on a transport that never connected, which must never
+    // delay leaving the human call.
+    void Promise.resolve()
+      .then(() => session.leaveCall())
+      .catch(() => undefined);
     this.aiStatus = 'off';
   }
 
@@ -1617,4 +1668,3 @@ export class CallEngine {
   }
 }
 
-export const getEngineSnapshotForTests = (engine: CallEngine): EngineSnapshot => engine.getSnapshot();

@@ -10,8 +10,11 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "diag:signaling": "node scripts/signaling-relay-test.mjs",
-    "diag:p2p": "node scripts/p2p-audio-diagnostic.mjs"
+    "test": "npm run test:unit && npm run test:signaling",
+    "test:unit": "node --import tsx --test tests/sessionStore.test.ts",
+    "test:signaling": "node --import tsx --test tests/signaling.test.ts",
+    "test:browser": "node --import tsx --test tests/browser-audio.test.ts",
+    "test:all": "npm run test && npm run test:browser"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

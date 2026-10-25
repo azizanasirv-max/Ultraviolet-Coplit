@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Local browser test dependencies (no root in sandbox)
+.browser-libs/
