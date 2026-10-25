@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle, Check, Copy, Headphones, Link2, Mic, MicOff, PhoneCall, PhoneOff,
-  RefreshCw, ShieldCheck, Sparkles, Users, Volume2, VolumeX, Activity, UserRound,
+  RefreshCw, ShieldCheck, UserRound, Volume2, VolumeX,
 } from 'lucide-react';
 import { CallEngine, EngineSnapshot, ParticipantRole } from '../../lib/callEngine';
 import { AiLifecycleState, aiStateLabel, aiTone } from '../../lib/aiStatus';
@@ -14,25 +14,34 @@ import {
   loadResumeToken, loadSalespersonSession, saveDisplayName, saveResumeToken,
   saveSalespersonSession,
 } from '../../lib/participantStorage';
-import { Banner, DiagGrid, Panel, StatusLine, timeLeft } from './ui';
+import { Banner, StatusLine, timeLeft } from './ui';
+import {
+  AiStateChip, AiSuggestionPanel, CustomerTranscriptPanel, DiagnosticsPanel, DiagnosticsToggle,
+} from './SalespersonPanels';
 
 const ROLE: ParticipantRole = 'salesperson';
 
 type StatusTone = 'emerald' | 'amber' | 'red' | 'slate' | 'indigo';
 
+const TONE_BORDER: Record<StatusTone, string> = {
+  emerald: 'border-emerald-500/40 text-emerald-300 bg-emerald-500/10',
+  amber: 'border-amber-500/40 text-amber-300 bg-amber-500/10',
+  red: 'border-rose-500/40 text-rose-300 bg-rose-500/10',
+  slate: 'border-slate-700 text-slate-400 bg-slate-900',
+  indigo: 'border-indigo-500/40 text-indigo-300 bg-indigo-500/10',
+};
+
 /**
  * "Connected" alone is not proof of audio: ICE/DTLS can connect while no RTP
- * arrives (blocked relay, rejected TURN credentials, muted remote track). The
- * label only claims working audio once RTP has actually been received.
+ * arrives. The label only claims working audio once RTP has been received.
  */
 const callStateLabel = (snapshot: EngineSnapshot | null): { label: string; tone: StatusTone } => {
-  const state = snapshot?.callState ?? 'idle';
-  switch (state) {
+  switch (snapshot?.callState ?? 'idle') {
     case 'connected':
       return snapshot?.mediaFlowing
         ? { label: 'Audio flowing', tone: 'emerald' }
         : { label: 'Connected — waiting for media', tone: 'amber' };
-    case 'disconnected': return { label: 'Peer disconnected', tone: 'red' };
+    case 'disconnected': return { label: 'Customer disconnected', tone: 'red' };
     case 'connecting': return { label: 'Connecting audio', tone: 'amber' };
     case 'waiting': return { label: 'Waiting for customer', tone: 'amber' };
     case 'requesting_mic': return { label: 'Requesting microphone', tone: 'amber' };
@@ -132,7 +141,7 @@ export const SalespersonDashboard: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [createFreshSession]);
 
-  // Exposed for diagnostics tooling and automated browser tests (read-only).
+  // Read-only hook for diagnostics tooling and automated tests.
   useEffect(() => {
     (window as any).__prototype2 = {
       role: 'salesperson',
@@ -149,8 +158,7 @@ export const SalespersonDashboard: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Poll the server-side session view so "customer connected" is authoritative,
-  // not inferred from local WebSocket state alone.
+  // Poll the server-side session view so "customer connected" is authoritative.
   useEffect(() => {
     if (!session) return;
     let cancelled = false;
@@ -159,7 +167,7 @@ export const SalespersonDashboard: React.FC = () => {
         const { session: state } = await getSession(session.sessionId, session.salespersonKey);
         if (!cancelled) setSessionState(state);
       } catch {
-        // Keep the last known state; the engine reports transport failures itself.
+        // Keep the last known state; the engine reports transport failures.
       }
     };
     void tick();
@@ -197,6 +205,9 @@ export const SalespersonDashboard: React.FC = () => {
       role: ROLE,
       credential: session.salespersonKey,
       resumeToken: loadResumeToken(session.sessionId, ROLE),
+      // Salesperson: caption my own microphone for the customer transcript.
+      // This engine never creates an Ultravox session (enableAi is customer-only).
+      enableTranscript: true,
       onUpdate: (next) => {
         if (mountedRef.current) setSnapshot(next);
       },
@@ -226,6 +237,10 @@ export const SalespersonDashboard: React.FC = () => {
   const toggleSpeaker = () => {
     const engine = engineRef.current;
     if (!engine || !snapshot) return;
+    if (snapshot.playbackBlocked) {
+      void engine.resumePlayback();
+      return;
+    }
     engine.setSpeakerMuted(!snapshot.speakerMuted);
   };
 
@@ -275,6 +290,81 @@ export const SalespersonDashboard: React.FC = () => {
     }
   };
 
+  /**
+   * AI status shown to the salesperson.
+   *
+   * The Ultravox session lives on the customer device. `snapshot.ai` is the
+   * live value relayed over signaling; `sessionState.ai` is the server's
+   * persisted copy (used before the first relay or after a signaling blip).
+   * Both are real reported states, never "the server has an API key".
+   */
+  const aiView = useMemo(() => {
+    const live = snapshot?.ai;
+    const polled = sessionState?.ai;
+    const liveHasReport = Boolean(live && live.state !== 'off');
+    const rawState = ((liveHasReport ? live?.state : null) ?? polled?.state ?? 'off') as AiLifecycleState;
+    const known: AiLifecycleState[] = [
+      'off', 'creating', 'connecting', 'connected', 'reconnecting', 'disconnected', 'closed', 'error',
+    ];
+    const state = known.includes(rawState) ? rawState : 'error';
+    const reported = liveHasReport ? live : null;
+    return {
+      state,
+      label: aiStateLabel(state),
+      tone: aiTone(state) as StatusTone,
+      error: (reported ? reported.error : polled?.error) ?? null,
+      connected: Boolean((reported ? reported.connected : polled?.connected) && state === 'connected'),
+      reconnecting: state === 'creating' || state === 'connecting' || state === 'reconnecting',
+      reconnectAttempt: reported?.reconnectAttempt ?? polled?.reconnectAttempt ?? 0,
+      maxReconnectAttempts: reported?.maxReconnectAttempts ?? 3,
+      audioReachingAi: Boolean((reported ? reported.audioReachingAi : polled?.audioReachingAi) && state === 'connected'),
+      lastResponseAt: reported?.lastSuggestionAt ?? polled?.lastSuggestionAt ?? null,
+      callCreated: Boolean(sessionState?.aiCallCreated ?? sessionState?.aiReady),
+      callId: reported?.callId ?? null,
+      source: liveHasReport ? 'live signaling' : polled?.state ? 'server poll' : 'none',
+    };
+  }, [snapshot?.ai, sessionState?.ai, sessionState?.aiCallCreated, sessionState?.aiReady]);
+
+  /** Caption status of this device's speech capture (drives the customer panel). */
+  const captionStatus = useMemo(() => {
+    const transcript = snapshot?.transcript;
+    if (!transcript) return 'not started';
+    if (transcript.status === 'listening') return 'live for the customer';
+    if (transcript.status === 'unsupported') return 'unavailable in this browser';
+    if (transcript.status === 'error') return transcript.error ?? 'stopped';
+    if (transcript.status === 'starting') return 'starting';
+    return 'not started';
+  }, [snapshot?.transcript]);
+
+  const serverRows = useMemo<Array<[string, string]>>(() => {
+    if (!serverDiagnostics) return [];
+    const d = serverDiagnostics.diagnostics;
+    return [
+      ['customer online', String(d.customerConnected)],
+      ['salesperson online', String(d.salespersonConnected)],
+      ['invitation', d.invitationStatus],
+      ['AI call created', d.aiCallCreated ? `yes (${d.aiCallId?.slice(0, 10) ?? 'unknown'})` : 'no'],
+      ['AI live (customer)', d.ai.connected ? 'yes' : 'no'],
+      ['AI state', d.ai.state ?? 'none'],
+      ['AI error', d.aiLastError ?? 'none'],
+      ['AI audio in', d.ai.audioReachingAi ? 'yes' : 'no'],
+      ['AI reconnect attempt', String(d.ai.reconnectAttempt)],
+      ['offers', String(d.signals.offers)],
+      ['answers', String(d.signals.answers)],
+      ['ice relayed', String(d.signals.iceCandidates)],
+      ['AI text relayed', String(d.signals.aiSuggestions)],
+      ['captions relayed', String(d.signals.salespersonTranscripts ?? 0)],
+      ['relay failures', String(d.signals.relayFailures)],
+      ['rejected msgs', String(d.signals.rejectedMessages)],
+      ['last server error', d.signals.lastError ?? 'none'],
+      ['TURN configured', String(serverDiagnostics.ice.configured)],
+      ['TURN credentials', serverDiagnostics.ice.credentialMode],
+      ['ICE policy', serverDiagnostics.ice.iceTransportPolicy],
+      ['AI server readiness', serverDiagnostics.ai.ready ? 'key configured' : `no (${serverDiagnostics.ai.missing.join(', ')})`],
+      ['storage', d.storage],
+    ];
+  }, [serverDiagnostics]);
+
   const endSession = async () => {
     await stopEngine('session ended by salesperson');
     clearSalespersonSession();
@@ -290,54 +380,12 @@ export const SalespersonDashboard: React.FC = () => {
   const micLive = snapshot?.micPermission === 'granted' && snapshot.localTrackState === 'live';
   const incomingAudioLive = Boolean(snapshot && snapshot.mediaFlowing && !snapshot.speakerMuted);
 
-  const latestSuggestion = useMemo(
-    () => (snapshot?.suggestions.length ? snapshot.suggestions[snapshot.suggestions.length - 1] : null),
-    [snapshot?.suggestions]
-  );
-
-  /**
-   * AI status shown to the salesperson.
-   *
-   * The Ultravox session lives on the customer device. `snapshot.ai` is the
-   * live value relayed over signaling; `sessionState.ai` is the server's
-   * persisted copy (used before the first relay or after a signaling blip).
-   * Both are real reported states, never "the server has an API key".
-   */
-  const aiView = useMemo(() => {
-    const live = snapshot?.ai;
-    const polled = sessionState?.ai;
-    // `off` is the engine's initial value, not a report. Prefer the polled state
-    // in that case so an already-running AI is not briefly shown as "not started".
-    const liveHasReport = Boolean(live && live.state !== 'off');
-    const rawState = ((liveHasReport ? live?.state : null) ?? polled?.state ?? 'off') as AiLifecycleState;
-    const known: AiLifecycleState[] = [
-      'off', 'creating', 'connecting', 'connected', 'reconnecting', 'disconnected', 'closed', 'error',
-    ];
-    const state = known.includes(rawState) ? rawState : 'error';
-    const reported = liveHasReport ? live : null;
-    return {
-      state,
-      label: aiStateLabel(state),
-      tone: aiTone(state),
-      error: (reported ? reported.error : polled?.error) ?? null,
-      connected: Boolean((reported ? reported.connected : polled?.connected) && state === 'connected'),
-      reconnecting: state === 'creating' || state === 'connecting' || state === 'reconnecting',
-      reconnectAttempt: reported?.reconnectAttempt ?? polled?.reconnectAttempt ?? 0,
-      maxReconnectAttempts: reported?.maxReconnectAttempts ?? 3,
-      audioReachingAi: Boolean((reported ? reported.audioReachingAi : polled?.audioReachingAi) && state === 'connected'),
-      lastResponseAt: reported?.lastSuggestionAt ?? polled?.lastSuggestionAt ?? null,
-      callCreated: Boolean(sessionState?.aiCallCreated ?? sessionState?.aiReady),
-      callId: reported?.callId ?? null,
-      source: liveHasReport ? 'live signaling' : polled?.state ? 'server poll' : 'none',
-    };
-  }, [snapshot?.ai, sessionState?.ai, sessionState?.aiCallCreated, sessionState?.aiReady]);
-
   if (booting) {
     return (
       <div className="flex-1 flex items-center justify-center bg-slate-950" data-testid="role-salesperson-loading">
         <div className="flex items-center gap-3 text-slate-400 text-sm">
           <RefreshCw className="w-4 h-4 animate-spin" />
-          Preparing your sales session...
+          Preparing your sales session…
         </div>
       </div>
     );
@@ -365,22 +413,22 @@ export const SalespersonDashboard: React.FC = () => {
     <div className="flex-1 min-h-0 overflow-y-auto bg-slate-950" data-testid="role-salesperson">
       <audio ref={audioRef} autoPlay playsInline className="hidden" data-testid="remote-audio" />
 
-      <div className="max-w-6xl mx-auto p-4 space-y-4">
-        <header className="flex flex-wrap items-center justify-between gap-3">
+      <div className="max-w-7xl mx-auto p-3 sm:p-4 space-y-3">
+        <header className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-3">
             <div className="p-2.5 rounded-xl bg-gradient-to-tr from-indigo-600 to-cyan-500 text-white">
-              <Headphones className="w-5 h-5" />
+              <Headphones className="w-5 h-5" aria-hidden="true" />
             </div>
             <div>
-              <h1 className="text-base font-bold text-slate-100">Salesperson dashboard</h1>
+              <h1 className="text-base font-bold text-slate-100">Live sales call</h1>
               <p className="text-[11px] text-slate-400 font-mono">
                 session {session.sessionId.slice(0, 10)} · expires in {timeLeft(sessionState?.expiresAt ?? null)}
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 rounded-xl px-3 py-1.5">
-              <UserRound className="w-4 h-4 text-slate-500" />
+              <UserRound className="w-4 h-4 text-slate-500" aria-hidden="true" />
               <input
                 value={displayName}
                 onChange={(event) => setDisplayName(event.target.value)}
@@ -390,61 +438,44 @@ export const SalespersonDashboard: React.FC = () => {
                   setSession({ ...session, displayName });
                 }}
                 placeholder="Your name"
-                className="bg-transparent text-sm text-slate-200 placeholder:text-slate-600 outline-none w-32"
+                className="bg-transparent text-sm text-slate-200 placeholder:text-slate-600 outline-none w-28"
                 aria-label="Salesperson name"
               />
             </div>
-            <span className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${
-              callState.tone === 'emerald'
-                ? 'border-emerald-500/40 text-emerald-300 bg-emerald-500/10'
-                : callState.tone === 'amber'
-                  ? 'border-amber-500/40 text-amber-300 bg-amber-500/10'
-                  : callState.tone === 'red'
-                    ? 'border-rose-500/40 text-rose-300 bg-rose-500/10'
-                    : 'border-slate-700 text-slate-400 bg-slate-900'
-            }`} data-testid="call-state">
+            <span
+              className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${TONE_BORDER[callState.tone]}`}
+              data-testid="call-state"
+            >
               {callState.label}
             </span>
-            <span className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${
-              aiView.tone === 'emerald'
-                ? 'border-emerald-500/40 text-emerald-300 bg-emerald-500/10'
-                : aiView.tone === 'amber'
-                  ? 'border-amber-500/40 text-amber-300 bg-amber-500/10'
-                  : aiView.tone === 'red'
-                    ? 'border-rose-500/40 text-rose-300 bg-rose-500/10'
-                    : 'border-slate-700 text-slate-400 bg-slate-900'
-            }`} data-testid="ai-state-chip">
-              {aiView.label}
-            </span>
+            <AiStateChip label={aiView.label} tone={aiView.tone} title={aiView.error ?? aiView.label} />
           </div>
         </header>
 
-        {bootError ? <Banner tone="red" title="Session error">{bootError}</Banner> : null}
         {snapshot?.iceConfigError ? (
-          <Banner tone="red" title="ICE / TURN configuration problem" testId="ice-error" action={
-            <button onClick={() => void restartCall()} className="underline">retry</button>
-          }>
+          <Banner tone="red" title="ICE / TURN configuration problem" testId="ice-error">
             {snapshot.iceConfigError}
           </Banner>
         ) : null}
         {snapshot && !snapshot.turnConfigured && !snapshot.iceConfigError ? (
           <Banner tone="amber" title="TURN relay not configured" testId="turn-warning">
-            Call audio works only when both devices can reach each other directly. Mobile data or strict NATs need
-            TURN_URLS with TURN_SECRET (preferred) or TURN_USERNAME/TURN_CREDENTIAL on the server.
+            The customer may be inaudible on mobile data or strict NATs. Configure TURN on the server.
           </Banner>
         ) : null}
         {snapshot?.diagnostics.iceTransportPolicy === 'relay' && snapshot.relayCandidates === 0 ? (
-          <Banner tone="red" title="Relay-only mode: no relay candidates gathered" testId="relay-warning">
-            TURN is unreachable or rejected the credentials, so no media path can be established. Check TURN_URLS,
-            TURN_SECRET/TURN_USERNAME/TURN_CREDENTIAL and UDP/TCP reachability from this network.
+          <Banner tone="red" title="Relay-only mode without a relay path" testId="relay-warning">
+            TURN is unreachable or rejected the credentials, so no media path can be established.
           </Banner>
         ) : null}
         {snapshot?.iceConfigWarnings.length && !snapshot.iceConfigError ? (
           <Banner tone="amber" title="ICE warning">{snapshot.iceConfigWarnings[0]}</Banner>
         ) : null}
-
         {actionError ? (
-          <Banner tone="red" title="Action failed" action={<button onClick={() => setActionError(null)} className="underline">dismiss</button>}>
+          <Banner
+            tone="red"
+            title="Action failed"
+            action={<button onClick={() => setActionError(null)} className="underline">dismiss</button>}
+          >
             {actionError}
           </Banner>
         ) : null}
@@ -461,7 +492,7 @@ export const SalespersonDashboard: React.FC = () => {
               </button>
             }
           >
-            Tap Enable audio (a user gesture is required before audio can play).
+            A user gesture is required before audio can play.
           </Banner>
         ) : null}
         {snapshot?.lastError ? (
@@ -474,424 +505,208 @@ export const SalespersonDashboard: React.FC = () => {
           <Banner tone="amber" title="Server signaling error">{snapshot.lastServerError}</Banner>
         ) : null}
 
-        {/* Call controls */}
-        <div className="flex flex-wrap items-center gap-2 bg-slate-900/70 border border-slate-800 rounded-2xl p-3">
-          {!engineStarted ? (
-            <button
-              onClick={() => void startCall()}
-              data-testid="join-call"
-              className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold flex items-center gap-2"
-            >
-              <PhoneCall className="w-4 h-4" /> Start microphone & connect
-            </button>
-          ) : (
-            <>
-              <button
-                onClick={toggleMute}
-                data-testid="mic-toggle"
-                aria-pressed={Boolean(snapshot?.micMuted)}
-                className={`px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-2 ${
-                  snapshot?.micMuted
-                    ? 'bg-rose-600 hover:bg-rose-500 text-white'
-                    : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(320px,380px)] gap-3 items-start">
+          <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 sm:p-5 space-y-4">
+            <div className="flex items-center gap-4">
+              <div
+                className={`w-16 h-16 sm:w-20 sm:h-20 rounded-full flex items-center justify-center bg-gradient-to-br from-slate-700 to-slate-800 text-slate-100 ${
+                  snapshot?.peerParticipantId ? 'ring-2 ring-emerald-400/40' : ''
                 }`}
+                aria-hidden="true"
               >
-                {snapshot?.micMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
-                {snapshot?.micMuted ? 'Unmute microphone' : 'Mute microphone'}
-              </button>
-              <button
-                onClick={toggleSpeaker}
-                data-testid="speaker-toggle"
-                aria-pressed={Boolean(snapshot?.speakerMuted)}
-                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 text-sm font-semibold flex items-center gap-2"
-              >
-                {snapshot?.speakerMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-                {snapshot?.speakerMuted ? 'Unmute customer audio' : 'Mute customer audio'}
-              </button>
-              <button
-                onClick={() => void restartCall()}
-                data-testid="reconnect"
-                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-semibold flex items-center gap-2"
-              >
-                <RefreshCw className="w-4 h-4" /> Reconnect
-              </button>
-              <button
-                onClick={() => void leaveCall()}
-                data-testid="leave-call"
-                className="px-4 py-2 rounded-xl bg-rose-600/90 hover:bg-rose-500 text-white text-sm font-semibold flex items-center gap-2"
-              >
-                <PhoneOff className="w-4 h-4" /> Leave
-              </button>
-            </>
-          )}
-          <span className="text-[11px] text-slate-500 ml-auto">
-            {snapshot?.micPermission === 'granted' ? 'Microphone permission granted' : 'Microphone permission not granted yet'}
-          </span>
-        </div>
-
-        <div className="grid gap-4 lg:grid-cols-2">
-          {/* Session + invitation */}
-          <Panel title="Session & customer invitation" icon={<Link2 className="w-3.5 h-3.5" />}>
-            <div className="space-y-3">
-              <StatusLine
-                label="Customer connection"
-                value={sessionState?.customerConnected ? 'Connected' : 'Not connected'}
-                tone={sessionState?.customerConnected ? 'emerald' : 'slate'}
-              />
-              <StatusLine
-                label="Invitation"
-                value={sessionState?.invitationStatus ?? 'unknown'}
-                tone={sessionState?.invitationStatus === 'active' || sessionState?.invitationStatus === 'redeemed' ? 'emerald' : 'amber'}
-                detail={inviteExpiresAt ? `expires in ${timeLeft(inviteExpiresAt)}` : undefined}
-              />
-
-              {inviteUrl ? (
-                <div className="space-y-2">
-                  <div className="flex gap-2">
-                    <input
-                      readOnly
-                      value={inviteUrl}
-                      data-testid="salesperson-invite-url"
-                      onFocus={(event) => event.currentTarget.select()}
-                      className="flex-1 min-w-0 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-[11px] font-mono text-cyan-200"
-                    />
-                    <button
-                      onClick={() => void copyInvite()}
-                      data-testid="copy-invite"
-                      className="px-3 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5 shrink-0"
-                    >
-                      {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                      {copied ? 'Copied' : 'Copy'}
-                    </button>
-                  </div>
-                  <p className="text-[11px] text-slate-500">
-                    Send this link to the customer. It works once, in one browser, and is bound to this session.
-                  </p>
-                </div>
-              ) : (
-                <p className="text-xs text-slate-400">
-                  No active link is shown for a restored session. Generate a fresh invitation to invite the customer.
-                </p>
-              )}
-
-              <div className="flex flex-wrap gap-2">
-                <button
-                  onClick={() => void regenerateInvite()}
-                  data-testid="regenerate-invite"
-                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" /> Generate new invitation
-                </button>
-                <button
-                  onClick={() => void revokeCurrentInvite()}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold"
-                >
-                  Revoke invitation
-                </button>
-                <button
-                  onClick={() => void endSession()}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold ml-auto"
-                >
-                  New session
-                </button>
+                <UserRound className="w-7 h-7" />
               </div>
-              <p className="text-[10px] text-slate-500 flex items-center gap-1">
-                <ShieldCheck className="w-3 h-3" /> Role and invitation permissions are enforced by the server.
-              </p>
+              <div className="min-w-0">
+                <h2 className="text-lg font-semibold text-slate-100">Customer</h2>
+                <p className="text-sm text-slate-400" data-testid="customer-connection">
+                  {!snapshot?.peerParticipantId
+                    ? sessionState?.customerConnected
+                      ? 'Connected, joining audio…'
+                      : 'Waiting for the customer to join'
+                    : incomingAudioLive
+                      ? 'Customer audio is live'
+                      : snapshot?.playbackBlocked
+                        ? 'Tap Enable audio to hear the customer'
+                        : 'Connected — waiting for customer audio'}
+                </p>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  {micLive && !snapshot?.micMuted
+                    ? 'Your microphone is live'
+                    : snapshot?.micMuted
+                      ? 'Your microphone is muted (captions paused)'
+                      : 'Microphone not captured'}
+                </p>
+              </div>
             </div>
-          </Panel>
 
-          {/* Audio status */}
-          <Panel title="Audio status" icon={<Activity className="w-3.5 h-3.5" />}>
-            <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              {!engineStarted ? (
+                <button
+                  onClick={() => void startCall()}
+                  data-testid="join-call"
+                  className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold flex items-center gap-2"
+                >
+                  <PhoneCall className="w-4 h-4" aria-hidden="true" /> Start microphone &amp; connect
+                </button>
+              ) : (
+                <>
+                  <button
+                    onClick={toggleMute}
+                    data-testid="mic-toggle"
+                    aria-pressed={Boolean(snapshot?.micMuted)}
+                    className={`px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 ${
+                      snapshot?.micMuted
+                        ? 'bg-rose-600 hover:bg-rose-500 text-white'
+                        : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                    }`}
+                  >
+                    {snapshot?.micMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                    {snapshot?.micMuted ? 'Unmute' : 'Mute'}
+                  </button>
+                  <button
+                    onClick={toggleSpeaker}
+                    data-testid="speaker-toggle"
+                    aria-pressed={Boolean(snapshot?.speakerMuted)}
+                    className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 text-sm font-semibold flex items-center gap-2"
+                  >
+                    {snapshot?.speakerMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                    {snapshot?.speakerMuted ? 'Unmute audio' : 'Mute audio'}
+                  </button>
+                  <button
+                    onClick={() => void restartCall()}
+                    data-testid="reconnect"
+                    className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-semibold flex items-center gap-2"
+                  >
+                    <RefreshCw className="w-4 h-4" aria-hidden="true" /> Reconnect
+                  </button>
+                  <button
+                    onClick={() => void leaveCall()}
+                    data-testid="leave-call"
+                    className="px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-sm font-semibold flex items-center gap-2"
+                  >
+                    <PhoneOff className="w-4 h-4" aria-hidden="true" /> End call
+                  </button>
+                </>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4">
               <StatusLine
-                label="Signaling socket"
+                label="Signaling"
                 value={snapshot?.wsStatus ?? 'not started'}
                 tone={snapshot?.wsStatus === 'connected' ? 'emerald' : snapshot?.wsStatus === 'reconnecting' ? 'amber' : 'slate'}
               />
               <StatusLine
-                label="Outgoing microphone"
-                value={
-                  !snapshot || snapshot.micPermission !== 'granted'
-                    ? 'no capture'
-                    : snapshot.micMuted
-                      ? 'muted'
-                      : micLive
-                        ? `live · ${snapshot.localSenderCount} sender(s)`
-                        : 'stopped'
-                }
-                tone={micLive && !snapshot?.micMuted ? 'emerald' : snapshot?.micMuted ? 'amber' : 'red'}
-              />
-              <StatusLine
-                label="Customer connected"
-                value={snapshot?.peerParticipantId ? (sessionState?.customerConnected ? 'connected' : 'joining') : 'waiting'}
-                tone={snapshot?.peerParticipantId ? 'emerald' : 'slate'}
-              />
-              <StatusLine
-                label="Incoming customer audio"
+                label="Customer audio in"
                 value={
                   !snapshot?.peerParticipantId
                     ? 'no peer'
                     : snapshot.speakerMuted
                       ? 'muted locally'
-                      : snapshot.playbackBlocked
-                        ? 'blocked by browser'
-                        : incomingAudioLive
-                          ? `live · ${snapshot.diagnostics.receiveBitrateKbps} kbps`
-                          : 'waiting for media'
+                      : incomingAudioLive
+                        ? `live · ${snapshot.diagnostics.receiveBitrateKbps} kbps`
+                        : 'waiting for media'
                 }
-                tone={incomingAudioLive ? 'emerald' : snapshot?.playbackBlocked ? 'red' : 'amber'}
-                detail={
-                  snapshot
-                    ? `pc=${snapshot.diagnostics.pcState} ice=${snapshot.diagnostics.iceState} rtp in ${snapshot.diagnostics.bytesReceived} B / out ${snapshot.diagnostics.bytesSent} B`
-                    : undefined
-                }
+                tone={incomingAudioLive ? 'emerald' : 'amber'}
+              />
+              <StatusLine
+                label="Captions to customer"
+                value={captionStatus}
+                tone={snapshot?.transcript.status === 'listening' ? 'emerald' : snapshot?.transcript.status === 'error' ? 'red' : 'slate'}
+                detail={snapshot?.transcript.error ?? undefined}
               />
               <StatusLine
                 label="Network path"
-                value={
-                  snapshot?.diagnostics.relayPath
-                    ? 'TURN relay'
-                    : snapshot && snapshot.diagnostics.selectedLocalType !== 'none'
-                      ? `${snapshot.diagnostics.selectedLocalType} → ${snapshot.diagnostics.selectedRemoteType}`
-                      : 'not negotiated'
-                }
+                value={snapshot?.diagnostics.relayPath ? 'TURN relay' : snapshot?.selectedPair ?? 'not negotiated'}
                 tone={snapshot?.diagnostics.relayPath ? 'indigo' : 'slate'}
-                detail={
-                  snapshot
-                    ? `candidates host ${snapshot.diagnostics.candidates.host} / srflx ${snapshot.diagnostics.candidates.srflx} / relay ${snapshot.diagnostics.candidates.relay} · TURN ${snapshot.diagnostics.hasTurn ? 'configured' : 'not configured'}`
-                    : undefined
-                }
               />
             </div>
-          </Panel>
+          </section>
+
+          <aside className="space-y-3">
+            <AiSuggestionPanel
+              suggestions={snapshot?.suggestions ?? []}
+              ai={aiView}
+              onReconnect={reconnectAi}
+              disabled={!engineStarted || !sessionState?.customerConnected}
+            />
+            <CustomerTranscriptPanel
+              segments={snapshot?.customerTranscript ?? []}
+              customerSpeech={snapshot?.customerSpeech ?? ''}
+              aiLive={Boolean(aiView.connected)}
+            />
+          </aside>
         </div>
 
-        {/* AI copilot status: the real customer-side Ultravox session */}
-        <Panel
-          title="AI copilot status"
-          icon={<Sparkles className="w-3.5 h-3.5" />}
-          action={
-            <button
-              onClick={reconnectAi}
-              data-testid="ai-reconnect"
-              disabled={!engineStarted || !sessionState?.customerConnected}
-              title={
-                !engineStarted
-                  ? 'Start the call first'
-                  : !sessionState?.customerConnected
-                    ? 'The customer device must be connected to restart the AI'
-                    : 'Ask the customer device to create a fresh AI session'
-              }
-              className="text-[10px] px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold disabled:opacity-40"
-            >
-              Restart AI
-            </button>
-          }
-        >
-          <div className="space-y-2" data-testid="ai-panel">
-            <StatusLine
-              label="AI session"
-              value={aiView.label}
-              tone={aiView.tone}
-              detail={aiView.error ?? undefined}
-              testId="ai-state"
-              detailTestId="ai-error"
-            />
-            <StatusLine
-              label="Customer voice reaches the AI"
-              value={
-                !engineStarted
-                  ? 'not started'
-                  : aiView.audioReachingAi
-                    ? 'yes'
-                    : aiView.connected
-                      ? 'not yet'
-                      : 'no'
-              }
-              tone={aiView.audioReachingAi ? 'emerald' : 'amber'}
-              testId="ai-audio"
-            />
-            <StatusLine
-              label="Last AI response"
-              value={aiView.lastResponseAt ? new Date(aiView.lastResponseAt).toLocaleTimeString() : 'none yet'}
-              tone={aiView.lastResponseAt ? 'emerald' : 'slate'}
-              testId="ai-last-response"
-            />
-            <StatusLine
-              label="Ultravox call created"
-              value={aiView.callCreated ? 'yes (not proof of connection)' : 'no'}
-              tone={aiView.callCreated ? 'indigo' : 'slate'}
-              detail={`state source: ${aiView.source}${aiView.callId ? ` · call ${aiView.callId.slice(0, 8)}` : ''}`}
-              testId="ai-call-created"
-            />
-            {aiView.reconnecting ? (
-              <p className="text-[11px] text-amber-300" data-testid="ai-reconnecting">
-                {aiView.state === 'reconnecting'
-                  ? `Reconnecting AI (attempt ${aiView.reconnectAttempt} of ${aiView.maxReconnectAttempts}); the customer call audio is unaffected.`
-                  : 'The customer device is creating/connecting a new AI session…'}
-              </p>
-            ) : null}
-            {snapshot?.aiReconnectRequestedAt && !aiView.reconnecting && !aiView.connected ? (
-              <p className="text-[11px] text-slate-400" data-testid="ai-reconnect-pending">
-                Restart requested at {new Date(snapshot.aiReconnectRequestedAt).toLocaleTimeString()}; waiting for the
-                customer device to report the new session.
-              </p>
-            ) : null}
-            {!sessionState?.customerConnected ? (
-              <p className="text-[11px] text-slate-500">
-                The AI runs on the customer device. It cannot start or recover until the customer is connected.
-              </p>
-            ) : null}
-          </div>
-        </Panel>
-
-        {/* AI suggestions */}
-        <Panel
-          title="AI copilot responses"
-          icon={<Sparkles className="w-3.5 h-3.5" />}
-          action={
-            <span className="text-[10px] text-slate-500 flex items-center gap-1">
-              <Users className="w-3.5 h-3.5" /> customer mic → AI → this dashboard
-            </span>
-          }
-        >
-          {latestSuggestion ? (
-            <div className="space-y-3" data-testid="ai-suggestions">
-              <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/10 p-3">
-                <p className="text-[10px] uppercase tracking-wide text-indigo-300 font-semibold mb-1">
-                  Latest suggestion {latestSuggestion.isFinal ? '' : '(live)'}
-                </p>
-                <p className="text-sm text-slate-100 leading-relaxed" data-testid="ai-suggestion-latest">
-                  {latestSuggestion.text}
-                </p>
-              </div>
-              <ul className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
-                {[...snapshot!.suggestions].reverse().slice(1, 12).map((item) => (
-                  <li key={item.id} className="text-[11px] text-slate-400 border-l-2 border-slate-800 pl-2">
-                    <span className="text-slate-600 font-mono mr-1.5">{item.timestamp}</span>
-                    {item.text}
-                  </li>
-                ))}
-              </ul>
-              {snapshot?.customerSpeech ? (
-                <p className="text-[11px] text-slate-500 border-t border-slate-800 pt-2">
-                  Customer said: <span className="text-slate-300">{snapshot.customerSpeech}</span>
-                </p>
-              ) : null}
-            </div>
-          ) : (
-            <p className="text-xs text-slate-500">
-              AI responses appear here once the customer joins and speaks. The AI listens on the customer device only,
-              so the salesperson microphone can never be transcribed by the AI.
-            </p>
-          )}
-        </Panel>
-
-        {/* Diagnostics & recovery */}
-        <section className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 space-y-3">
+        <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 space-y-2">
           <div className="flex items-center justify-between gap-2">
-            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
-              <Activity className="w-3.5 h-3.5" /> Diagnostics & recovery
+            <h2 className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+              <Link2 className="w-3.5 h-3.5" aria-hidden="true" /> Customer invitation
             </h2>
-            <div className="flex gap-2">
-              <button
-                onClick={() => void engineRef.current?.resumePlayback()}
-                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-semibold"
-              >
-                Retry audio
-              </button>
-              <button
-                onClick={() => setShowDiagnostics((value) => !value)}
-                data-testid="toggle-diagnostics"
-                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-semibold"
-              >
-                {showDiagnostics ? 'Hide details' : 'Show details'}
-              </button>
-            </div>
+            <span className="text-[10px] text-slate-500">
+              expires in {timeLeft(inviteExpiresAt ?? sessionState?.invitationExpiresAt ?? null)}
+            </span>
           </div>
-
-          {showDiagnostics ? (
-            <div className="grid gap-4 lg:grid-cols-2" data-testid="diagnostics-panel">
-              <div className="space-y-2">
-                <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Browser</p>
-                <DiagGrid
-                  rows={[
-                    ['role', 'salesperson'],
-                    ['participant', snapshot?.participantId?.slice(0, 10) ?? '—'],
-                    ['session', session.sessionId.slice(0, 10)],
-                    ['ws', snapshot?.wsStatus ?? 'not started'],
-                    ['pc', snapshot?.diagnostics.pcState ?? 'none'],
-                    ['ice', snapshot?.diagnostics.iceState ?? 'none'],
-                    ['gather', snapshot?.diagnostics.iceGatheringState ?? 'none'],
-                    ['path', `${snapshot?.diagnostics.selectedLocalType ?? '—'} → ${snapshot?.diagnostics.selectedRemoteType ?? '—'}`],
-                    ['mic perm', snapshot?.micPermission ?? 'unknown'],
-                    ['mic track', snapshot?.diagnostics.localTrackState ?? 'none'],
-                    ['senders', String(snapshot?.diagnostics.localSenderCount ?? 0)],
-                    ['remote', snapshot?.diagnostics.remoteTrackState ?? 'none'],
-                    ['rtp out', `${snapshot?.diagnostics.bytesSent ?? 0} B`],
-                    ['rtp in', `${snapshot?.diagnostics.bytesReceived ?? 0} B`],
-                    ['playback', snapshot?.diagnostics.audioElementPaused ? 'paused' : 'playing'],
-                    ['autoplay error', snapshot?.diagnostics.playbackError ?? 'none'],
-                    ['ice config', snapshot?.iceConfigLoaded ? 'loaded (session auth)' : snapshot?.iceConfigError ? 'error' : 'not loaded'],
-                    ['ice policy', snapshot?.diagnostics.iceTransportPolicy ?? 'unknown'],
-                    ['turn', snapshot ? `${snapshot.turnConfigured ? 'configured' : 'none'} / ${snapshot.turnCredentialMode}` : 'unknown'],
-                    ['turn cred refresh', snapshot?.turnExpiresAt ? new Date(snapshot.turnExpiresAt).toLocaleTimeString() : 'n/a'],
-                    ['relay candidates', String(snapshot?.relayCandidates ?? 0)],
-                    ['selected pair', snapshot?.selectedPair ?? 'none'],
-                    ['dtls', snapshot?.diagnostics.dtlsState ?? 'none'],
-                    ['media flowing', snapshot?.mediaFlowing ? 'yes (RTP received)' : 'no RTP yet'],
-                    ['reconnects', String(snapshot?.reconnectAttempt ?? 0)],
-                  ]}
-                />
-              </div>
-
-              <div className="space-y-2">
-                <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Server</p>
-                {serverDiagnostics ? (
-                  <DiagGrid
-                    rows={[
-                      ['customer online', String(serverDiagnostics.diagnostics.customerConnected)],
-                      ['salesperson online', String(serverDiagnostics.diagnostics.salespersonConnected)],
-                      ['invitation', serverDiagnostics.diagnostics.invitationStatus],
-                      ['AI call created', serverDiagnostics.diagnostics.aiCallCreated ? `yes (${serverDiagnostics.diagnostics.aiCallId?.slice(0, 10) ?? 'unknown'})` : 'no'],
-                      ['AI live (customer)', serverDiagnostics.diagnostics.ai.connected ? 'yes' : 'no'],
-                      ['AI state', serverDiagnostics.diagnostics.ai.state ?? 'none'],
-                      ['AI error', serverDiagnostics.diagnostics.aiLastError ?? 'none'],
-                      ['AI audio in', serverDiagnostics.diagnostics.ai.audioReachingAi ? 'yes' : 'no'],
-                      ['AI last response', serverDiagnostics.diagnostics.ai.lastSuggestionAt ? new Date(serverDiagnostics.diagnostics.ai.lastSuggestionAt).toLocaleTimeString() : 'none'],
-                      ['AI reconnect attempt', String(serverDiagnostics.diagnostics.ai.reconnectAttempt)],
-                      ['offers', String(serverDiagnostics.diagnostics.signals.offers)],
-                      ['answers', String(serverDiagnostics.diagnostics.signals.answers)],
-                      ['ice relayed', String(serverDiagnostics.diagnostics.signals.iceCandidates)],
-                      ['AI text relayed', String(serverDiagnostics.diagnostics.signals.aiSuggestions)],
-                      ['relay failures', String(serverDiagnostics.diagnostics.signals.relayFailures)],
-                      ['rejected msgs', String(serverDiagnostics.diagnostics.signals.rejectedMessages)],
-                      ['last server error', serverDiagnostics.diagnostics.signals.lastError ?? 'none'],
-                      ['TURN configured', String(serverDiagnostics.ice.configured)],
-                      ['TURN credentials', serverDiagnostics.ice.credentialMode],
-                      ['ICE policy', serverDiagnostics.ice.iceTransportPolicy],
-                      ['ICE warnings', String(serverDiagnostics.ice.warnings.length)],
-                      ['AI server readiness', serverDiagnostics.ai.ready ? 'key configured' : `no (${serverDiagnostics.ai.missing.join(', ')})`],
-                      ['storage', serverDiagnostics.diagnostics.storage],
-                    ]}
-                  />
-                ) : (
-                  <p className="text-[11px] text-slate-500">Loading server diagnostics...</p>
-                )}
-
-                <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold pt-2">Call log</p>
-                <pre className="text-[10px] leading-4 text-slate-400 bg-slate-950 border border-slate-800 rounded-lg p-2 max-h-48 overflow-auto whitespace-pre-wrap">
-                  {snapshot?.logs.length ? snapshot.logs.join('\n') : 'No events yet.'}
-                </pre>
-              </div>
-            </div>
-          ) : (
-            <p className="text-[11px] text-slate-500">
-              Open the details panel for signaling, ICE, RTP byte counts, microphone and playback state, and the
-              server's own view of this session.
+          <div className="flex flex-col sm:flex-row gap-2">
+            <input
+              readOnly
+              value={inviteUrl ?? ''}
+              placeholder="No active invitation"
+              data-testid="salesperson-invite-url"
+              onFocus={(event) => event.currentTarget.select()}
+              className="flex-1 min-w-0 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs font-mono text-slate-300 outline-none"
+              aria-label="Customer invitation URL"
+            />
+            {inviteUrl ? (
+              <button
+                onClick={() => void copyInvite()}
+                className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center justify-center gap-1.5"
+              >
+                {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                {copied ? 'Copied' : 'Copy link'}
+              </button>
+            ) : null}
+            <button
+              onClick={() => void regenerateInvite()}
+              data-testid="regenerate-invite"
+              className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold"
+            >
+              New invitation
+            </button>
+            {inviteUrl ? (
+              <button
+                onClick={() => void revokeCurrentInvite()}
+                className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold"
+              >
+                Revoke
+              </button>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+            <p className="text-[10px] text-slate-500 flex items-center gap-1">
+              <ShieldCheck className="w-3 h-3" /> Invitations are single-use and enforced by the server.
             </p>
-          )}
+            <button
+              onClick={() => void endSession()}
+              className="text-[10px] font-semibold text-slate-400 hover:text-rose-300 underline"
+            >
+              End session and start a new one
+            </button>
+          </div>
+        </section>
+
+        <section className="rounded-2xl border border-slate-800 bg-slate-900/40 p-2">
+          <DiagnosticsToggle open={showDiagnostics} onToggle={() => setShowDiagnostics((open) => !open)} />
+          {showDiagnostics ? (
+            <div className="p-2">
+              <DiagnosticsPanel
+                snapshot={snapshot}
+                role={ROLE}
+                serverRows={serverRows}
+                serverLoading={!serverDiagnostics}
+              />
+            </div>
+          ) : null}
         </section>
       </div>
     </div>

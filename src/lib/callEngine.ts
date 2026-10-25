@@ -22,6 +22,13 @@ import {
   sanitizeAiDetail,
 } from './aiStatus';
 import { ApiError, getIceConfig, IceConfigResponse } from './sessionApi';
+import { mergeSpeechSegment, SpeechSegment } from './transcript';
+import {
+  createBrowserRecognition,
+  SalespersonSpeechCapture,
+  SpeechCaptureStatus,
+  SpeechRecognitionLike,
+} from './salespersonSpeech';
 
 export type ParticipantRole = 'customer' | 'salesperson';
 export type WsStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
@@ -99,6 +106,12 @@ export interface EngineSnapshot {
   aiReconnectRequestedAt: number | null;
   suggestions: SuggestionCard[];
   customerSpeech: string;
+  /** Salesperson only: ordered segments of the customer's speech. */
+  customerTranscript: SpeechSegment[];
+  /** Customer only: ordered segments of the salesperson's actual speech. */
+  salespersonTranscript: SpeechSegment[];
+  /** Caption capture/availability for this participant. */
+  transcript: TranscriptSnapshot;
   reconnectAttempt: number;
   lastError: string | null;
   lastServerError: string | null;
@@ -135,6 +148,29 @@ export interface CallEngineOptions {
   createAiSession?: () => UltravoxSession;
   /** Test seam: override automatic AI recovery backoff (ms per attempt). */
   aiRetryDelaysMs?: readonly number[];
+  /**
+   * Salesperson only: caption the salesperson's own microphone for the
+   * customer-facing transcript. Defaults to true for the salesperson role.
+   */
+  enableTranscript?: boolean;
+  /** Test seam: replace the browser SpeechRecognition implementation. */
+  createSpeechRecognition?: () => SpeechRecognitionLike | null;
+  /** Recognition language for the customer-facing captions. */
+  transcriptLang?: string;
+}
+
+/** Caption availability as shown to the customer (salesperson-reported). */
+export type PeerTranscriptState = 'idle' | 'live' | 'unavailable' | 'ended';
+
+export interface TranscriptSnapshot {
+  /** Salesperson: status of their own caption capture. */
+  status: SpeechCaptureStatus;
+  /** Salesperson: last caption failure explanation. */
+  error: string | null;
+  /** Customer: what the salesperson device reported about captions. */
+  peerState: PeerTranscriptState;
+  /** Customer: explanation when captions are unavailable. */
+  peerDetail: string | null;
 }
 
 const RECONNECT_BASE_DELAY_MS = 800;
@@ -273,6 +309,12 @@ export class CallEngine {
   private aiReconnectRequestedAt: number | null = null;
   private suggestions: SuggestionCard[] = [];
   private customerSpeech = '';
+  private customerTranscript: SpeechSegment[] = [];
+  private salespersonTranscript: SpeechSegment[] = [];
+  private speechCapture: SalespersonSpeechCapture | null = null;
+  private speechTranscriptError: string | null = null;
+  private peerTranscriptState: PeerTranscriptState = 'idle';
+  private peerTranscriptDetail: string | null = null;
   private lastError: string | null = null;
   private lastServerError: string | null = null;
   private logs: string[] = [];
@@ -312,6 +354,71 @@ export class CallEngine {
     this.silentClip = silentClipUrl();
     this.createAiSession = options.createAiSession ?? (() => new UltravoxSession());
     this.ai = emptyAiStatus(options.role === 'customer' ? 'local' : 'remote');
+    if (this.shouldCaptureSalespersonSpeech()) {
+      const createRecognition = options.createSpeechRecognition ?? createBrowserRecognition;
+      this.speechCapture = new SalespersonSpeechCapture({
+        createRecognition,
+        lang: options.transcriptLang,
+        onSegment: (segment) => this.handleLocalTranscript(segment),
+        onStatus: (status, detail) => this.handleLocalTranscriptStatus(status, detail),
+      });
+    }
+  }
+
+  /** Only the salesperson captions their own voice; the AI path stays untouched. */
+  private shouldCaptureSalespersonSpeech(): boolean {
+    return this.options.role === 'salesperson' && this.options.enableTranscript !== false;
+  }
+
+  // -------------------------------------------------------------------------
+  // Salesperson captions -> customer transcript
+  //
+  // The salesperson device recognises its own microphone and sends TEXT only.
+  // Its audio track is never cloned, mixed or published to anyone but the peer
+  // connection, so no salesperson audio can reach the Ultravox session (which
+  // only ever exists on the customer device and only uses that device's mic).
+  // -------------------------------------------------------------------------
+
+  private startSpeechCapture(): void {
+    if (!this.speechCapture || this.micMuted) return;
+    this.speechCapture.start();
+  }
+
+  private stopSpeechCapture(): void {
+    this.speechCapture?.stop();
+  }
+
+  private handleLocalTranscript(segment: { ordinal: number; text: string; isFinal: boolean }): void {
+    this.salespersonTranscript = mergeSpeechSegment(this.salespersonTranscript, segment);
+    this.sendSignal({
+      type: 'salesperson_transcript',
+      text: segment.text,
+      isFinal: segment.isFinal,
+      ordinal: segment.ordinal,
+      timestamp: new Date().toLocaleTimeString(),
+    });
+    this.emit();
+  }
+
+  private handleLocalTranscriptStatus(status: SpeechCaptureStatus, detail?: string): void {
+    if (status === 'listening') {
+      this.speechTranscriptError = null;
+      this.log('Salesperson captions are live for the customer.');
+    } else if (status === 'error') {
+      this.speechTranscriptError = detail ?? 'Live captions stopped.';
+      this.log(`Salesperson captions stopped: ${this.speechTranscriptError}`);
+    } else if (status === 'unsupported') {
+      this.speechTranscriptError = detail ?? 'Live captions are not supported in this browser.';
+      this.log('Salesperson captions are unavailable in this browser; the call is unaffected.');
+    }
+    this.sendSignal({
+      type: 'salesperson_transcript_status',
+      state: status,
+      ...(status === 'error' || status === 'unsupported'
+        ? { detail: this.speechTranscriptError }
+        : {}),
+    });
+    this.emit();
   }
 
   // -------------------------------------------------------------------------
@@ -344,6 +451,14 @@ export class CallEngine {
       aiReconnectRequestedAt: this.aiReconnectRequestedAt,
       suggestions: this.suggestions,
       customerSpeech: this.customerSpeech,
+      customerTranscript: this.customerTranscript,
+      salespersonTranscript: this.salespersonTranscript,
+      transcript: {
+        status: this.speechCapture?.getStatus() ?? 'inactive',
+        error: this.speechTranscriptError,
+        peerState: this.peerTranscriptState,
+        peerDetail: this.peerTranscriptDetail,
+      },
       reconnectAttempt: this.reconnectAttempt,
       lastError: this.lastError,
       lastServerError: this.lastServerError,
@@ -566,6 +681,7 @@ export class CallEngine {
     }
 
     await this.stopAi();
+    this.stopSpeechCapture();
     this.closePeerConnection(`stop: ${reason}`);
     this.releaseLocalMedia(reason);
 
@@ -716,6 +832,13 @@ export class CallEngine {
           this.ai.connected && !muted && Boolean(this.ultravox?.micSourceNode),
       };
       this.reportAiStatus();
+    }
+
+    // A muted salesperson must not be captioned: their speech is not audible to
+    // the customer, so it must not appear in the customer transcript either.
+    if (this.shouldCaptureSalespersonSpeech() && this.speechCapture) {
+      if (muted) this.speechCapture.pause();
+      else this.speechCapture.resume();
     }
 
     const track = this.localStream?.getAudioTracks()[0];
@@ -1253,6 +1376,8 @@ export class CallEngine {
     } else if (this.options.role === 'salesperson') {
       // Last known AI state reported by the customer device (server-persisted).
       this.hydrateRemoteAi(data.ai ?? data.session?.ai);
+      // Captions for the customer are produced here, from this device's mic.
+      this.startSpeechCapture();
     }
   }
 
@@ -1584,7 +1709,47 @@ export class CallEngine {
 
     if (type === 'customer_speech_transcript') {
       if (this.options.role !== 'salesperson') return;
-      this.customerSpeech = typeof data.text === 'string' ? data.text : '';
+      const text = typeof data.text === 'string' ? data.text : '';
+      this.customerSpeech = text;
+      this.customerTranscript = mergeSpeechSegment(this.customerTranscript, {
+        ordinal: typeof data.ordinal === 'number' ? data.ordinal : this.customerTranscript.length,
+        text,
+        isFinal: Boolean(data.isFinal),
+      });
+      this.emit();
+      return;
+    }
+
+    // Salesperson speech (captioned on their device) -> customer transcript.
+    if (type === 'salesperson_transcript') {
+      if (this.options.role !== 'customer') return;
+      const text = typeof data.text === 'string' ? data.text : '';
+      if (!text.trim()) return;
+      this.salespersonTranscript = mergeSpeechSegment(this.salespersonTranscript, {
+        ordinal: typeof data.ordinal === 'number' ? data.ordinal : this.salespersonTranscript.length,
+        text,
+        isFinal: Boolean(data.isFinal),
+      });
+      this.peerTranscriptState = 'live';
+      this.emit();
+      return;
+    }
+
+    if (type === 'salesperson_transcript_status') {
+      if (this.options.role !== 'customer') return;
+      const raw = typeof data.state === 'string' ? data.state : '';
+      this.peerTranscriptState =
+        raw === 'listening' || raw === 'starting'
+          ? 'live'
+          : raw === 'error' || raw === 'unsupported'
+            ? 'unavailable'
+            : raw === 'inactive'
+              ? 'idle'
+              : this.peerTranscriptState;
+      this.peerTranscriptDetail =
+        raw === 'error' || raw === 'unsupported'
+          ? sanitizeAiDetail(data.detail) || 'Live captions are unavailable for this call.'
+          : null;
       this.emit();
       return;
     }
@@ -1797,11 +1962,13 @@ export class CallEngine {
             if (transcript.isFinal) lastSuggestionAt = lastResponseAt;
           } else if (transcript.speaker === Role.USER) {
             this.customerSpeech = transcript.text;
-            if (transcript.isFinal && transcript.text.trim()) {
+            if (transcript.text.trim()) {
+              // Partials are forwarded too so the salesperson sees live text;
+              // the isFinal flag lets their dashboard separate the two.
               this.sendSignal({
                 type: 'customer_speech_transcript',
                 text: transcript.text,
-                isFinal: true,
+                isFinal: transcript.isFinal,
                 ordinal: transcript.ordinal,
                 timestamp,
               });

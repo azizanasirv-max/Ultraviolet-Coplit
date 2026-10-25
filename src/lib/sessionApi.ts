@@ -33,11 +33,21 @@ export interface CreatedSession {
   inviteExpiresAt: number | null;
 }
 
+/**
+ * The customer HTTP responses are role-scoped by the server: no AI readiness,
+ * call ids, provider errors or reconnect counters. Typing it separately stops
+ * customer code from reading fields the server does not send.
+ */
+export type CustomerSessionState = Omit<
+  SessionPublicState,
+  'aiReady' | 'aiCallCreated' | 'ai'
+>;
+
 export interface RedeemedInvitation {
   sessionId: string;
   customerKey: string;
   resumed: boolean;
-  session: SessionPublicState;
+  session: CustomerSessionState;
   baseUrl: string;
 }
 
@@ -79,6 +89,7 @@ export interface SessionDiagnosticsResponse {
       answers: number;
       iceCandidates: number;
       aiSuggestions: number;
+      salespersonTranscripts?: number;
       rejectedMessages: number;
       relayFailures: number;
       lastError: string | null;

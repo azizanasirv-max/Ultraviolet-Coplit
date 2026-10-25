@@ -46,6 +46,8 @@ export interface SessionSignalingCounters {
   answers: number;
   iceCandidates: number;
   aiSuggestions: number;
+  /** Salesperson speech captions relayed to the customer (text only). */
+  salespersonTranscripts: number;
   rejectedMessages: number;
   relayFailures: number;
   lastError: string | null;
@@ -122,6 +124,25 @@ export interface SessionPublicState {
   };
 }
 
+/**
+ * What a customer may ever receive about a session.
+ *
+ * The customer runs the AI *transport* but never consumes the salesperson's
+ * private assistant state, so AI fields are not part of this type at all. The
+ * server uses this shape for customer-facing HTTP responses and signaling, so
+ * private AI data cannot leak through hydration even before React renders.
+ */
+export interface CustomerPublicState {
+  sessionId: string;
+  label: string;
+  createdAt: number;
+  expiresAt: number;
+  salespersonConnected: boolean;
+  customerConnected: boolean;
+  invitationStatus: InvitationStatus | 'expired' | 'missing';
+  invitationExpiresAt: number | null;
+}
+
 export interface SessionDiagnostics extends SessionPublicState {
   aiCallId: string | null;
   aiLastError: string | null;
@@ -157,7 +178,7 @@ export type JoinResult =
       participantId: string;
       resumeToken: string;
       replacedConnection: boolean;
-      session: SessionPublicState;
+      session: SessionPublicState | CustomerPublicState;
     }
   | { ok: false; code: JoinErrorCode; message: string };
 
@@ -167,7 +188,7 @@ export type RedeemResult =
       sessionId: string;
       customerKey: string;
       resumed: boolean;
-      session: SessionPublicState;
+      session: SessionPublicState | CustomerPublicState;
     }
   | { ok: false; code: JoinErrorCode; message: string };
 
@@ -231,6 +252,7 @@ export class SessionStore {
         answers: 0,
         iceCandidates: 0,
         aiSuggestions: 0,
+        salespersonTranscripts: 0,
         rejectedMessages: 0,
         relayFailures: 0,
         lastError: null,
@@ -344,7 +366,7 @@ export class SessionStore {
               sessionId: session.sessionId,
               customerKey: existingCustomerKey,
               resumed: true,
-              session: this.publicState(session),
+              session: this.customerPublicState(session),
             };
           }
         }
@@ -388,7 +410,7 @@ export class SessionStore {
         sessionId: session.sessionId,
         customerKey: existingCustomerKey,
         resumed: true,
-        session: this.publicState(session),
+        session: this.customerPublicState(session),
       };
     }
 
@@ -419,7 +441,7 @@ export class SessionStore {
       sessionId: session.sessionId,
       customerKey,
       resumed: false,
-      session: this.publicState(session),
+      session: this.customerPublicState(session),
     };
   }
 
@@ -490,7 +512,7 @@ export class SessionStore {
         participantId: existing.participantId,
         resumeToken,
         replacedConnection,
-        session: this.publicState(session),
+        session: role === 'salesperson' ? this.publicState(session) : this.customerPublicState(session),
       };
     }
 
@@ -525,7 +547,7 @@ export class SessionStore {
       participantId,
       resumeToken: newResumeToken,
       replacedConnection,
-      session: this.publicState(session),
+      session: role === 'salesperson' ? this.publicState(session) : this.customerPublicState(session),
     };
   }
 
@@ -580,7 +602,14 @@ export class SessionStore {
 
   countSignal(
     sessionId: string,
-    kind: 'offers' | 'answers' | 'iceCandidates' | 'aiSuggestions' | 'rejectedMessages' | 'relayFailures'
+    kind:
+      | 'offers'
+      | 'answers'
+      | 'iceCandidates'
+      | 'aiSuggestions'
+      | 'salespersonTranscripts'
+      | 'rejectedMessages'
+      | 'relayFailures'
   ): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
@@ -690,6 +719,32 @@ export class SessionStore {
         updatedAt: session.ai?.updatedAt ?? null,
       },
     };
+  }
+
+  /**
+   * Customer-safe subset: deliberately no AI readiness, call ids, provider
+   * errors, reconnect counters or suggestion timestamps.
+   */
+  customerPublicState(session: SessionRecord): CustomerPublicState {
+    const state = this.publicState(session);
+    return {
+      sessionId: state.sessionId,
+      label: state.label,
+      createdAt: state.createdAt,
+      expiresAt: state.expiresAt,
+      salespersonConnected: state.salespersonConnected,
+      customerConnected: state.customerConnected,
+      invitationStatus: state.invitationStatus,
+      invitationExpiresAt: state.invitationExpiresAt,
+    };
+  }
+
+  /** Role-scoped session view used for signaling and session hydration. */
+  publicStateFor(
+    session: SessionRecord,
+    role: ParticipantRole
+  ): SessionPublicState | CustomerPublicState {
+    return role === 'salesperson' ? this.publicState(session) : this.customerPublicState(session);
   }
 
   diagnostics(session: SessionRecord): SessionDiagnostics {

@@ -39,6 +39,10 @@ if (libDirs.length > 0) {
     .join(':');
 }
 
+/** Fonts and their config are unpacked next to the libraries. */
+const fontConfig = path.join(process.cwd(), '.browser-libs', 'fonts', 'fonts.conf');
+if (fs.existsSync(fontConfig)) process.env.FONTCONFIG_FILE = fontConfig;
+
 // Chromium's font stack needs a config file when fontconfig is not installed
 // system-wide (this sandbox has no root).
 const fontConfig = path.join(process.cwd(), '.browser-libs', 'fonts.conf');

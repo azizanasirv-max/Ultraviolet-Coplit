@@ -269,16 +269,48 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
   const peersOf = (session: SessionRecord, exceptParticipantId: string) =>
     connectedParticipants(session).filter((p) => p.participantId !== exceptParticipantId);
 
+  /**
+   * Message types that must never reach a customer connection, whatever the
+   * code path. Enforced at the transport boundary (not in React) so a future
+   * broadcaster cannot accidentally leak the salesperson's assistant.
+   */
+  const CUSTOMER_FORBIDDEN_TYPES = new Set([
+    'ai_suggestion',
+    'ai_status',
+    'customer_speech_transcript',
+    'client_diagnostics',
+  ]);
+
+  /** Sends a payload to one participant, stripping private fields for customers. */
+  const deliver = (role: ParticipantRole, target: WebSocket | undefined, payload: Record<string, any>) => {
+    if (!target) return false;
+    if (role === 'customer') {
+      if (CUSTOMER_FORBIDDEN_TYPES.has(String(payload.type))) return false;
+      // Defense in depth: private AI state is removed from any envelope that
+      // carries session hydration, even if a caller forgot to scope it.
+      const sanitized: Record<string, any> = { ...payload };
+      delete sanitized.ai;
+      delete sanitized.aiReady;
+      delete sanitized.aiCallCreated;
+      if (sanitized.session && typeof sanitized.session === 'object') {
+        const session = store.getSession(String(sanitized.session.sessionId ?? ''));
+        if (session) sanitized.session = store.customerPublicState(session);
+        else delete sanitized.session;
+      }
+      return safeSend(target, sanitized);
+    }
+    return safeSend(target, payload);
+  };
+
   const broadcastSession = (session: SessionRecord) => {
-    const payload = {
-      type: 'session_state',
-      sessionId: session.sessionId,
-      session: store.publicState(session),
-      participants: connectedParticipants(session),
-    };
     for (const participant of [session.salesperson, session.customer]) {
       if (!participant?.connected) continue;
-      safeSend(sockets.get(participant.participantId), payload);
+      deliver(participant.role, sockets.get(participant.participantId), {
+        type: 'session_state',
+        sessionId: session.sessionId,
+        session: store.publicStateFor(session, participant.role),
+        participants: connectedParticipants(session),
+      });
     }
   };
 
@@ -823,10 +855,11 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
         resumeToken: result.resumeToken,
         peers: peersOf(session, result.participantId),
         participants: connectedParticipants(session),
-        session: store.publicState(session),
-        // Last AI state reported by the customer device, so the salesperson
-        // dashboard is accurate immediately after (re)joining.
-        ai: store.publicState(session).ai,
+        session: store.publicStateFor(session, result.role),
+        // Last AI state reported by the customer device. Only the salesperson
+        // consumes it; a customer connection must never receive private AI
+        // state through session hydration.
+        ...(result.role === 'salesperson' ? { ai: store.publicState(session).ai } : {}),
         replacedConnection: result.replacedConnection,
         serverTime: new Date().toISOString(),
       });
@@ -865,7 +898,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
         return;
       }
 
-      safeSend(targetWs, {
+      deliver(current.participant.role === 'customer' ? 'salesperson' : 'customer', targetWs, {
         ...data,
         type,
         sessionId: session.sessionId,
@@ -895,7 +928,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       const counterpart = counterpartOf(session, current.participant.role);
       const targetWs = counterpart?.connected ? sockets.get(counterpart.participantId) : undefined;
       if (!targetWs) return;
-      safeSend(targetWs, {
+      deliver(current.participant.role === 'customer' ? 'salesperson' : 'customer', targetWs, {
         ...data,
         type,
         sessionId: session.sessionId,
@@ -998,7 +1031,9 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
           return;
         }
         relayToCounterpart(session, current, 'ai_reconnect', {
-          reason: typeof data.reason === 'string' ? data.reason.slice(0, 120) : 'salesperson requested',
+          // Content-free control message: the salesperson's dashboard label is
+          // not relayed to the customer.
+          requestedAt: Date.now(),
         });
         return;
       }
@@ -1063,6 +1098,62 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
           isFinal: Boolean(data.isFinal),
           ordinal: typeof data.ordinal === 'number' ? data.ordinal : 0,
           timestamp: typeof data.timestamp === 'string' ? data.timestamp.slice(0, 40) : '',
+        });
+        return;
+      }
+
+      /**
+       * Salesperson speech -> customer captions.
+       *
+       * This is the only transcript direction where the salesperson is the
+       * source, and it is text-only: the salesperson's microphone audio is
+       * never forwarded, mixed or published anywhere by the server.
+       */
+      if (type === 'salesperson_transcript') {
+        if (state.role !== 'salesperson') {
+          rejectMessage(
+            session.sessionId,
+            'INVALID_SIGNALING_ROLE',
+            'Only the salesperson may send salesperson transcripts.'
+          );
+          return;
+        }
+        if (typeof data.text !== 'string') {
+          rejectMessage(session.sessionId, 'INVALID_SIGNALING_PAYLOAD', 'Transcript text is required.');
+          return;
+        }
+        store.countSignal(session.sessionId, 'salespersonTranscripts');
+        relayToCounterpart(session, current, 'salesperson_transcript', {
+          text: data.text.slice(0, 4000),
+          isFinal: Boolean(data.isFinal),
+          ordinal:
+            typeof data.ordinal === 'number' && Number.isFinite(data.ordinal)
+              ? Math.max(0, Math.round(data.ordinal))
+              : 0,
+          timestamp: typeof data.timestamp === 'string' ? data.timestamp.slice(0, 40) : '',
+        });
+        return;
+      }
+
+      /** Caption availability for the customer ("captions unavailable" etc.). */
+      if (type === 'salesperson_transcript_status') {
+        if (state.role !== 'salesperson') {
+          rejectMessage(
+            session.sessionId,
+            'INVALID_SIGNALING_ROLE',
+            'Only the salesperson may report transcript status.'
+          );
+          return;
+        }
+        const allowed = ['starting', 'listening', 'error', 'unsupported', 'inactive'];
+        const transcriptState = typeof data.state === 'string' && allowed.includes(data.state) ? data.state : null;
+        if (!transcriptState) {
+          rejectMessage(session.sessionId, 'INVALID_SIGNALING_PAYLOAD', 'A known transcript state is required.');
+          return;
+        }
+        relayToCounterpart(session, current, 'salesperson_transcript_status', {
+          state: transcriptState,
+          detail: sanitizeAiDetail(data.detail),
         });
         return;
       }

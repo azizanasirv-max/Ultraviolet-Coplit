@@ -1009,7 +1009,10 @@ test('prototype2 AI status reaches the salesperson and never leaks connection se
 
   salesperson.send({ type: 'ai_reconnect', sessionId: fixture.sessionId, reason: 'dashboard button' });
   const request = await customer.next((message) => message.type === 'ai_reconnect');
-  assert.equal(request.reason, 'dashboard button');
+  // Privacy: the control message is content-free; internal dashboard labels are
+  // not relayed to the customer.
+  assert.equal(request.reason, undefined);
+  assert.equal(typeof request.requestedAt, 'number');
 
   // A reconnecting salesperson dashboard receives the last known state on join.
   salesperson.close();
@@ -1046,3 +1049,132 @@ test('prototype2 AI status reaches the salesperson and never leaks connection se
   assert.equal(fresh.body.session.ai.connected, false);
 });
 
+
+test('prototype2 private AI state and transcripts are routed by role', async (t) => {
+  const harness = await startServer();
+  t.after(async () => {
+    await harness.close();
+  });
+
+  const fixture = await createFixture(harness.base, 'privacy');
+
+  // The invitation redemption response is customer-scoped: no AI readiness,
+  // call ids, provider errors or reconnect counters. This is the session
+  // hydration path, before React renders anything.
+  const redeemed = await post(harness.base, '/api/invitations/redeem', {
+    inviteToken: fixture.inviteToken,
+    customerKey: fixture.customerKey,
+  });
+  assert.equal(redeemed.status, 200);
+  assert.equal('ai' in redeemed.body.session, false, 'customer hydration must not include AI state');
+  assert.equal('aiReady' in redeemed.body.session, false);
+  assert.equal('aiCallCreated' in redeemed.body.session, false);
+
+  const salesperson = await openSocket(harness.base);
+  const customer = await openSocket(harness.base);
+  t.after(() => {
+    salesperson.close();
+    customer.close();
+  });
+
+  const salesJoin = await join(salesperson, {
+    sessionId: fixture.sessionId,
+    role: 'salesperson',
+    credential: fixture.salespersonKey,
+  });
+  assert.equal(salesJoin.type, 'joined');
+  assert.ok(salesJoin.ai, 'the salesperson receives the last reported AI state');
+
+  const customerJoin = await join(customer, {
+    sessionId: fixture.sessionId,
+    role: 'customer',
+    credential: fixture.customerKey,
+  });
+  assert.equal(customerJoin.type, 'joined');
+  assert.equal('ai' in customerJoin, false, 'the joined envelope must not carry AI state to a customer');
+  assert.equal('ai' in customerJoin.session, false);
+  assert.equal('aiReady' in customerJoin.session, false);
+  await salesperson.next((message) => message.type === 'peer_joined');
+
+  // Session broadcasts are role-scoped as well.
+  const customerState = await customer.next((message) => message.type === 'session_state');
+  assert.equal('ai' in customerState.session, false);
+  assert.equal('aiReady' in customerState.session, false);
+  const salesState = await salesperson.next((message) => message.type === 'session_state');
+  assert.ok(salesState.session.ai, 'the salesperson still receives AI state');
+
+  // AI status: customer -> salesperson only.
+  customer.send({
+    type: 'ai_status',
+    sessionId: fixture.sessionId,
+    state: 'connected',
+    connected: true,
+    audioReachingAi: true,
+  });
+  const status = await salesperson.next(
+    (message) => message.type === 'ai_status' && message.state === 'connected'
+  );
+  assert.equal(status.connected, true);
+  await assert.rejects(
+    customer.next((message) => message.type === 'ai_status', 700),
+    /Timed out/,
+    'the customer must never receive AI status frames'
+  );
+
+  // Customer speech transcript: customer -> salesperson only, partials included.
+  customer.send({
+    type: 'customer_speech_transcript',
+    sessionId: fixture.sessionId,
+    text: 'We need pricing',
+    isFinal: false,
+    ordinal: 1,
+  });
+  const partial = await salesperson.next(
+    (message) => message.type === 'customer_speech_transcript' && message.ordinal === 1
+  );
+  assert.equal(partial.isFinal, false);
+  assert.equal(partial.fromRole, 'customer');
+  await assert.rejects(
+    customer.next((message) => message.type === 'customer_speech_transcript', 700),
+    /Timed out/,
+    'customer transcript frames must not echo back to the customer'
+  );
+
+  // Salesperson speech transcript: salesperson -> customer only.
+  salesperson.send({
+    type: 'salesperson_transcript',
+    sessionId: fixture.sessionId,
+    text: 'Our starter plan includes onboarding',
+    isFinal: false,
+    ordinal: 4,
+  });
+  const caption = await customer.next(
+    (message) => message.type === 'salesperson_transcript' && message.ordinal === 4
+  );
+  assert.equal(caption.text, 'Our starter plan includes onboarding');
+  assert.equal(caption.fromRole, 'salesperson');
+  await assert.rejects(
+    salesperson.next((message) => message.type === 'salesperson_transcript', 700),
+    /Timed out/,
+    'salesperson captions must not echo back to the salesperson'
+  );
+
+  // A customer cannot inject salesperson captions (or AI suggestions).
+  customer.send({ type: 'salesperson_transcript', sessionId: fixture.sessionId, text: 'spoofed', ordinal: 5 });
+  const rejected = await customer.next(
+    (message) => message.type === 'error' && message.code === 'INVALID_SIGNALING_ROLE'
+  );
+  assert.match(rejected.message, /Only the salesperson/);
+
+  // Unknown caption states are refused instead of forwarded.
+  salesperson.send({ type: 'salesperson_transcript_status', sessionId: fixture.sessionId, state: 'peeking' });
+  const badStatus = await salesperson.next(
+    (message) => message.type === 'error' && message.code === 'INVALID_SIGNALING_PAYLOAD'
+  );
+  assert.match(badStatus.message, /transcript state/);
+
+  // Caption availability reaches the customer.
+  salesperson.send({ type: 'salesperson_transcript_status', sessionId: fixture.sessionId, state: 'listening' });
+  const captionStatus = await customer.next((message) => message.type === 'salesperson_transcript_status');
+  assert.equal(captionStatus.state, 'listening');
+});
