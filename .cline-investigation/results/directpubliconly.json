@@ -1,0 +1,1850 @@
+{
+  "scenario": "direct",
+  "browserArgs": [
+    "--force-webrtc-ip-handling-policy=default_public_interface_only"
+  ],
+  "startedAt": "2026-10-25T17:14:17.320Z",
+  "env": {
+    "TURN_URLS": null,
+    "TURN_USERNAME": null,
+    "STUN_URLS": null,
+    "ICE_TRANSPORT_POLICY": "all",
+    "INTERCEPT_ICE": "0"
+  },
+  "samples": [
+    {
+      "at": 1792948510514,
+      "salesperson": {
+        "states": {
+          "connectionState": "failed",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "selectedPair": null,
+        "localCandidateTypes": {
+          "host": 4,
+          "srflx": 1
+        },
+        "remoteCandidateTypes": {},
+        "inboundAudio": null,
+        "outboundAudio": {
+          "bytesSent": 0,
+          "packetsSent": 0
+        },
+        "audioElement": {
+          "paused": false,
+          "muted": false,
+          "volume": 1,
+          "hasSrcObject": true,
+          "srcObjectAudioTracks": 1,
+          "srcIsSilentClip": false
+        },
+        "diagnostics": {
+          "wsStatus": "connected",
+          "pcState": "failed",
+          "iceState": "disconnected",
+          "iceGatheringState": "complete",
+          "dtlsState": "new",
+          "selectedLocalType": "none",
+          "selectedRemoteType": "none",
+          "relayPath": false,
+          "candidates": {
+            "host": 0,
+            "srflx": 1,
+            "prflx": 0,
+            "relay": 0
+          },
+          "bytesSent": 0,
+          "bytesReceived": 0,
+          "sendBitrateKbps": 0,
+          "receiveBitrateKbps": 0,
+          "localSenderCount": 1,
+          "localTrackState": "live",
+          "remoteTrackState": "live (muted)",
+          "remoteTrackMuted": true,
+          "audioElementPaused": false,
+          "audioElementMuted": false,
+          "audioElementVolume": 1,
+          "playbackError": null,
+          "hasTurn": false,
+          "iceTransportPolicy": "all"
+        },
+        "mediaFlowing": false,
+        "selectedPairLabel": "none",
+        "relayCandidates": 0
+      },
+      "customer": {
+        "states": {
+          "connectionState": "failed",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selectedPair": null,
+        "localCandidateTypes": {
+          "host": 4,
+          "srflx": 1
+        },
+        "remoteCandidateTypes": {},
+        "inboundAudio": null,
+        "outboundAudio": {
+          "bytesSent": 0,
+          "packetsSent": 0
+        },
+        "audioElement": {
+          "paused": false,
+          "muted": false,
+          "volume": 1,
+          "hasSrcObject": true,
+          "srcObjectAudioTracks": 1,
+          "srcIsSilentClip": false
+        },
+        "diagnostics": {
+          "wsStatus": "connected",
+          "pcState": "failed",
+          "iceState": "disconnected",
+          "iceGatheringState": "complete",
+          "dtlsState": "new",
+          "selectedLocalType": "none",
+          "selectedRemoteType": "none",
+          "relayPath": false,
+          "candidates": {
+            "host": 0,
+            "srflx": 1,
+            "prflx": 0,
+            "relay": 0
+          },
+          "bytesSent": 0,
+          "bytesReceived": 0,
+          "sendBitrateKbps": 0,
+          "receiveBitrateKbps": 0,
+          "localSenderCount": 1,
+          "localTrackState": "live",
+          "remoteTrackState": "live (muted)",
+          "remoteTrackMuted": true,
+          "audioElementPaused": false,
+          "audioElementMuted": false,
+          "audioElementVolume": 1,
+          "playbackError": null,
+          "hasTurn": false,
+          "iceTransportPolicy": "all"
+        },
+        "mediaFlowing": false,
+        "selectedPairLabel": "none",
+        "relayCandidates": 0
+      }
+    },
+    {
+      "at": 1792948513024,
+      "salesperson": {
+        "states": {
+          "connectionState": "failed",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "selectedPair": null,
+        "localCandidateTypes": {
+          "host": 4,
+          "srflx": 1
+        },
+        "remoteCandidateTypes": {},
+        "inboundAudio": null,
+        "outboundAudio": {
+          "bytesSent": 0,
+          "packetsSent": 0
+        },
+        "audioElement": {
+          "paused": false,
+          "muted": false,
+          "volume": 1,
+          "hasSrcObject": true,
+          "srcObjectAudioTracks": 1,
+          "srcIsSilentClip": false
+        },
+        "diagnostics": {
+          "wsStatus": "connected",
+          "pcState": "failed",
+          "iceState": "disconnected",
+          "iceGatheringState": "complete",
+          "dtlsState": "new",
+          "selectedLocalType": "none",
+          "selectedRemoteType": "none",
+          "relayPath": false,
+          "candidates": {
+            "host": 0,
+            "srflx": 1,
+            "prflx": 0,
+            "relay": 0
+          },
+          "bytesSent": 0,
+          "bytesReceived": 0,
+          "sendBitrateKbps": 0,
+          "receiveBitrateKbps": 0,
+          "localSenderCount": 1,
+          "localTrackState": "live",
+          "remoteTrackState": "live (muted)",
+          "remoteTrackMuted": true,
+          "audioElementPaused": false,
+          "audioElementMuted": false,
+          "audioElementVolume": 1,
+          "playbackError": null,
+          "hasTurn": false,
+          "iceTransportPolicy": "all"
+        },
+        "mediaFlowing": false,
+        "selectedPairLabel": "none",
+        "relayCandidates": 0
+      },
+      "customer": {
+        "states": {
+          "connectionState": "failed",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selectedPair": null,
+        "localCandidateTypes": {
+          "host": 4,
+          "srflx": 1
+        },
+        "remoteCandidateTypes": {},
+        "inboundAudio": null,
+        "outboundAudio": {
+          "bytesSent": 0,
+          "packetsSent": 0
+        },
+        "audioElement": {
+          "paused": false,
+          "muted": false,
+          "volume": 1,
+          "hasSrcObject": true,
+          "srcObjectAudioTracks": 1,
+          "srcIsSilentClip": false
+        },
+        "diagnostics": {
+          "wsStatus": "connected",
+          "pcState": "failed",
+          "iceState": "disconnected",
+          "iceGatheringState": "complete",
+          "dtlsState": "new",
+          "selectedLocalType": "none",
+          "selectedRemoteType": "none",
+          "relayPath": false,
+          "candidates": {
+            "host": 0,
+            "srflx": 1,
+            "prflx": 0,
+            "relay": 0
+          },
+          "bytesSent": 0,
+          "bytesReceived": 0,
+          "sendBitrateKbps": 0,
+          "receiveBitrateKbps": 0,
+          "localSenderCount": 1,
+          "localTrackState": "live",
+          "remoteTrackState": "live (muted)",
+          "remoteTrackMuted": true,
+          "audioElementPaused": false,
+          "audioElementMuted": false,
+          "audioElementVolume": 1,
+          "playbackError": null,
+          "hasTurn": false,
+          "iceTransportPolicy": "all"
+        },
+        "mediaFlowing": false,
+        "selectedPairLabel": "none",
+        "relayCandidates": 0
+      }
+    },
+    {
+      "at": 1792948515536,
+      "salesperson": {
+        "states": {
+          "connectionState": "connecting",
+          "iceConnectionState": "checking",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "selectedPair": null,
+        "localCandidateTypes": {
+          "host": 4,
+          "srflx": 1
+        },
+        "remoteCandidateTypes": {
+          "srflx": 1
+        },
+        "inboundAudio": null,
+        "outboundAudio": {
+          "bytesSent": 0,
+          "packetsSent": 0
+        },
+        "audioElement": {
+          "paused": false,
+          "muted": false,
+          "volume": 1,
+          "hasSrcObject": true,
+          "srcObjectAudioTracks": 1,
+          "srcIsSilentClip": false
+        },
+        "diagnostics": {
+          "wsStatus": "connected",
+          "pcState": "connecting",
+          "iceState": "checking",
+          "iceGatheringState": "complete",
+          "dtlsState": "new",
+          "selectedLocalType": "none",
+          "selectedRemoteType": "none",
+          "relayPath": false,
+          "candidates": {
+            "host": 0,
+            "srflx": 1,
+            "prflx": 0,
+            "relay": 0
+          },
+          "bytesSent": 0,
+          "bytesReceived": 0,
+          "sendBitrateKbps": 0,
+          "receiveBitrateKbps": 0,
+          "localSenderCount": 1,
+          "localTrackState": "live",
+          "remoteTrackState": "live (muted)",
+          "remoteTrackMuted": true,
+          "audioElementPaused": false,
+          "audioElementMuted": false,
+          "audioElementVolume": 1,
+          "playbackError": null,
+          "hasTurn": false,
+          "iceTransportPolicy": "all"
+        },
+        "mediaFlowing": false,
+        "selectedPairLabel": "none",
+        "relayCandidates": 0
+      },
+      "customer": {
+        "states": {
+          "connectionState": "connecting",
+          "iceConnectionState": "checking",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selectedPair": null,
+        "localCandidateTypes": {
+          "host": 4,
+          "srflx": 1
+        },
+        "remoteCandidateTypes": {
+          "srflx": 1
+        },
+        "inboundAudio": null,
+        "outboundAudio": {
+          "bytesSent": 0,
+          "packetsSent": 0
+        },
+        "audioElement": {
+          "paused": false,
+          "muted": false,
+          "volume": 1,
+          "hasSrcObject": true,
+          "srcObjectAudioTracks": 1,
+          "srcIsSilentClip": false
+        },
+        "diagnostics": {
+          "wsStatus": "connected",
+          "pcState": "connecting",
+          "iceState": "checking",
+          "iceGatheringState": "complete",
+          "dtlsState": "new",
+          "selectedLocalType": "none",
+          "selectedRemoteType": "none",
+          "relayPath": false,
+          "candidates": {
+            "host": 0,
+            "srflx": 1,
+            "prflx": 0,
+            "relay": 0
+          },
+          "bytesSent": 0,
+          "bytesReceived": 0,
+          "sendBitrateKbps": 0,
+          "receiveBitrateKbps": 0,
+          "localSenderCount": 1,
+          "localTrackState": "live",
+          "remoteTrackState": "live (muted)",
+          "remoteTrackMuted": true,
+          "audioElementPaused": false,
+          "audioElementMuted": false,
+          "audioElementVolume": 1,
+          "playbackError": null,
+          "hasTurn": false,
+          "iceTransportPolicy": "all"
+        },
+        "mediaFlowing": false,
+        "selectedPairLabel": "none",
+        "relayCandidates": 0
+      }
+    }
+  ],
+  "salesperson": {
+    "pcCount": 4,
+    "openPcCount": 1,
+    "config": {
+      "iceTransportPolicy": "all",
+      "iceServers": [
+        {
+          "urls": [
+            "stun:stun.l.google.com:19302",
+            "stun:stun1.l.google.com:19302",
+            "stun:stun2.l.google.com:19302"
+          ],
+          "hasCredential": false
+        }
+      ],
+      "bundlePolicy": "max-bundle",
+      "rtcpMuxPolicy": "require"
+    },
+    "states": {
+      "connectionState": "connecting",
+      "iceConnectionState": "checking",
+      "iceGatheringState": "complete",
+      "signalingState": "have-local-offer"
+    },
+    "localCandidates": [
+      {
+        "type": "host",
+        "protocol": "udp",
+        "address": "::",
+        "port": 54037
+      },
+      {
+        "type": "host",
+        "protocol": "udp",
+        "address": "0.0.0.0",
+        "port": 52501
+      },
+      {
+        "type": "host",
+        "protocol": "tcp",
+        "address": "::",
+        "port": 9
+      },
+      {
+        "type": "host",
+        "protocol": "tcp",
+        "address": "0.0.0.0",
+        "port": 9
+      },
+      {
+        "type": "srflx",
+        "protocol": "udp",
+        "address": "34.67.51.12",
+        "port": 2049,
+        "url": "stun:stun.l.google.com:19302"
+      }
+    ],
+    "remoteCandidates": [
+      {
+        "type": "srflx",
+        "protocol": "udp",
+        "address": "34.67.51.12",
+        "port": 2048
+      }
+    ],
+    "selectedPair": null,
+    "pairSummary": [
+      {
+        "state": "in-progress",
+        "nominated": false,
+        "local": {
+          "type": "host",
+          "protocol": "udp",
+          "address": "0.0.0.0",
+          "port": 52501
+        },
+        "remote": {
+          "type": "srflx",
+          "protocol": "udp",
+          "address": "34.67.51.12",
+          "port": 2048
+        },
+        "bytesSent": 0,
+        "bytesReceived": 0
+      }
+    ],
+    "localSdp": {
+      "candidateTypes": {
+        "srflx": 1
+      },
+      "candidateLines": 1,
+      "ufrag": "sHYn",
+      "iceOptions": [
+        "trickle"
+      ],
+      "setup": "actpass",
+      "bundle": true,
+      "mAudio": "m=audio 2049 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+      "length": 1445
+    },
+    "remoteSdp": {
+      "candidateTypes": {
+        "srflx": 1
+      },
+      "candidateLines": 1,
+      "ufrag": "QEAO",
+      "iceOptions": [
+        "trickle"
+      ],
+      "setup": "active",
+      "bundle": true,
+      "mAudio": "m=audio 2048 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+      "length": 1345
+    },
+    "inboundAudio": null,
+    "outboundAudio": {
+      "bytesSent": 0,
+      "packetsSent": 0
+    },
+    "transport": {
+      "dtlsState": "new",
+      "dtlsRole": "server",
+      "iceRole": "controlling",
+      "iceLocalUsernameFragment": "sHYn",
+      "bytesSent": 0,
+      "bytesReceived": 0
+    },
+    "audioElement": {
+      "paused": false,
+      "muted": false,
+      "volume": 1,
+      "hasSrcObject": true,
+      "srcObjectAudioTracks": 1,
+      "srcIsSilentClip": false
+    },
+    "snapshot": {
+      "sessionId": "XxwtW9G8kGQPVXCRZj41lQ",
+      "role": "salesperson",
+      "participantId": "H7Bif8NbzuWWa5qV",
+      "wsStatus": "connected",
+      "callState": "connecting",
+      "peerPresent": false,
+      "peerParticipantId": "EyOVpY6_5GH9rFoW",
+      "peerRole": "customer",
+      "participants": [
+        {
+          "participantId": "H7Bif8NbzuWWa5qV",
+          "role": "salesperson",
+          "joinedAt": 1792948457665
+        },
+        {
+          "participantId": "EyOVpY6_5GH9rFoW",
+          "role": "customer",
+          "joinedAt": 1792948457670
+        }
+      ],
+      "micPermission": "granted",
+      "micMuted": false,
+      "localTrackState": "live",
+      "localTrackMuted": false,
+      "localSenderCount": 1,
+      "remoteTrackState": "live",
+      "speakerMuted": false,
+      "audioUnlocked": true,
+      "playbackBlocked": false,
+      "aiStatus": "reconnecting",
+      "aiError": "Session socket closed abnormally. code=1006 reason=",
+      "ai": {
+        "state": "reconnecting",
+        "status": null,
+        "connected": false,
+        "error": "Session socket closed abnormally. code=1006 reason=",
+        "callId": null,
+        "reconnectAttempt": 2,
+        "maxReconnectAttempts": 3,
+        "reconnecting": true,
+        "audioReachingAi": false,
+        "lastEventAt": 1792948515052,
+        "lastSuggestionAt": null,
+        "lastResponseAt": null,
+        "source": "remote"
+      },
+      "aiReconnectRequestedAt": null,
+      "suggestions": [],
+      "customerSpeech": "",
+      "captionStatus": "listening",
+      "salespersonCaption": "",
+      "reconnectAttempt": 0,
+      "lastError": null,
+      "lastServerError": null,
+      "iceConfigLoaded": true,
+      "iceConfigError": null,
+      "iceConfigWarnings": [
+        "No usable TURN relay is configured. Calls work only when both devices can reach each other directly; mobile-data or symmetric-NAT participants will have no audio."
+      ],
+      "turnConfigured": false,
+      "turnCredentialMode": "none",
+      "turnExpiresAt": null,
+      "relayCandidates": 0,
+      "selectedPair": "none",
+      "mediaFlowing": false,
+      "diagnostics": {
+        "wsStatus": "connected",
+        "pcState": "connecting",
+        "iceState": "checking",
+        "iceGatheringState": "complete",
+        "dtlsState": "new",
+        "selectedLocalType": "none",
+        "selectedRemoteType": "none",
+        "relayPath": false,
+        "candidates": {
+          "host": 0,
+          "srflx": 1,
+          "prflx": 0,
+          "relay": 0
+        },
+        "bytesSent": 0,
+        "bytesReceived": 0,
+        "sendBitrateKbps": 0,
+        "receiveBitrateKbps": 0,
+        "localSenderCount": 1,
+        "localTrackState": "live",
+        "remoteTrackState": "live (muted)",
+        "remoteTrackMuted": true,
+        "audioElementPaused": false,
+        "audioElementMuted": false,
+        "audioElementVolume": 1,
+        "playbackError": null,
+        "hasTurn": false,
+        "iceTransportPolicy": "all"
+      },
+      "logs": [
+        "[5:14:36 PM] Offer sent [presence refresh: session_state].",
+        "[5:14:36 PM] ICE connection state: checking",
+        "[5:14:36 PM] Peer connection state: connecting",
+        "[5:14:36 PM] ICE candidate gathering complete.",
+        "[5:14:37 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:37 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:37 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:37 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:37 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:37 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:37 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:37 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:37 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:37 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:37 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:37 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:41 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:41 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:41 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:41 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:41 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:41 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:41 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:41 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:41 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:41 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:41 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:41 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:50 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:50 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:50 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:50 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:50 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:50 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:50 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:50 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:50 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:50 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:50 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:50 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:51 PM] ICE connection state: disconnected",
+        "[5:14:51 PM] Peer connection state: failed",
+        "[5:14:51 PM] Attempting ICE restart after a failed connection.",
+        "[5:14:51 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:54 PM] Establishing a fresh peer connection for customer (session_state).",
+        "[5:14:54 PM] Closed peer connection (replacing peer).",
+        "[5:14:54 PM] Created RTCPeerConnection (peer customer, 1 ICE entr(ies), TURN absent, policy all).",
+        "[5:14:54 PM] Added local microphone track to the peer connection.",
+        "[5:14:54 PM] Remote audio track ended.",
+        "[5:14:54 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:54 PM] Offer skipped: another offer is being negotiated.",
+        "[5:14:54 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:54 PM] Offer skipped: another offer is being negotiated.",
+        "[5:14:54 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:54 PM] Offer skipped: another offer is being negotiated.",
+        "[5:14:54 PM] Offer sent [session_state].",
+        "[5:14:54 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:54 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:54 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:54 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:54 PM] Received remote audio track from customer.",
+        "[5:14:54 PM] Answer applied.",
+        "[5:14:54 PM] Playing remote audio stream live.",
+        "[5:14:54 PM] ICE connection state: checking",
+        "[5:14:54 PM] Peer connection state: connecting",
+        "[5:14:54 PM] ICE candidate gathering complete.",
+        "[5:14:56 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:56 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:56 PM] Offer skipped: another offer is being negotiated.",
+        "[5:14:56 PM] Offer sent [presence refresh: session_state].",
+        "[5:14:56 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:56 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:56 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:56 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:56 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:56 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:14:56 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:56 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:00 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:00 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:00 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:00 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:00 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:00 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:00 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:00 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:00 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:00 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:00 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:00 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:09 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:09 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:09 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:09 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:09 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:09 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:09 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:09 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:09 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:09 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:09 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:09 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:09 PM] ICE connection state: disconnected",
+        "[5:15:09 PM] Peer connection state: failed",
+        "[5:15:09 PM] Attempting ICE restart after a failed connection.",
+        "[5:15:09 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:13 PM] Establishing a fresh peer connection for customer (session_state).",
+        "[5:15:13 PM] Closed peer connection (replacing peer).",
+        "[5:15:13 PM] Created RTCPeerConnection (peer customer, 1 ICE entr(ies), TURN absent, policy all).",
+        "[5:15:13 PM] Added local microphone track to the peer connection.",
+        "[5:15:13 PM] Remote audio track ended.",
+        "[5:15:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:13 PM] Offer skipped: another offer is being negotiated.",
+        "[5:15:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:13 PM] Offer skipped: another offer is being negotiated.",
+        "[5:15:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:13 PM] Offer skipped: another offer is being negotiated.",
+        "[5:15:13 PM] Offer sent [session_state].",
+        "[5:15:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:13 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:13 PM] Received remote audio track from customer.",
+        "[5:15:13 PM] Answer applied.",
+        "[5:15:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:13 PM] Playing remote audio stream live.",
+        "[5:15:13 PM] Offer sent [presence refresh: session_state].",
+        "[5:15:13 PM] ICE connection state: checking",
+        "[5:15:13 PM] Peer connection state: connecting",
+        "[5:15:13 PM] ICE candidate gathering complete.",
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:15 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:15 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:15 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:15 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:15 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:15 PM] Offer skipped: signalingState is \"have-local-offer\"."
+      ]
+    },
+    "events": [
+      {
+        "t": 351,
+        "id": 0,
+        "event": "created",
+        "iceServers": [
+          {
+            "urls": [
+              "stun:stun.l.google.com:19302",
+              "stun:stun1.l.google.com:19302",
+              "stun:stun2.l.google.com:19302"
+            ],
+            "hasCredential": false
+          }
+        ],
+        "iceTransportPolicy": "all"
+      },
+      {
+        "t": 354,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "have-local-offer"
+      },
+      {
+        "t": 355,
+        "id": 0,
+        "event": "icegatheringstatechange",
+        "state": "gathering"
+      },
+      {
+        "t": 361,
+        "id": 0,
+        "event": "icecandidate",
+        "candidate": {
+          "type": "srflx",
+          "protocol": "udp",
+          "address": "34.67.51.12",
+          "port": 2048,
+          "relatedAddress": "0.0.0.0"
+        },
+        "endOfCandidates": false
+      },
+      {
+        "t": 371,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "stable"
+      },
+      {
+        "t": 371,
+        "id": 0,
+        "event": "track",
+        "kind": "audio"
+      },
+      {
+        "t": 374,
+        "id": 0,
+        "event": "iceconnectionstatechange",
+        "state": "checking"
+      },
+      {
+        "t": 374,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "connecting"
+      },
+      {
+        "t": 393,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "have-local-offer"
+      },
+      {
+        "t": 15425,
+        "id": 0,
+        "event": "iceconnectionstatechange",
+        "state": "disconnected"
+      },
+      {
+        "t": 15426,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "failed"
+      },
+      {
+        "t": 18976,
+        "id": 1,
+        "event": "created",
+        "iceServers": [
+          {
+            "urls": [
+              "stun:stun.l.google.com:19302",
+              "stun:stun1.l.google.com:19302",
+              "stun:stun2.l.google.com:19302"
+            ],
+            "hasCredential": false
+          }
+        ],
+        "iceTransportPolicy": "all"
+      },
+      {
+        "t": 18979,
+        "id": 1,
+        "event": "signalingstatechange",
+        "state": "have-local-offer"
+      },
+      {
+        "t": 18980,
+        "id": 1,
+        "event": "icegatheringstatechange",
+        "state": "gathering"
+      },
+      {
+        "t": 18981,
+        "id": 1,
+        "event": "icecandidate",
+        "candidate": {
+          "type": "srflx",
+          "protocol": "udp",
+          "address": "34.67.51.12",
+          "port": 2050,
+          "relatedAddress": "0.0.0.0"
+        },
+        "endOfCandidates": false
+      },
+      {
+        "t": 18985,
+        "id": 1,
+        "event": "signalingstatechange",
+        "state": "stable"
+      },
+      {
+        "t": 18985,
+        "id": 1,
+        "event": "track",
+        "kind": "audio"
+      },
+      {
+        "t": 18987,
+        "id": 1,
+        "event": "signalingstatechange",
+        "state": "have-local-offer"
+      },
+      {
+        "t": 18987,
+        "id": 1,
+        "event": "iceconnectionstatechange",
+        "state": "checking"
+      },
+      {
+        "t": 18988,
+        "id": 1,
+        "event": "connectionstatechange",
+        "state": "connecting"
+      },
+      {
+        "t": 19097,
+        "id": 1,
+        "event": "icegatheringstatechange",
+        "state": "complete"
+      },
+      {
+        "t": 19097,
+        "id": 1,
+        "event": "icecandidate",
+        "candidate": null,
+        "endOfCandidates": true
+      },
+      {
+        "t": 33988,
+        "id": 1,
+        "event": "iceconnectionstatechange",
+        "state": "disconnected"
+      },
+      {
+        "t": 33989,
+        "id": 1,
+        "event": "connectionstatechange",
+        "state": "failed"
+      },
+      {
+        "t": 37557,
+        "id": 2,
+        "event": "created",
+        "iceServers": [
+          {
+            "urls": [
+              "stun:stun.l.google.com:19302",
+              "stun:stun1.l.google.com:19302",
+              "stun:stun2.l.google.com:19302"
+            ],
+            "hasCredential": false
+          }
+        ],
+        "iceTransportPolicy": "all"
+      },
+      {
+        "t": 37561,
+        "id": 2,
+        "event": "signalingstatechange",
+        "state": "have-local-offer"
+      },
+      {
+        "t": 37562,
+        "id": 2,
+        "event": "icegatheringstatechange",
+        "state": "gathering"
+      },
+      {
+        "t": 37563,
+        "id": 2,
+        "event": "icecandidate",
+        "candidate": {
+          "type": "srflx",
+          "protocol": "udp",
+          "address": "34.67.51.12",
+          "port": 2052,
+          "relatedAddress": "0.0.0.0"
+        },
+        "endOfCandidates": false
+      },
+      {
+        "t": 37567,
+        "id": 2,
+        "event": "signalingstatechange",
+        "state": "stable"
+      },
+      {
+        "t": 37567,
+        "id": 2,
+        "event": "track",
+        "kind": "audio"
+      },
+      {
+        "t": 37569,
+        "id": 2,
+        "event": "iceconnectionstatechange",
+        "state": "checking"
+      },
+      {
+        "t": 37570,
+        "id": 2,
+        "event": "connectionstatechange",
+        "state": "connecting"
+      },
+      {
+        "t": 37675,
+        "id": 2,
+        "event": "icegatheringstatechange",
+        "state": "complete"
+      },
+      {
+        "t": 37675,
+        "id": 2,
+        "event": "icecandidate",
+        "candidate": null,
+        "endOfCandidates": true
+      },
+      {
+        "t": 39066,
+        "id": 2,
+        "event": "signalingstatechange",
+        "state": "have-local-offer"
+      },
+      {
+        "t": 52629,
+        "id": 2,
+        "event": "iceconnectionstatechange",
+        "state": "disconnected"
+      },
+      {
+        "t": 52629,
+        "id": 2,
+        "event": "connectionstatechange",
+        "state": "failed"
+      },
+      {
+        "t": 56176,
+        "id": 3,
+        "event": "created",
+        "iceServers": [
+          {
+            "urls": [
+              "stun:stun.l.google.com:19302",
+              "stun:stun1.l.google.com:19302",
+              "stun:stun2.l.google.com:19302"
+            ],
+            "hasCredential": false
+          }
+        ],
+        "iceTransportPolicy": "all"
+      },
+      {
+        "t": 56180,
+        "id": 3,
+        "event": "signalingstatechange",
+        "state": "have-local-offer"
+      },
+      {
+        "t": 56181,
+        "id": 3,
+        "event": "icegatheringstatechange",
+        "state": "gathering"
+      },
+      {
+        "t": 56182,
+        "id": 3,
+        "event": "icecandidate",
+        "candidate": {
+          "type": "srflx",
+          "protocol": "udp",
+          "address": "34.67.51.12",
+          "port": 2049,
+          "relatedAddress": "0.0.0.0"
+        },
+        "endOfCandidates": false
+      },
+      {
+        "t": 56185,
+        "id": 3,
+        "event": "signalingstatechange",
+        "state": "stable"
+      },
+      {
+        "t": 56185,
+        "id": 3,
+        "event": "track",
+        "kind": "audio"
+      },
+      {
+        "t": 56188,
+        "id": 3,
+        "event": "signalingstatechange",
+        "state": "have-local-offer"
+      },
+      {
+        "t": 56188,
+        "id": 3,
+        "event": "iceconnectionstatechange",
+        "state": "checking"
+      },
+      {
+        "t": 56188,
+        "id": 3,
+        "event": "connectionstatechange",
+        "state": "connecting"
+      },
+      {
+        "t": 56300,
+        "id": 3,
+        "event": "icegatheringstatechange",
+        "state": "complete"
+      },
+      {
+        "t": 56300,
+        "id": 3,
+        "event": "icecandidate",
+        "candidate": null,
+        "endOfCandidates": true
+      }
+    ]
+  },
+  "customer": {
+    "pcCount": 4,
+    "openPcCount": 1,
+    "config": {
+      "iceTransportPolicy": "all",
+      "iceServers": [
+        {
+          "urls": [
+            "stun:stun.l.google.com:19302",
+            "stun:stun1.l.google.com:19302",
+            "stun:stun2.l.google.com:19302"
+          ],
+          "hasCredential": false
+        }
+      ],
+      "bundlePolicy": "max-bundle",
+      "rtcpMuxPolicy": "require"
+    },
+    "states": {
+      "connectionState": "connecting",
+      "iceConnectionState": "checking",
+      "iceGatheringState": "complete",
+      "signalingState": "stable"
+    },
+    "localCandidates": [
+      {
+        "type": "host",
+        "protocol": "udp",
+        "address": "::",
+        "port": 37714
+      },
+      {
+        "type": "host",
+        "protocol": "tcp",
+        "address": "0.0.0.0",
+        "port": 9
+      },
+      {
+        "type": "srflx",
+        "protocol": "udp",
+        "address": "34.67.51.12",
+        "port": 2048,
+        "url": "stun:stun.l.google.com:19302"
+      },
+      {
+        "type": "host",
+        "protocol": "tcp",
+        "address": "::",
+        "port": 9
+      },
+      {
+        "type": "host",
+        "protocol": "udp",
+        "address": "0.0.0.0",
+        "port": 44895
+      }
+    ],
+    "remoteCandidates": [
+      {
+        "type": "srflx",
+        "protocol": "udp",
+        "address": "34.67.51.12",
+        "port": 2049
+      }
+    ],
+    "selectedPair": null,
+    "pairSummary": [
+      {
+        "state": "in-progress",
+        "nominated": false,
+        "local": {
+          "type": "host",
+          "protocol": "udp",
+          "address": "0.0.0.0",
+          "port": 44895
+        },
+        "remote": {
+          "type": "srflx",
+          "protocol": "udp",
+          "address": "34.67.51.12",
+          "port": 2049
+        },
+        "bytesSent": 0,
+        "bytesReceived": 0
+      }
+    ],
+    "localSdp": {
+      "candidateTypes": {
+        "srflx": 1
+      },
+      "candidateLines": 1,
+      "ufrag": "QEAO",
+      "iceOptions": [
+        "trickle"
+      ],
+      "setup": "active",
+      "bundle": true,
+      "mAudio": "m=audio 2048 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+      "length": 1345
+    },
+    "remoteSdp": {
+      "candidateTypes": {
+        "srflx": 1
+      },
+      "candidateLines": 1,
+      "ufrag": "sHYn",
+      "iceOptions": [
+        "trickle"
+      ],
+      "setup": "actpass",
+      "bundle": true,
+      "mAudio": "m=audio 2049 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+      "length": 1445
+    },
+    "inboundAudio": null,
+    "outboundAudio": {
+      "bytesSent": 0,
+      "packetsSent": 0
+    },
+    "transport": {
+      "dtlsState": "new",
+      "dtlsRole": "client",
+      "iceRole": "controlled",
+      "iceLocalUsernameFragment": "QEAO",
+      "bytesSent": 0,
+      "bytesReceived": 0
+    },
+    "audioElement": {
+      "paused": false,
+      "muted": false,
+      "volume": 1,
+      "hasSrcObject": true,
+      "srcObjectAudioTracks": 1,
+      "srcIsSilentClip": false
+    },
+    "snapshot": {
+      "sessionId": "XxwtW9G8kGQPVXCRZj41lQ",
+      "role": "customer",
+      "participantId": "EyOVpY6_5GH9rFoW",
+      "wsStatus": "connected",
+      "callState": "connecting",
+      "peerPresent": false,
+      "peerParticipantId": "H7Bif8NbzuWWa5qV",
+      "peerRole": "salesperson",
+      "participants": [
+        {
+          "participantId": "H7Bif8NbzuWWa5qV",
+          "role": "salesperson",
+          "joinedAt": 1792948457665
+        },
+        {
+          "participantId": "EyOVpY6_5GH9rFoW",
+          "role": "customer",
+          "joinedAt": 1792948457670
+        }
+      ],
+      "micPermission": "granted",
+      "micMuted": false,
+      "localTrackState": "live",
+      "localTrackMuted": false,
+      "localSenderCount": 1,
+      "remoteTrackState": "live",
+      "speakerMuted": false,
+      "audioUnlocked": true,
+      "playbackBlocked": false,
+      "aiStatus": "reconnecting",
+      "aiError": "Session socket closed abnormally. code=1006 reason=",
+      "ai": {
+        "state": "reconnecting",
+        "status": null,
+        "connected": false,
+        "error": "Session socket closed abnormally. code=1006 reason=",
+        "callId": "call_probe",
+        "reconnectAttempt": 2,
+        "maxReconnectAttempts": 3,
+        "reconnecting": true,
+        "audioReachingAi": false,
+        "lastEventAt": 1792948515010,
+        "lastSuggestionAt": null,
+        "lastResponseAt": null,
+        "source": "local"
+      },
+      "aiReconnectRequestedAt": null,
+      "suggestions": [],
+      "customerSpeech": "",
+      "captionStatus": "off",
+      "salespersonCaption": "",
+      "reconnectAttempt": 0,
+      "lastError": null,
+      "lastServerError": null,
+      "iceConfigLoaded": true,
+      "iceConfigError": null,
+      "iceConfigWarnings": [
+        "No usable TURN relay is configured. Calls work only when both devices can reach each other directly; mobile-data or symmetric-NAT participants will have no audio."
+      ],
+      "turnConfigured": false,
+      "turnCredentialMode": "none",
+      "turnExpiresAt": null,
+      "relayCandidates": 0,
+      "selectedPair": "none",
+      "mediaFlowing": false,
+      "diagnostics": {
+        "wsStatus": "connected",
+        "pcState": "connecting",
+        "iceState": "checking",
+        "iceGatheringState": "complete",
+        "dtlsState": "new",
+        "selectedLocalType": "none",
+        "selectedRemoteType": "none",
+        "relayPath": false,
+        "candidates": {
+          "host": 0,
+          "srflx": 1,
+          "prflx": 0,
+          "relay": 0
+        },
+        "bytesSent": 0,
+        "bytesReceived": 0,
+        "sendBitrateKbps": 0,
+        "receiveBitrateKbps": 0,
+        "localSenderCount": 1,
+        "localTrackState": "live",
+        "remoteTrackState": "live (muted)",
+        "remoteTrackMuted": true,
+        "audioElementPaused": false,
+        "audioElementMuted": false,
+        "audioElementVolume": 1,
+        "playbackError": null,
+        "hasTurn": false,
+        "iceTransportPolicy": "all"
+      },
+      "logs": [
+        "[5:14:36 PM] Received remote audio track from salesperson.",
+        "[5:14:36 PM] Playing remote audio stream live.",
+        "[5:14:36 PM] Answer sent.",
+        "[5:14:36 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:14:36 PM] AI recovery scheduled in 1500ms (attempt 1/3).",
+        "[5:14:36 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:36 PM] ICE connection state: checking",
+        "[5:14:36 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:36 PM] Peer connection state: connecting",
+        "[5:14:36 PM] Ignoring duplicate offer: ICE credentials match the active session.",
+        "[5:14:36 PM] ICE candidate gathering complete.",
+        "[5:14:37 PM] Requesting a new AI call from the server...",
+        "[5:14:37 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:37 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:37 PM] New AI call created (call_pro).",
+        "[5:14:37 PM] Joining the new AI call (call_pro).",
+        "[5:14:37 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:37 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:37 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:14:37 PM] AI recovery scheduled in 4000ms (attempt 2/3).",
+        "[5:14:37 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:37 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:41 PM] Requesting a new AI call from the server...",
+        "[5:14:41 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:41 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:41 PM] New AI call created (call_pro).",
+        "[5:14:41 PM] Joining the new AI call (call_pro).",
+        "[5:14:41 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:41 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:41 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:14:41 PM] AI recovery scheduled in 9000ms (attempt 3/3).",
+        "[5:14:41 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:41 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:50 PM] Requesting a new AI call from the server...",
+        "[5:14:50 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:50 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:50 PM] New AI call created (call_pro).",
+        "[5:14:50 PM] Joining the new AI call (call_pro).",
+        "[5:14:50 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:50 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:50 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:14:50 PM] AI recovery stopped after the bounded retry limit.",
+        "[5:14:50 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:50 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:51 PM] ICE connection state: disconnected",
+        "[5:14:51 PM] Peer connection state: failed",
+        "[5:14:54 PM] Manual AI restart requested; a brand new Ultravox call will be created.",
+        "[5:14:54 PM] Requesting a new AI call from the server...",
+        "[5:14:54 PM] Establishing a fresh peer connection for salesperson (session_state).",
+        "[5:14:54 PM] Closed peer connection (replacing peer).",
+        "[5:14:54 PM] Created RTCPeerConnection (peer salesperson, 1 ICE entr(ies), TURN absent, policy all).",
+        "[5:14:54 PM] Added local microphone track to the peer connection.",
+        "[5:14:54 PM] Remote audio track ended.",
+        "[5:14:54 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:54 PM] New AI call created (call_pro).",
+        "[5:14:54 PM] Joining the new AI call (call_pro).",
+        "[5:14:54 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:54 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:54 PM] Received offer. Creating answer...",
+        "[5:14:54 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:14:54 PM] AI recovery scheduled in 1500ms (attempt 1/3).",
+        "[5:14:54 PM] Received remote audio track from salesperson.",
+        "[5:14:54 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:54 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:54 PM] Playing remote audio stream live.",
+        "[5:14:54 PM] Answer sent.",
+        "[5:14:54 PM] ICE connection state: checking",
+        "[5:14:54 PM] Peer connection state: connecting",
+        "[5:14:55 PM] ICE candidate gathering complete.",
+        "[5:14:56 PM] Requesting a new AI call from the server...",
+        "[5:14:56 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:56 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:56 PM] Ignoring duplicate offer: ICE credentials match the active session.",
+        "[5:14:56 PM] New AI call created (call_pro).",
+        "[5:14:56 PM] Joining the new AI call (call_pro).",
+        "[5:14:56 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:56 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:56 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:14:56 PM] AI recovery scheduled in 4000ms (attempt 2/3).",
+        "[5:14:56 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:14:56 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:00 PM] Requesting a new AI call from the server...",
+        "[5:15:00 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:00 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:00 PM] New AI call created (call_pro).",
+        "[5:15:00 PM] Joining the new AI call (call_pro).",
+        "[5:15:00 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:00 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:00 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:15:00 PM] AI recovery scheduled in 9000ms (attempt 3/3).",
+        "[5:15:00 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:00 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:09 PM] Requesting a new AI call from the server...",
+        "[5:15:09 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:09 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:09 PM] New AI call created (call_pro).",
+        "[5:15:09 PM] Joining the new AI call (call_pro).",
+        "[5:15:09 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:09 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:09 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:15:09 PM] AI recovery stopped after the bounded retry limit.",
+        "[5:15:09 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:09 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:09 PM] ICE connection state: disconnected",
+        "[5:15:09 PM] Peer connection state: failed",
+        "[5:15:13 PM] Manual AI restart requested; a brand new Ultravox call will be created.",
+        "[5:15:13 PM] Requesting a new AI call from the server...",
+        "[5:15:13 PM] Establishing a fresh peer connection for salesperson (session_state).",
+        "[5:15:13 PM] Closed peer connection (replacing peer).",
+        "[5:15:13 PM] Created RTCPeerConnection (peer salesperson, 1 ICE entr(ies), TURN absent, policy all).",
+        "[5:15:13 PM] Added local microphone track to the peer connection.",
+        "[5:15:13 PM] Remote audio track ended.",
+        "[5:15:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:13 PM] New AI call created (call_pro).",
+        "[5:15:13 PM] Joining the new AI call (call_pro).",
+        "[5:15:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:13 PM] Received offer. Creating answer...",
+        "[5:15:13 PM] Received remote audio track from salesperson.",
+        "[5:15:13 PM] Playing remote audio stream live.",
+        "[5:15:13 PM] Answer sent.",
+        "[5:15:13 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:15:13 PM] AI recovery scheduled in 1500ms (attempt 1/3).",
+        "[5:15:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:13 PM] ICE connection state: checking",
+        "[5:15:13 PM] Peer connection state: connecting",
+        "[5:15:13 PM] Ignoring duplicate offer: ICE credentials match the active session.",
+        "[5:15:13 PM] ICE candidate gathering complete.",
+        "[5:15:15 PM] Requesting a new AI call from the server...",
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:15 PM] New AI call created (call_pro).",
+        "[5:15:15 PM] Joining the new AI call (call_pro).",
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:15 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:15:15 PM] AI recovery scheduled in 4000ms (attempt 2/3).",
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection."
+      ]
+    },
+    "events": [
+      {
+        "t": 188,
+        "id": 0,
+        "event": "created",
+        "iceServers": [
+          {
+            "urls": [
+              "stun:stun.l.google.com:19302",
+              "stun:stun1.l.google.com:19302",
+              "stun:stun2.l.google.com:19302"
+            ],
+            "hasCredential": false
+          }
+        ],
+        "iceTransportPolicy": "all"
+      },
+      {
+        "t": 198,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "have-remote-offer"
+      },
+      {
+        "t": 201,
+        "id": 0,
+        "event": "track",
+        "kind": "audio"
+      },
+      {
+        "t": 206,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "stable"
+      },
+      {
+        "t": 206,
+        "id": 0,
+        "event": "icegatheringstatechange",
+        "state": "gathering"
+      },
+      {
+        "t": 207,
+        "id": 0,
+        "event": "iceconnectionstatechange",
+        "state": "checking"
+      },
+      {
+        "t": 207,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "connecting"
+      },
+      {
+        "t": 208,
+        "id": 0,
+        "event": "icecandidate",
+        "candidate": {
+          "type": "srflx",
+          "protocol": "udp",
+          "address": "34.67.51.12",
+          "port": 2049,
+          "relatedAddress": "0.0.0.0"
+        },
+        "endOfCandidates": false
+      },
+      {
+        "t": 325,
+        "id": 0,
+        "event": "icegatheringstatechange",
+        "state": "complete"
+      },
+      {
+        "t": 325,
+        "id": 0,
+        "event": "icecandidate",
+        "candidate": null,
+        "endOfCandidates": true
+      },
+      {
+        "t": 15262,
+        "id": 0,
+        "event": "iceconnectionstatechange",
+        "state": "disconnected"
+      },
+      {
+        "t": 15263,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "failed"
+      },
+      {
+        "t": 18813,
+        "id": 1,
+        "event": "created",
+        "iceServers": [
+          {
+            "urls": [
+              "stun:stun.l.google.com:19302",
+              "stun:stun1.l.google.com:19302",
+              "stun:stun2.l.google.com:19302"
+            ],
+            "hasCredential": false
+          }
+        ],
+        "iceTransportPolicy": "all"
+      },
+      {
+        "t": 18817,
+        "id": 1,
+        "event": "signalingstatechange",
+        "state": "have-remote-offer"
+      },
+      {
+        "t": 18817,
+        "id": 1,
+        "event": "track",
+        "kind": "audio"
+      },
+      {
+        "t": 18820,
+        "id": 1,
+        "event": "signalingstatechange",
+        "state": "stable"
+      },
+      {
+        "t": 18820,
+        "id": 1,
+        "event": "icegatheringstatechange",
+        "state": "gathering"
+      },
+      {
+        "t": 18821,
+        "id": 1,
+        "event": "iceconnectionstatechange",
+        "state": "checking"
+      },
+      {
+        "t": 18821,
+        "id": 1,
+        "event": "connectionstatechange",
+        "state": "connecting"
+      },
+      {
+        "t": 18822,
+        "id": 1,
+        "event": "icecandidate",
+        "candidate": {
+          "type": "srflx",
+          "protocol": "udp",
+          "address": "34.67.51.12",
+          "port": 2051,
+          "relatedAddress": "0.0.0.0"
+        },
+        "endOfCandidates": false
+      },
+      {
+        "t": 18934,
+        "id": 1,
+        "event": "icegatheringstatechange",
+        "state": "complete"
+      },
+      {
+        "t": 18934,
+        "id": 1,
+        "event": "icecandidate",
+        "candidate": null,
+        "endOfCandidates": true
+      },
+      {
+        "t": 33871,
+        "id": 1,
+        "event": "iceconnectionstatechange",
+        "state": "disconnected"
+      },
+      {
+        "t": 33872,
+        "id": 1,
+        "event": "connectionstatechange",
+        "state": "failed"
+      },
+      {
+        "t": 37394,
+        "id": 2,
+        "event": "created",
+        "iceServers": [
+          {
+            "urls": [
+              "stun:stun.l.google.com:19302",
+              "stun:stun1.l.google.com:19302",
+              "stun:stun2.l.google.com:19302"
+            ],
+            "hasCredential": false
+          }
+        ],
+        "iceTransportPolicy": "all"
+      },
+      {
+        "t": 37400,
+        "id": 2,
+        "event": "signalingstatechange",
+        "state": "have-remote-offer"
+      },
+      {
+        "t": 37400,
+        "id": 2,
+        "event": "track",
+        "kind": "audio"
+      },
+      {
+        "t": 37403,
+        "id": 2,
+        "event": "signalingstatechange",
+        "state": "stable"
+      },
+      {
+        "t": 37403,
+        "id": 2,
+        "event": "icegatheringstatechange",
+        "state": "gathering"
+      },
+      {
+        "t": 37404,
+        "id": 2,
+        "event": "iceconnectionstatechange",
+        "state": "checking"
+      },
+      {
+        "t": 37404,
+        "id": 2,
+        "event": "connectionstatechange",
+        "state": "connecting"
+      },
+      {
+        "t": 37405,
+        "id": 2,
+        "event": "icecandidate",
+        "candidate": {
+          "type": "srflx",
+          "protocol": "udp",
+          "address": "34.67.51.12",
+          "port": 2053,
+          "relatedAddress": "0.0.0.0"
+        },
+        "endOfCandidates": false
+      },
+      {
+        "t": 37528,
+        "id": 2,
+        "event": "icegatheringstatechange",
+        "state": "complete"
+      },
+      {
+        "t": 37528,
+        "id": 2,
+        "event": "icecandidate",
+        "candidate": null,
+        "endOfCandidates": true
+      },
+      {
+        "t": 52465,
+        "id": 2,
+        "event": "iceconnectionstatechange",
+        "state": "disconnected"
+      },
+      {
+        "t": 52466,
+        "id": 2,
+        "event": "connectionstatechange",
+        "state": "failed"
+      },
+      {
+        "t": 56012,
+        "id": 3,
+        "event": "created",
+        "iceServers": [
+          {
+            "urls": [
+              "stun:stun.l.google.com:19302",
+              "stun:stun1.l.google.com:19302",
+              "stun:stun2.l.google.com:19302"
+            ],
+            "hasCredential": false
+          }
+        ],
+        "iceTransportPolicy": "all"
+      },
+      {
+        "t": 56018,
+        "id": 3,
+        "event": "signalingstatechange",
+        "state": "have-remote-offer"
+      },
+      {
+        "t": 56018,
+        "id": 3,
+        "event": "track",
+        "kind": "audio"
+      },
+      {
+        "t": 56020,
+        "id": 3,
+        "event": "signalingstatechange",
+        "state": "stable"
+      },
+      {
+        "t": 56021,
+        "id": 3,
+        "event": "icegatheringstatechange",
+        "state": "gathering"
+      },
+      {
+        "t": 56021,
+        "id": 3,
+        "event": "iceconnectionstatechange",
+        "state": "checking"
+      },
+      {
+        "t": 56021,
+        "id": 3,
+        "event": "connectionstatechange",
+        "state": "connecting"
+      },
+      {
+        "t": 56023,
+        "id": 3,
+        "event": "icecandidate",
+        "candidate": {
+          "type": "srflx",
+          "protocol": "udp",
+          "address": "34.67.51.12",
+          "port": 2048,
+          "relatedAddress": "0.0.0.0"
+        },
+        "endOfCandidates": false
+      },
+      {
+        "t": 56137,
+        "id": 3,
+        "event": "icegatheringstatechange",
+        "state": "complete"
+      },
+      {
+        "t": 56137,
+        "id": 3,
+        "event": "icecandidate",
+        "candidate": null,
+        "endOfCandidates": true
+      }
+    ]
+  }
+}

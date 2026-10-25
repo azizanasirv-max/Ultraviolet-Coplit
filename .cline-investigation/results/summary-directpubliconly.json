@@ -1,0 +1,258 @@
+{
+  "file": "directpubliconly.json",
+  "scenario": "direct",
+  "error": null,
+  "env": {
+    "TURN_URLS": null,
+    "TURN_USERNAME": null,
+    "STUN_URLS": null,
+    "ICE_TRANSPORT_POLICY": "all",
+    "INTERCEPT_ICE": "0"
+  },
+  "samples": [
+    {
+      "t": 1792948510514,
+      "sl": {
+        "connectionState": "failed",
+        "iceConnectionState": "disconnected",
+        "iceGatheringState": "complete",
+        "signalingState": "have-local-offer"
+      },
+      "cl": {
+        "connectionState": "failed",
+        "iceConnectionState": "disconnected",
+        "iceGatheringState": "complete",
+        "signalingState": "stable"
+      },
+      "sSel": null,
+      "cSel": null,
+      "sOut": 0,
+      "cOut": 0,
+      "flowS": false
+    },
+    {
+      "t": 1792948513024,
+      "sl": {
+        "connectionState": "failed",
+        "iceConnectionState": "disconnected",
+        "iceGatheringState": "complete",
+        "signalingState": "have-local-offer"
+      },
+      "cl": {
+        "connectionState": "failed",
+        "iceConnectionState": "disconnected",
+        "iceGatheringState": "complete",
+        "signalingState": "stable"
+      },
+      "sSel": null,
+      "cSel": null,
+      "sOut": 0,
+      "cOut": 0,
+      "flowS": false
+    },
+    {
+      "t": 1792948515536,
+      "sl": {
+        "connectionState": "connecting",
+        "iceConnectionState": "checking",
+        "iceGatheringState": "complete",
+        "signalingState": "have-local-offer"
+      },
+      "cl": {
+        "connectionState": "connecting",
+        "iceConnectionState": "checking",
+        "iceGatheringState": "complete",
+        "signalingState": "stable"
+      },
+      "sSel": null,
+      "cSel": null,
+      "sOut": 0,
+      "cOut": 0,
+      "flowS": false
+    }
+  ],
+  "finals": {
+    "sales": {
+      "states": {
+        "connectionState": "connecting",
+        "iceConnectionState": "checking",
+        "iceGatheringState": "complete",
+        "signalingState": "have-local-offer"
+      },
+      "pc": 4,
+      "open": 1,
+      "local": [
+        {
+          "type": "host",
+          "protocol": "udp",
+          "address": "::",
+          "port": 54037
+        },
+        {
+          "type": "host",
+          "protocol": "udp",
+          "address": "0.0.0.0",
+          "port": 52501
+        },
+        {
+          "type": "host",
+          "protocol": "tcp",
+          "address": "::",
+          "port": 9
+        },
+        {
+          "type": "host",
+          "protocol": "tcp",
+          "address": "0.0.0.0",
+          "port": 9
+        },
+        {
+          "type": "srflx",
+          "protocol": "udp",
+          "address": "34.67.51.12",
+          "port": 2049,
+          "url": "stun:stun.l.google.com:19302"
+        }
+      ],
+      "selected": null,
+      "callState": "connecting",
+      "lastError": null,
+      "mediaFlowing": false,
+      "localSdp": {
+        "candidateTypes": {
+          "srflx": 1
+        },
+        "candidateLines": 1,
+        "ufrag": "sHYn",
+        "iceOptions": [
+          "trickle"
+        ],
+        "setup": "actpass",
+        "bundle": true,
+        "mAudio": "m=audio 2049 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+        "length": 1445
+      },
+      "remoteSdp": {
+        "candidateTypes": {
+          "srflx": 1
+        },
+        "candidateLines": 1,
+        "ufrag": "QEAO",
+        "iceOptions": [
+          "trickle"
+        ],
+        "setup": "active",
+        "bundle": true,
+        "mAudio": "m=audio 2048 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+        "length": 1345
+      },
+      "audio": {
+        "paused": false,
+        "muted": false,
+        "volume": 1,
+        "hasSrcObject": true,
+        "srcObjectAudioTracks": 1,
+        "srcIsSilentClip": false
+      },
+      "logTail": [
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:15 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:15 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:15 PM] Offer skipped: signalingState is \"have-local-offer\"."
+      ]
+    },
+    "customer": {
+      "states": {
+        "connectionState": "connecting",
+        "iceConnectionState": "checking",
+        "iceGatheringState": "complete",
+        "signalingState": "stable"
+      },
+      "pc": 4,
+      "open": 1,
+      "local": [
+        {
+          "type": "host",
+          "protocol": "udp",
+          "address": "::",
+          "port": 37714
+        },
+        {
+          "type": "host",
+          "protocol": "tcp",
+          "address": "0.0.0.0",
+          "port": 9
+        },
+        {
+          "type": "srflx",
+          "protocol": "udp",
+          "address": "34.67.51.12",
+          "port": 2048,
+          "url": "stun:stun.l.google.com:19302"
+        },
+        {
+          "type": "host",
+          "protocol": "tcp",
+          "address": "::",
+          "port": 9
+        },
+        {
+          "type": "host",
+          "protocol": "udp",
+          "address": "0.0.0.0",
+          "port": 44895
+        }
+      ],
+      "selected": null,
+      "callState": "connecting",
+      "lastError": null,
+      "mediaFlowing": false,
+      "localSdp": {
+        "candidateTypes": {
+          "srflx": 1
+        },
+        "candidateLines": 1,
+        "ufrag": "QEAO",
+        "iceOptions": [
+          "trickle"
+        ],
+        "setup": "active",
+        "bundle": true,
+        "mAudio": "m=audio 2048 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+        "length": 1345
+      },
+      "remoteSdp": {
+        "candidateTypes": {
+          "srflx": 1
+        },
+        "candidateLines": 1,
+        "ufrag": "sHYn",
+        "iceOptions": [
+          "trickle"
+        ],
+        "setup": "actpass",
+        "bundle": true,
+        "mAudio": "m=audio 2049 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+        "length": 1445
+      },
+      "audio": {
+        "paused": false,
+        "muted": false,
+        "volume": 1,
+        "hasSrcObject": true,
+        "srcObjectAudioTracks": 1,
+        "srcIsSilentClip": false
+      },
+      "logTail": [
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:15 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:15:15 PM] AI recovery scheduled in 4000ms (attempt 2/3).",
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:15:15 PM] Presence refreshed (session_state); keeping the existing peer connection."
+      ]
+    }
+  }
+}

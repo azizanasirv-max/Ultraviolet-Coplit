@@ -1,0 +1,1271 @@
+{
+  "scenario": "direct",
+  "browserArgs": [],
+  "startedAt": "2026-10-25T17:12:34.815Z",
+  "env": {
+    "TURN_URLS": null,
+    "TURN_USERNAME": null,
+    "STUN_URLS": null,
+    "ICE_TRANSPORT_POLICY": "all",
+    "INTERCEPT_ICE": "0"
+  },
+  "samples": [
+    {
+      "at": 1792948357984,
+      "salesperson": {
+        "states": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selectedPair": {
+          "local": {
+            "type": "host",
+            "protocol": "udp",
+            "address": "240.112.23.39",
+            "port": 40536
+          },
+          "remote": {
+            "type": "host",
+            "protocol": "udp",
+            "address": "240.112.23.39",
+            "port": 34068
+          },
+          "state": "succeeded",
+          "nominated": true,
+          "bytesSent": 15844,
+          "bytesReceived": 16227,
+          "currentRoundTripTime": 0
+        },
+        "localCandidateTypes": {
+          "host": 1
+        },
+        "remoteCandidateTypes": {
+          "host": 1
+        },
+        "inboundAudio": {
+          "bytesReceived": 7084,
+          "packetsReceived": 139,
+          "packetsLost": 0,
+          "jitter": 0,
+          "audioLevel": 0.249977111117893,
+          "totalAudioEnergy": 0.6833825048361489,
+          "totalSamplesReceived": 132480
+        },
+        "outboundAudio": {
+          "bytesSent": 6900,
+          "packetsSent": 138
+        },
+        "audioElement": {
+          "paused": false,
+          "muted": false,
+          "volume": 1,
+          "hasSrcObject": true,
+          "srcObjectAudioTracks": 1,
+          "srcIsSilentClip": false
+        },
+        "diagnostics": {
+          "wsStatus": "connected",
+          "pcState": "connected",
+          "iceState": "connected",
+          "iceGatheringState": "complete",
+          "dtlsState": "connected",
+          "selectedLocalType": "host",
+          "selectedRemoteType": "host",
+          "relayPath": false,
+          "candidates": {
+            "host": 1,
+            "srflx": 0,
+            "prflx": 0,
+            "relay": 0
+          },
+          "bytesSent": 3276,
+          "bytesReceived": 3272,
+          "sendBitrateKbps": 0,
+          "receiveBitrateKbps": 0,
+          "localSenderCount": 1,
+          "localTrackState": "live",
+          "remoteTrackState": "live",
+          "remoteTrackMuted": false,
+          "audioElementPaused": false,
+          "audioElementMuted": false,
+          "audioElementVolume": 1,
+          "playbackError": null,
+          "hasTurn": false,
+          "iceTransportPolicy": "all"
+        },
+        "mediaFlowing": true,
+        "selectedPairLabel": "host → host",
+        "relayCandidates": 0
+      },
+      "customer": {
+        "states": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selectedPair": {
+          "local": {
+            "type": "host",
+            "protocol": "udp",
+            "address": "240.112.23.39",
+            "port": 34068
+          },
+          "remote": {
+            "type": "host",
+            "protocol": "udp",
+            "address": "240.112.23.39",
+            "port": 40536
+          },
+          "state": "succeeded",
+          "nominated": true,
+          "bytesSent": 16227,
+          "bytesReceived": 15963,
+          "currentRoundTripTime": 0
+        },
+        "localCandidateTypes": {
+          "host": 1
+        },
+        "remoteCandidateTypes": {
+          "host": 1
+        },
+        "inboundAudio": {
+          "bytesReceived": 6981,
+          "packetsReceived": 139,
+          "packetsLost": 0,
+          "jitter": 0,
+          "audioLevel": 0.249977111117893,
+          "totalAudioEnergy": 0.6928402013169555,
+          "totalSamplesReceived": 132480
+        },
+        "outboundAudio": {
+          "bytesSent": 7084,
+          "packetsSent": 139
+        },
+        "audioElement": {
+          "paused": false,
+          "muted": false,
+          "volume": 1,
+          "hasSrcObject": true,
+          "srcObjectAudioTracks": 1,
+          "srcIsSilentClip": false
+        },
+        "diagnostics": {
+          "wsStatus": "connected",
+          "pcState": "connected",
+          "iceState": "connected",
+          "iceGatheringState": "complete",
+          "dtlsState": "connected",
+          "selectedLocalType": "host",
+          "selectedRemoteType": "host",
+          "relayPath": false,
+          "candidates": {
+            "host": 1,
+            "srflx": 0,
+            "prflx": 0,
+            "relay": 0
+          },
+          "bytesSent": 3307,
+          "bytesReceived": 3276,
+          "sendBitrateKbps": 0,
+          "receiveBitrateKbps": 0,
+          "localSenderCount": 1,
+          "localTrackState": "live",
+          "remoteTrackState": "live",
+          "remoteTrackMuted": false,
+          "audioElementPaused": false,
+          "audioElementMuted": false,
+          "audioElementVolume": 1,
+          "playbackError": null,
+          "hasTurn": false,
+          "iceTransportPolicy": "all"
+        },
+        "mediaFlowing": true,
+        "selectedPairLabel": "host → host",
+        "relayCandidates": 0
+      }
+    },
+    {
+      "at": 1792948360497,
+      "salesperson": {
+        "states": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selectedPair": {
+          "local": {
+            "type": "host",
+            "protocol": "udp",
+            "address": "240.112.23.39",
+            "port": 40536
+          },
+          "remote": {
+            "type": "host",
+            "protocol": "udp",
+            "address": "240.112.23.39",
+            "port": 34068
+          },
+          "state": "succeeded",
+          "nominated": true,
+          "bytesSent": 30236,
+          "bytesReceived": 30455,
+          "currentRoundTripTime": 0
+        },
+        "localCandidateTypes": {
+          "host": 1
+        },
+        "remoteCandidateTypes": {
+          "host": 1
+        },
+        "inboundAudio": {
+          "bytesReceived": 14840,
+          "packetsReceived": 264,
+          "packetsLost": 0,
+          "jitter": 0,
+          "audioLevel": 0.249977111117893,
+          "totalAudioEnergy": 1.3794098624450446,
+          "totalSamplesReceived": 253440
+        },
+        "outboundAudio": {
+          "bytesSent": 14782,
+          "packetsSent": 264
+        },
+        "audioElement": {
+          "paused": false,
+          "muted": false,
+          "volume": 1,
+          "hasSrcObject": true,
+          "srcObjectAudioTracks": 1,
+          "srcIsSilentClip": false
+        },
+        "diagnostics": {
+          "wsStatus": "connected",
+          "pcState": "connected",
+          "iceState": "connected",
+          "iceGatheringState": "complete",
+          "dtlsState": "connected",
+          "selectedLocalType": "host",
+          "selectedRemoteType": "host",
+          "relayPath": false,
+          "candidates": {
+            "host": 1,
+            "srflx": 0,
+            "prflx": 0,
+            "relay": 0
+          },
+          "bytesSent": 11926,
+          "bytesReceived": 12050,
+          "sendBitrateKbps": 25,
+          "receiveBitrateKbps": 25,
+          "localSenderCount": 1,
+          "localTrackState": "live",
+          "remoteTrackState": "live",
+          "remoteTrackMuted": false,
+          "audioElementPaused": false,
+          "audioElementMuted": false,
+          "audioElementVolume": 1,
+          "playbackError": null,
+          "hasTurn": false,
+          "iceTransportPolicy": "all"
+        },
+        "mediaFlowing": true,
+        "selectedPairLabel": "host → host",
+        "relayCandidates": 0
+      },
+      "customer": {
+        "states": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selectedPair": {
+          "local": {
+            "type": "host",
+            "protocol": "udp",
+            "address": "240.112.23.39",
+            "port": 34068
+          },
+          "remote": {
+            "type": "host",
+            "protocol": "udp",
+            "address": "240.112.23.39",
+            "port": 40536
+          },
+          "state": "succeeded",
+          "nominated": true,
+          "bytesSent": 30455,
+          "bytesReceived": 30236,
+          "currentRoundTripTime": 0
+        },
+        "localCandidateTypes": {
+          "host": 1
+        },
+        "remoteCandidateTypes": {
+          "host": 1
+        },
+        "inboundAudio": {
+          "bytesReceived": 14782,
+          "packetsReceived": 264,
+          "packetsLost": 0,
+          "jitter": 0,
+          "audioLevel": 0.249977111117893,
+          "totalAudioEnergy": 1.498241020920969,
+          "totalSamplesReceived": 252960
+        },
+        "outboundAudio": {
+          "bytesSent": 14840,
+          "packetsSent": 264
+        },
+        "audioElement": {
+          "paused": false,
+          "muted": false,
+          "volume": 1,
+          "hasSrcObject": true,
+          "srcObjectAudioTracks": 1,
+          "srcIsSilentClip": false
+        },
+        "diagnostics": {
+          "wsStatus": "connected",
+          "pcState": "connected",
+          "iceState": "connected",
+          "iceGatheringState": "complete",
+          "dtlsState": "connected",
+          "selectedLocalType": "host",
+          "selectedRemoteType": "host",
+          "relayPath": false,
+          "candidates": {
+            "host": 1,
+            "srflx": 0,
+            "prflx": 0,
+            "relay": 0
+          },
+          "bytesSent": 12053,
+          "bytesReceived": 11926,
+          "sendBitrateKbps": 25,
+          "receiveBitrateKbps": 25,
+          "localSenderCount": 1,
+          "localTrackState": "live",
+          "remoteTrackState": "live",
+          "remoteTrackMuted": false,
+          "audioElementPaused": false,
+          "audioElementMuted": false,
+          "audioElementVolume": 1,
+          "playbackError": null,
+          "hasTurn": false,
+          "iceTransportPolicy": "all"
+        },
+        "mediaFlowing": true,
+        "selectedPairLabel": "host → host",
+        "relayCandidates": 0
+      }
+    },
+    {
+      "at": 1792948363006,
+      "salesperson": {
+        "states": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selectedPair": {
+          "local": {
+            "type": "host",
+            "protocol": "udp",
+            "address": "240.112.23.39",
+            "port": 40536
+          },
+          "remote": {
+            "type": "host",
+            "protocol": "udp",
+            "address": "240.112.23.39",
+            "port": 34068
+          },
+          "state": "succeeded",
+          "nominated": true,
+          "bytesSent": 44342,
+          "bytesReceived": 44395,
+          "currentRoundTripTime": 0
+        },
+        "localCandidateTypes": {
+          "host": 1
+        },
+        "remoteCandidateTypes": {
+          "host": 1
+        },
+        "inboundAudio": {
+          "bytesReceived": 22598,
+          "packetsReceived": 393,
+          "packetsLost": 0,
+          "jitter": 0,
+          "audioLevel": 0.06247138889736625,
+          "totalAudioEnergy": 2.0810985644016404,
+          "totalSamplesReceived": 373920
+        },
+        "outboundAudio": {
+          "bytesSent": 22706,
+          "packetsSent": 393
+        },
+        "audioElement": {
+          "paused": false,
+          "muted": false,
+          "volume": 1,
+          "hasSrcObject": true,
+          "srcObjectAudioTracks": 1,
+          "srcIsSilentClip": false
+        },
+        "diagnostics": {
+          "wsStatus": "connected",
+          "pcState": "connected",
+          "iceState": "connected",
+          "iceGatheringState": "complete",
+          "dtlsState": "connected",
+          "selectedLocalType": "host",
+          "selectedRemoteType": "host",
+          "relayPath": false,
+          "candidates": {
+            "host": 1,
+            "srflx": 0,
+            "prflx": 0,
+            "relay": 0
+          },
+          "bytesSent": 21329,
+          "bytesReceived": 21299,
+          "sendBitrateKbps": 25,
+          "receiveBitrateKbps": 24,
+          "localSenderCount": 1,
+          "localTrackState": "live",
+          "remoteTrackState": "live",
+          "remoteTrackMuted": false,
+          "audioElementPaused": false,
+          "audioElementMuted": false,
+          "audioElementVolume": 1,
+          "playbackError": null,
+          "hasTurn": false,
+          "iceTransportPolicy": "all"
+        },
+        "mediaFlowing": true,
+        "selectedPairLabel": "host → host",
+        "relayCandidates": 0
+      },
+      "customer": {
+        "states": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selectedPair": {
+          "local": {
+            "type": "host",
+            "protocol": "udp",
+            "address": "240.112.23.39",
+            "port": 34068
+          },
+          "remote": {
+            "type": "host",
+            "protocol": "udp",
+            "address": "240.112.23.39",
+            "port": 40536
+          },
+          "state": "succeeded",
+          "nominated": true,
+          "bytesSent": 44395,
+          "bytesReceived": 44342,
+          "currentRoundTripTime": 0
+        },
+        "localCandidateTypes": {
+          "host": 1
+        },
+        "remoteCandidateTypes": {
+          "host": 1
+        },
+        "inboundAudio": {
+          "bytesReceived": 22706,
+          "packetsReceived": 393,
+          "packetsLost": 0,
+          "jitter": 0,
+          "audioLevel": 0.06247138889736625,
+          "totalAudioEnergy": 2.089709057782854,
+          "totalSamplesReceived": 373440
+        },
+        "outboundAudio": {
+          "bytesSent": 22598,
+          "packetsSent": 393
+        },
+        "audioElement": {
+          "paused": false,
+          "muted": false,
+          "volume": 1,
+          "hasSrcObject": true,
+          "srcObjectAudioTracks": 1,
+          "srcIsSilentClip": false
+        },
+        "diagnostics": {
+          "wsStatus": "connected",
+          "pcState": "connected",
+          "iceState": "connected",
+          "iceGatheringState": "complete",
+          "dtlsState": "connected",
+          "selectedLocalType": "host",
+          "selectedRemoteType": "host",
+          "relayPath": false,
+          "candidates": {
+            "host": 1,
+            "srflx": 0,
+            "prflx": 0,
+            "relay": 0
+          },
+          "bytesSent": 21302,
+          "bytesReceived": 21329,
+          "sendBitrateKbps": 24,
+          "receiveBitrateKbps": 25,
+          "localSenderCount": 1,
+          "localTrackState": "live",
+          "remoteTrackState": "live",
+          "remoteTrackMuted": false,
+          "audioElementPaused": false,
+          "audioElementMuted": false,
+          "audioElementVolume": 1,
+          "playbackError": null,
+          "hasTurn": false,
+          "iceTransportPolicy": "all"
+        },
+        "mediaFlowing": true,
+        "selectedPairLabel": "host → host",
+        "relayCandidates": 0
+      }
+    }
+  ],
+  "salesperson": {
+    "pcCount": 1,
+    "openPcCount": 1,
+    "config": {
+      "iceTransportPolicy": "all",
+      "iceServers": [],
+      "bundlePolicy": "max-bundle",
+      "rtcpMuxPolicy": "require"
+    },
+    "states": {
+      "connectionState": "connected",
+      "iceConnectionState": "connected",
+      "iceGatheringState": "complete",
+      "signalingState": "stable"
+    },
+    "localCandidates": [
+      {
+        "type": "host",
+        "protocol": "udp",
+        "address": "240.112.23.39",
+        "port": 40536
+      }
+    ],
+    "remoteCandidates": [
+      {
+        "type": "host",
+        "protocol": "udp",
+        "address": "240.112.23.39",
+        "port": 34068
+      }
+    ],
+    "selectedPair": {
+      "local": {
+        "type": "host",
+        "protocol": "udp",
+        "address": "240.112.23.39",
+        "port": 40536
+      },
+      "remote": {
+        "type": "host",
+        "protocol": "udp",
+        "address": "240.112.23.39",
+        "port": 34068
+      },
+      "state": "succeeded",
+      "nominated": true,
+      "bytesSent": 44342,
+      "bytesReceived": 44395,
+      "currentRoundTripTime": 0
+    },
+    "pairSummary": [
+      {
+        "state": "succeeded",
+        "nominated": true,
+        "local": {
+          "type": "host",
+          "protocol": "udp",
+          "address": "240.112.23.39",
+          "port": 40536
+        },
+        "remote": {
+          "type": "host",
+          "protocol": "udp",
+          "address": "240.112.23.39",
+          "port": 34068
+        },
+        "bytesSent": 44342,
+        "bytesReceived": 44395
+      }
+    ],
+    "localSdp": {
+      "candidateTypes": {
+        "host": 1
+      },
+      "candidateLines": 1,
+      "ufrag": "F5P/",
+      "iceOptions": [
+        "trickle"
+      ],
+      "setup": "actpass",
+      "bundle": true,
+      "mAudio": "m=audio 40536 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+      "length": 1425
+    },
+    "remoteSdp": {
+      "candidateTypes": {
+        "host": 1
+      },
+      "candidateLines": 1,
+      "ufrag": "/5Jm",
+      "iceOptions": [
+        "trickle"
+      ],
+      "setup": "active",
+      "bundle": true,
+      "mAudio": "m=audio 34068 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+      "length": 1326
+    },
+    "inboundAudio": {
+      "bytesReceived": 22598,
+      "packetsReceived": 393,
+      "packetsLost": 0,
+      "jitter": 0,
+      "audioLevel": 0.06247138889736625,
+      "totalAudioEnergy": 2.0810985644016404,
+      "totalSamplesReceived": 373920
+    },
+    "outboundAudio": {
+      "bytesSent": 22706,
+      "packetsSent": 393
+    },
+    "transport": {
+      "dtlsState": "connected",
+      "dtlsRole": "server",
+      "iceRole": "controlling",
+      "iceLocalUsernameFragment": "F5P/",
+      "selectedCandidatePairId": "CPgElzfQ17_pjtCx46i",
+      "bytesSent": 44342,
+      "bytesReceived": 44395
+    },
+    "audioElement": {
+      "paused": false,
+      "muted": false,
+      "volume": 1,
+      "hasSrcObject": true,
+      "srcObjectAudioTracks": 1,
+      "srcIsSilentClip": false
+    },
+    "snapshot": {
+      "sessionId": "0Fx73VfJO2LVRd7idQnbQQ",
+      "role": "salesperson",
+      "participantId": "onXGc-7Zdcg3D5NF",
+      "wsStatus": "connected",
+      "callState": "connected",
+      "peerPresent": true,
+      "peerParticipantId": "IzcAxToXbNI73Hee",
+      "peerRole": "customer",
+      "participants": [
+        {
+          "participantId": "onXGc-7Zdcg3D5NF",
+          "role": "salesperson",
+          "joinedAt": 1792948355170
+        },
+        {
+          "participantId": "IzcAxToXbNI73Hee",
+          "role": "customer",
+          "joinedAt": 1792948355175
+        }
+      ],
+      "micPermission": "granted",
+      "micMuted": false,
+      "localTrackState": "live",
+      "localTrackMuted": false,
+      "localSenderCount": 1,
+      "remoteTrackState": "live",
+      "speakerMuted": false,
+      "audioUnlocked": true,
+      "playbackBlocked": false,
+      "aiStatus": "reconnecting",
+      "aiError": "Session socket closed abnormally. code=1006 reason=",
+      "ai": {
+        "state": "reconnecting",
+        "status": null,
+        "connected": false,
+        "error": "Session socket closed abnormally. code=1006 reason=",
+        "callId": null,
+        "reconnectAttempt": 3,
+        "maxReconnectAttempts": 3,
+        "reconnecting": true,
+        "audioReachingAi": false,
+        "lastEventAt": 1792948360761,
+        "lastSuggestionAt": null,
+        "lastResponseAt": null,
+        "source": "remote"
+      },
+      "aiReconnectRequestedAt": null,
+      "suggestions": [],
+      "customerSpeech": "",
+      "captionStatus": "listening",
+      "salespersonCaption": "",
+      "reconnectAttempt": 0,
+      "lastError": null,
+      "lastServerError": null,
+      "iceConfigLoaded": true,
+      "iceConfigError": null,
+      "iceConfigWarnings": [
+        "No usable TURN relay is configured. Calls work only when both devices can reach each other directly; mobile-data or symmetric-NAT participants will have no audio."
+      ],
+      "turnConfigured": false,
+      "turnCredentialMode": "none",
+      "turnExpiresAt": null,
+      "relayCandidates": 0,
+      "selectedPair": "host → host",
+      "mediaFlowing": true,
+      "diagnostics": {
+        "wsStatus": "connected",
+        "pcState": "connected",
+        "iceState": "connected",
+        "iceGatheringState": "complete",
+        "dtlsState": "connected",
+        "selectedLocalType": "host",
+        "selectedRemoteType": "host",
+        "relayPath": false,
+        "candidates": {
+          "host": 1,
+          "srflx": 0,
+          "prflx": 0,
+          "relay": 0
+        },
+        "bytesSent": 21329,
+        "bytesReceived": 21299,
+        "sendBitrateKbps": 25,
+        "receiveBitrateKbps": 24,
+        "localSenderCount": 1,
+        "localTrackState": "live",
+        "remoteTrackState": "live",
+        "remoteTrackMuted": false,
+        "audioElementPaused": false,
+        "audioElementMuted": false,
+        "audioElementVolume": 1,
+        "playbackError": null,
+        "hasTurn": false,
+        "iceTransportPolicy": "all"
+      },
+      "logs": [
+        "[5:12:35 PM] ICE configuration loaded: 1 server entr(ies), TURN not configured, policy all.",
+        "[5:12:35 PM] ICE warning: No usable TURN relay is configured. Calls work only when both devices can reach each other directly; mobile-data or symmetric-NAT participants will have no audio.",
+        "[5:12:35 PM] Remote audio element unlocked by user gesture.",
+        "[5:12:35 PM] Microphone captured (track live).",
+        "[5:12:35 PM] Salesperson speech recognition started (captions to customer only).",
+        "[5:12:35 PM] Connecting signaling socket (initial).",
+        "[5:12:35 PM] Signaling connected. Authenticating session membership...",
+        "[5:12:35 PM] Session membership confirmed as salesperson (onXGc-7Z).",
+        "[5:12:35 PM] Peer joined: customer.",
+        "[5:12:35 PM] Establishing a fresh peer connection for customer (peer_joined).",
+        "[5:12:35 PM] Created RTCPeerConnection (peer customer, 1 ICE entr(ies), TURN absent, policy all).",
+        "[5:12:35 PM] Added local microphone track to the peer connection.",
+        "[5:12:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:35 PM] Offer skipped: another offer is being negotiated.",
+        "[5:12:35 PM] Offer sent [peer_joined].",
+        "[5:12:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:35 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:12:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:35 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:12:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:35 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:12:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:35 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:12:35 PM] Buffered ICE candidate (1 queued).",
+        "[5:12:35 PM] ICE connection state: checking",
+        "[5:12:35 PM] Received remote audio track from customer.",
+        "[5:12:35 PM] ICE connection state: connected",
+        "[5:12:35 PM] Answer applied.",
+        "[5:12:35 PM] Peer connection state: connecting",
+        "[5:12:35 PM] ICE candidate gathering complete.",
+        "[5:12:35 PM] Peer connection state: connected",
+        "[5:12:35 PM] Playing remote audio stream live.",
+        "[5:12:35 PM] Remote audio resumed after user interaction.",
+        "[5:12:35 PM] Remote audio track unmuted (media arriving).",
+        "[5:12:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:36 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:36 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:36 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:36 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:36 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:36 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:40 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:40 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:40 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:40 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:40 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:40 PM] Presence refreshed (session_state); keeping the existing peer connection."
+      ]
+    },
+    "events": [
+      {
+        "t": 362,
+        "id": 0,
+        "event": "created",
+        "iceServers": [],
+        "iceTransportPolicy": "all"
+      },
+      {
+        "t": 365,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "have-local-offer"
+      },
+      {
+        "t": 365,
+        "id": 0,
+        "event": "icegatheringstatechange",
+        "state": "gathering"
+      },
+      {
+        "t": 366,
+        "id": 0,
+        "event": "icecandidate",
+        "candidate": {
+          "type": "host",
+          "protocol": "udp",
+          "address": "240.112.23.39",
+          "port": 40536,
+          "relatedAddress": null
+        },
+        "endOfCandidates": false
+      },
+      {
+        "t": 378,
+        "id": 0,
+        "event": "iceconnectionstatechange",
+        "state": "checking"
+      },
+      {
+        "t": 378,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "stable"
+      },
+      {
+        "t": 378,
+        "id": 0,
+        "event": "track",
+        "kind": "audio"
+      },
+      {
+        "t": 379,
+        "id": 0,
+        "event": "iceconnectionstatechange",
+        "state": "connected"
+      },
+      {
+        "t": 381,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "connecting"
+      },
+      {
+        "t": 381,
+        "id": 0,
+        "event": "icegatheringstatechange",
+        "state": "complete"
+      },
+      {
+        "t": 381,
+        "id": 0,
+        "event": "icecandidate",
+        "candidate": null,
+        "endOfCandidates": true
+      },
+      {
+        "t": 381,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "connected"
+      }
+    ]
+  },
+  "customer": {
+    "pcCount": 1,
+    "openPcCount": 1,
+    "config": {
+      "iceTransportPolicy": "all",
+      "iceServers": [],
+      "bundlePolicy": "max-bundle",
+      "rtcpMuxPolicy": "require"
+    },
+    "states": {
+      "connectionState": "connected",
+      "iceConnectionState": "connected",
+      "iceGatheringState": "complete",
+      "signalingState": "stable"
+    },
+    "localCandidates": [
+      {
+        "type": "host",
+        "protocol": "udp",
+        "address": "240.112.23.39",
+        "port": 34068
+      }
+    ],
+    "remoteCandidates": [
+      {
+        "type": "host",
+        "protocol": "udp",
+        "address": "240.112.23.39",
+        "port": 40536
+      }
+    ],
+    "selectedPair": {
+      "local": {
+        "type": "host",
+        "protocol": "udp",
+        "address": "240.112.23.39",
+        "port": 34068
+      },
+      "remote": {
+        "type": "host",
+        "protocol": "udp",
+        "address": "240.112.23.39",
+        "port": 40536
+      },
+      "state": "succeeded",
+      "nominated": true,
+      "bytesSent": 44395,
+      "bytesReceived": 44342,
+      "currentRoundTripTime": 0
+    },
+    "pairSummary": [
+      {
+        "state": "succeeded",
+        "nominated": true,
+        "local": {
+          "type": "host",
+          "protocol": "udp",
+          "address": "240.112.23.39",
+          "port": 34068
+        },
+        "remote": {
+          "type": "host",
+          "protocol": "udp",
+          "address": "240.112.23.39",
+          "port": 40536
+        },
+        "bytesSent": 44395,
+        "bytesReceived": 44342
+      }
+    ],
+    "localSdp": {
+      "candidateTypes": {
+        "host": 1
+      },
+      "candidateLines": 1,
+      "ufrag": "/5Jm",
+      "iceOptions": [
+        "trickle"
+      ],
+      "setup": "active",
+      "bundle": true,
+      "mAudio": "m=audio 34068 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+      "length": 1326
+    },
+    "remoteSdp": {
+      "candidateTypes": {
+        "host": 1
+      },
+      "candidateLines": 1,
+      "ufrag": "F5P/",
+      "iceOptions": [
+        "trickle"
+      ],
+      "setup": "actpass",
+      "bundle": true,
+      "mAudio": "m=audio 40536 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+      "length": 1425
+    },
+    "inboundAudio": {
+      "bytesReceived": 22706,
+      "packetsReceived": 393,
+      "packetsLost": 0,
+      "jitter": 0,
+      "audioLevel": 0.06247138889736625,
+      "totalAudioEnergy": 2.089709057782854,
+      "totalSamplesReceived": 373440
+    },
+    "outboundAudio": {
+      "bytesSent": 22598,
+      "packetsSent": 393
+    },
+    "transport": {
+      "dtlsState": "connected",
+      "dtlsRole": "client",
+      "iceRole": "controlled",
+      "iceLocalUsernameFragment": "/5Jm",
+      "selectedCandidatePairId": "CPeFop9Xi4_7BqdbsQu",
+      "bytesSent": 44395,
+      "bytesReceived": 44342
+    },
+    "audioElement": {
+      "paused": false,
+      "muted": false,
+      "volume": 1,
+      "hasSrcObject": true,
+      "srcObjectAudioTracks": 1,
+      "srcIsSilentClip": false
+    },
+    "snapshot": {
+      "sessionId": "0Fx73VfJO2LVRd7idQnbQQ",
+      "role": "customer",
+      "participantId": "IzcAxToXbNI73Hee",
+      "wsStatus": "connected",
+      "callState": "connected",
+      "peerPresent": true,
+      "peerParticipantId": "onXGc-7Zdcg3D5NF",
+      "peerRole": "salesperson",
+      "participants": [
+        {
+          "participantId": "onXGc-7Zdcg3D5NF",
+          "role": "salesperson",
+          "joinedAt": 1792948355170
+        },
+        {
+          "participantId": "IzcAxToXbNI73Hee",
+          "role": "customer",
+          "joinedAt": 1792948355175
+        }
+      ],
+      "micPermission": "granted",
+      "micMuted": false,
+      "localTrackState": "live",
+      "localTrackMuted": false,
+      "localSenderCount": 1,
+      "remoteTrackState": "live",
+      "speakerMuted": false,
+      "audioUnlocked": true,
+      "playbackBlocked": false,
+      "aiStatus": "reconnecting",
+      "aiError": "Session socket closed abnormally. code=1006 reason=",
+      "ai": {
+        "state": "reconnecting",
+        "status": null,
+        "connected": false,
+        "error": "Session socket closed abnormally. code=1006 reason=",
+        "callId": "call_probe",
+        "reconnectAttempt": 3,
+        "maxReconnectAttempts": 3,
+        "reconnecting": true,
+        "audioReachingAi": false,
+        "lastEventAt": 1792948360730,
+        "lastSuggestionAt": null,
+        "lastResponseAt": null,
+        "source": "local"
+      },
+      "aiReconnectRequestedAt": null,
+      "suggestions": [],
+      "customerSpeech": "",
+      "captionStatus": "off",
+      "salespersonCaption": "",
+      "reconnectAttempt": 0,
+      "lastError": null,
+      "lastServerError": null,
+      "iceConfigLoaded": true,
+      "iceConfigError": null,
+      "iceConfigWarnings": [
+        "No usable TURN relay is configured. Calls work only when both devices can reach each other directly; mobile-data or symmetric-NAT participants will have no audio."
+      ],
+      "turnConfigured": false,
+      "turnCredentialMode": "none",
+      "turnExpiresAt": null,
+      "relayCandidates": 0,
+      "selectedPair": "host → host",
+      "mediaFlowing": true,
+      "diagnostics": {
+        "wsStatus": "connected",
+        "pcState": "connected",
+        "iceState": "connected",
+        "iceGatheringState": "complete",
+        "dtlsState": "connected",
+        "selectedLocalType": "host",
+        "selectedRemoteType": "host",
+        "relayPath": false,
+        "candidates": {
+          "host": 1,
+          "srflx": 0,
+          "prflx": 0,
+          "relay": 0
+        },
+        "bytesSent": 21302,
+        "bytesReceived": 21329,
+        "sendBitrateKbps": 24,
+        "receiveBitrateKbps": 25,
+        "localSenderCount": 1,
+        "localTrackState": "live",
+        "remoteTrackState": "live",
+        "remoteTrackMuted": false,
+        "audioElementPaused": false,
+        "audioElementMuted": false,
+        "audioElementVolume": 1,
+        "playbackError": null,
+        "hasTurn": false,
+        "iceTransportPolicy": "all"
+      },
+      "logs": [
+        "[5:12:35 PM] ICE configuration loaded: 1 server entr(ies), TURN not configured, policy all.",
+        "[5:12:35 PM] ICE warning: No usable TURN relay is configured. Calls work only when both devices can reach each other directly; mobile-data or symmetric-NAT participants will have no audio.",
+        "[5:12:35 PM] Remote audio element unlocked by user gesture.",
+        "[5:12:35 PM] Microphone captured (track live).",
+        "[5:12:35 PM] Connecting signaling socket (initial).",
+        "[5:12:35 PM] Signaling connected. Authenticating session membership...",
+        "[5:12:35 PM] Session membership confirmed as customer (IzcAxToX).",
+        "[5:12:35 PM] Establishing a fresh peer connection for salesperson (join).",
+        "[5:12:35 PM] Created RTCPeerConnection (peer salesperson, 1 ICE entr(ies), TURN absent, policy all).",
+        "[5:12:35 PM] Added local microphone track to the peer connection.",
+        "[5:12:35 PM] Requesting a new AI call from the server...",
+        "[5:12:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:35 PM] Received offer. Creating answer...",
+        "[5:12:35 PM] New AI call created (call_pro).",
+        "[5:12:35 PM] Joining the new AI call (call_pro).",
+        "[5:12:35 PM] Buffered ICE candidate (1 queued).",
+        "[5:12:35 PM] Received remote audio track from salesperson.",
+        "[5:12:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:35 PM] Playing remote audio stream live.",
+        "[5:12:35 PM] Answer sent.",
+        "[5:12:35 PM] ICE connection state: checking",
+        "[5:12:35 PM] Peer connection state: connecting",
+        "[5:12:35 PM] ICE connection state: connected",
+        "[5:12:35 PM] ICE candidate gathering complete.",
+        "[5:12:35 PM] Peer connection state: connected",
+        "[5:12:35 PM] Remote audio resumed after user interaction.",
+        "[5:12:35 PM] Remote audio track unmuted (media arriving).",
+        "[5:12:35 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:12:35 PM] AI recovery scheduled in 1500ms (attempt 1/3).",
+        "[5:12:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:36 PM] Requesting a new AI call from the server...",
+        "[5:12:36 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:36 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:36 PM] New AI call created (call_pro).",
+        "[5:12:36 PM] Joining the new AI call (call_pro).",
+        "[5:12:36 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:36 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:36 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:12:36 PM] AI recovery scheduled in 4000ms (attempt 2/3).",
+        "[5:12:36 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:36 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:40 PM] Requesting a new AI call from the server...",
+        "[5:12:40 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:40 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:40 PM] New AI call created (call_pro).",
+        "[5:12:40 PM] Joining the new AI call (call_pro).",
+        "[5:12:40 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:40 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:40 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:12:40 PM] AI recovery scheduled in 9000ms (attempt 3/3).",
+        "[5:12:40 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:12:40 PM] Presence refreshed (session_state); keeping the existing peer connection."
+      ]
+    },
+    "events": [
+      {
+        "t": 190,
+        "id": 0,
+        "event": "created",
+        "iceServers": [],
+        "iceTransportPolicy": "all"
+      },
+      {
+        "t": 199,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "have-remote-offer"
+      },
+      {
+        "t": 199,
+        "id": 0,
+        "event": "track",
+        "kind": "audio"
+      },
+      {
+        "t": 204,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "stable"
+      },
+      {
+        "t": 204,
+        "id": 0,
+        "event": "icegatheringstatechange",
+        "state": "gathering"
+      },
+      {
+        "t": 205,
+        "id": 0,
+        "event": "iceconnectionstatechange",
+        "state": "checking"
+      },
+      {
+        "t": 205,
+        "id": 0,
+        "event": "icecandidate",
+        "candidate": {
+          "type": "host",
+          "protocol": "udp",
+          "address": "240.112.23.39",
+          "port": 34068,
+          "relatedAddress": null
+        },
+        "endOfCandidates": false
+      },
+      {
+        "t": 205,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "connecting"
+      },
+      {
+        "t": 206,
+        "id": 0,
+        "event": "iceconnectionstatechange",
+        "state": "connected"
+      },
+      {
+        "t": 206,
+        "id": 0,
+        "event": "icegatheringstatechange",
+        "state": "complete"
+      },
+      {
+        "t": 206,
+        "id": 0,
+        "event": "icecandidate",
+        "candidate": null,
+        "endOfCandidates": true
+      },
+      {
+        "t": 207,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "connected"
+      }
+    ]
+  }
+}

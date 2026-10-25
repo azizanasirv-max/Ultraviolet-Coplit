@@ -1,0 +1,2685 @@
+{
+  "scenario": "turn-relay-fail",
+  "browserArgs": [],
+  "startedAt": "2026-10-25T17:13:11.239Z",
+  "env": {
+    "TURN_URLS": "turn:127.0.0.1:3478?transport=udp",
+    "TURN_USERNAME": "probe-user",
+    "STUN_URLS": "stun:stun.l.google.com:19302",
+    "ICE_TRANSPORT_POLICY": "relay",
+    "INTERCEPT_ICE": "0"
+  },
+  "samples": [
+    {
+      "at": 1792948394425,
+      "salesperson": {
+        "states": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "selectedPair": {
+          "local": {
+            "type": "relay",
+            "protocol": "udp",
+            "address": "127.0.0.1",
+            "port": 50736,
+            "url": "turn:127.0.0.1:3478?transport=udp",
+            "relayProtocol": "udp"
+          },
+          "remote": {
+            "type": "relay",
+            "protocol": "udp",
+            "address": "127.0.0.1",
+            "port": 53622
+          },
+          "state": "succeeded",
+          "nominated": true,
+          "bytesSent": 16099,
+          "bytesReceived": 15896,
+          "currentRoundTripTime": 0.001
+        },
+        "localCandidateTypes": {
+          "relay": 1
+        },
+        "remoteCandidateTypes": {
+          "relay": 1
+        },
+        "inboundAudio": {
+          "bytesReceived": 6829,
+          "packetsReceived": 136,
+          "packetsLost": 0,
+          "jitter": 0,
+          "audioLevel": 0.249977111117893,
+          "totalAudioEnergy": 0.5843616636391984,
+          "totalSamplesReceived": 130560
+        },
+        "outboundAudio": {
+          "bytesSent": 7195,
+          "packetsSent": 136
+        },
+        "audioElement": {
+          "paused": false,
+          "muted": false,
+          "volume": 1,
+          "hasSrcObject": true,
+          "srcObjectAudioTracks": 1,
+          "srcIsSilentClip": false
+        },
+        "diagnostics": {
+          "wsStatus": "connected",
+          "pcState": "connected",
+          "iceState": "connected",
+          "iceGatheringState": "complete",
+          "dtlsState": "connected",
+          "selectedLocalType": "relay",
+          "selectedRemoteType": "relay",
+          "relayPath": true,
+          "candidates": {
+            "host": 0,
+            "srflx": 0,
+            "prflx": 0,
+            "relay": 1
+          },
+          "bytesSent": 3144,
+          "bytesReceived": 3211,
+          "sendBitrateKbps": 0,
+          "receiveBitrateKbps": 0,
+          "localSenderCount": 1,
+          "localTrackState": "live",
+          "remoteTrackState": "live",
+          "remoteTrackMuted": false,
+          "audioElementPaused": false,
+          "audioElementMuted": false,
+          "audioElementVolume": 1,
+          "playbackError": null,
+          "hasTurn": true,
+          "iceTransportPolicy": "relay"
+        },
+        "mediaFlowing": true,
+        "selectedPairLabel": "relay → relay",
+        "relayCandidates": 1
+      },
+      "customer": {
+        "states": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selectedPair": {
+          "local": {
+            "type": "relay",
+            "protocol": "udp",
+            "address": "127.0.0.1",
+            "port": 53622,
+            "url": "turn:127.0.0.1:3478?transport=udp",
+            "relayProtocol": "udp"
+          },
+          "remote": {
+            "type": "relay",
+            "protocol": "udp",
+            "address": "127.0.0.1",
+            "port": 50736
+          },
+          "state": "succeeded",
+          "nominated": true,
+          "bytesSent": 16015,
+          "bytesReceived": 16218,
+          "currentRoundTripTime": 0.001
+        },
+        "localCandidateTypes": {
+          "relay": 1
+        },
+        "remoteCandidateTypes": {
+          "relay": 1
+        },
+        "inboundAudio": {
+          "bytesReceived": 7276,
+          "packetsReceived": 137,
+          "packetsLost": 0,
+          "jitter": 0,
+          "audioLevel": 0.249977111117893,
+          "totalAudioEnergy": 0.6927642786847477,
+          "totalSamplesReceived": 130560
+        },
+        "outboundAudio": {
+          "bytesSent": 6910,
+          "packetsSent": 137
+        },
+        "audioElement": {
+          "paused": false,
+          "muted": false,
+          "volume": 1,
+          "hasSrcObject": true,
+          "srcObjectAudioTracks": 1,
+          "srcIsSilentClip": false
+        },
+        "diagnostics": {
+          "wsStatus": "connected",
+          "pcState": "connected",
+          "iceState": "connected",
+          "iceGatheringState": "complete",
+          "dtlsState": "connected",
+          "selectedLocalType": "relay",
+          "selectedRemoteType": "relay",
+          "relayPath": true,
+          "candidates": {
+            "host": 0,
+            "srflx": 0,
+            "prflx": 0,
+            "relay": 1
+          },
+          "bytesSent": 3211,
+          "bytesReceived": 3144,
+          "sendBitrateKbps": 0,
+          "receiveBitrateKbps": 0,
+          "localSenderCount": 1,
+          "localTrackState": "live",
+          "remoteTrackState": "live",
+          "remoteTrackMuted": false,
+          "audioElementPaused": false,
+          "audioElementMuted": false,
+          "audioElementVolume": 1,
+          "playbackError": null,
+          "hasTurn": true,
+          "iceTransportPolicy": "relay"
+        },
+        "mediaFlowing": true,
+        "selectedPairLabel": "relay → relay",
+        "relayCandidates": 1
+      }
+    },
+    {
+      "at": 1792948396936,
+      "salesperson": {
+        "states": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "selectedPair": {
+          "local": {
+            "type": "relay",
+            "protocol": "udp",
+            "address": "127.0.0.1",
+            "port": 50736,
+            "url": "turn:127.0.0.1:3478?transport=udp",
+            "relayProtocol": "udp"
+          },
+          "remote": {
+            "type": "relay",
+            "protocol": "udp",
+            "address": "127.0.0.1",
+            "port": 53622
+          },
+          "state": "succeeded",
+          "nominated": true,
+          "bytesSent": 30424,
+          "bytesReceived": 30246,
+          "currentRoundTripTime": 0.001
+        },
+        "localCandidateTypes": {
+          "relay": 1
+        },
+        "remoteCandidateTypes": {
+          "relay": 1
+        },
+        "inboundAudio": {
+          "bytesReceived": 14711,
+          "packetsReceived": 262,
+          "packetsLost": 0,
+          "jitter": 0,
+          "audioLevel": 0.249977111117893,
+          "totalAudioEnergy": 1.3171496430429175,
+          "totalSamplesReceived": 251040
+        },
+        "outboundAudio": {
+          "bytesSent": 15052,
+          "packetsSent": 262
+        },
+        "audioElement": {
+          "paused": false,
+          "muted": false,
+          "volume": 1,
+          "hasSrcObject": true,
+          "srcObjectAudioTracks": 1,
+          "srcIsSilentClip": false
+        },
+        "diagnostics": {
+          "wsStatus": "connected",
+          "pcState": "connected",
+          "iceState": "connected",
+          "iceGatheringState": "complete",
+          "dtlsState": "connected",
+          "selectedLocalType": "relay",
+          "selectedRemoteType": "relay",
+          "relayPath": true,
+          "candidates": {
+            "host": 0,
+            "srflx": 0,
+            "prflx": 0,
+            "relay": 1
+          },
+          "bytesSent": 12181,
+          "bytesReceived": 11855,
+          "sendBitrateKbps": 25,
+          "receiveBitrateKbps": 25,
+          "localSenderCount": 1,
+          "localTrackState": "live",
+          "remoteTrackState": "live",
+          "remoteTrackMuted": false,
+          "audioElementPaused": false,
+          "audioElementMuted": false,
+          "audioElementVolume": 1,
+          "playbackError": null,
+          "hasTurn": true,
+          "iceTransportPolicy": "relay"
+        },
+        "mediaFlowing": true,
+        "selectedPairLabel": "relay → relay",
+        "relayCandidates": 1
+      },
+      "customer": {
+        "states": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selectedPair": {
+          "local": {
+            "type": "relay",
+            "protocol": "udp",
+            "address": "127.0.0.1",
+            "port": 53622,
+            "url": "turn:127.0.0.1:3478?transport=udp",
+            "relayProtocol": "udp"
+          },
+          "remote": {
+            "type": "relay",
+            "protocol": "udp",
+            "address": "127.0.0.1",
+            "port": 50736
+          },
+          "state": "succeeded",
+          "nominated": true,
+          "bytesSent": 30246,
+          "bytesReceived": 30424,
+          "currentRoundTripTime": 0.001
+        },
+        "localCandidateTypes": {
+          "relay": 1
+        },
+        "remoteCandidateTypes": {
+          "relay": 1
+        },
+        "inboundAudio": {
+          "bytesReceived": 15052,
+          "packetsReceived": 262,
+          "packetsLost": 0,
+          "jitter": 0,
+          "audioLevel": 0.249977111117893,
+          "totalAudioEnergy": 1.4937673462396832,
+          "totalSamplesReceived": 251040
+        },
+        "outboundAudio": {
+          "bytesSent": 14711,
+          "packetsSent": 262
+        },
+        "audioElement": {
+          "paused": false,
+          "muted": false,
+          "volume": 1,
+          "hasSrcObject": true,
+          "srcObjectAudioTracks": 1,
+          "srcIsSilentClip": false
+        },
+        "diagnostics": {
+          "wsStatus": "connected",
+          "pcState": "connected",
+          "iceState": "connected",
+          "iceGatheringState": "complete",
+          "dtlsState": "connected",
+          "selectedLocalType": "relay",
+          "selectedRemoteType": "relay",
+          "relayPath": true,
+          "candidates": {
+            "host": 0,
+            "srflx": 0,
+            "prflx": 0,
+            "relay": 1
+          },
+          "bytesSent": 11855,
+          "bytesReceived": 12181,
+          "sendBitrateKbps": 25,
+          "receiveBitrateKbps": 25,
+          "localSenderCount": 1,
+          "localTrackState": "live",
+          "remoteTrackState": "live",
+          "remoteTrackMuted": false,
+          "audioElementPaused": false,
+          "audioElementMuted": false,
+          "audioElementVolume": 1,
+          "playbackError": null,
+          "hasTurn": true,
+          "iceTransportPolicy": "relay"
+        },
+        "mediaFlowing": true,
+        "selectedPairLabel": "relay → relay",
+        "relayCandidates": 1
+      }
+    },
+    {
+      "at": 1792948399445,
+      "salesperson": {
+        "states": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "selectedPair": {
+          "local": {
+            "type": "relay",
+            "protocol": "udp",
+            "address": "127.0.0.1",
+            "port": 50736,
+            "url": "turn:127.0.0.1:3478?transport=udp",
+            "relayProtocol": "udp"
+          },
+          "remote": {
+            "type": "relay",
+            "protocol": "udp",
+            "address": "127.0.0.1",
+            "port": 53622
+          },
+          "state": "succeeded",
+          "nominated": true,
+          "bytesSent": 44299,
+          "bytesReceived": 44312,
+          "currentRoundTripTime": 0.001
+        },
+        "localCandidateTypes": {
+          "relay": 1
+        },
+        "remoteCandidateTypes": {
+          "relay": 1
+        },
+        "inboundAudio": {
+          "bytesReceived": 22635,
+          "packetsReceived": 391,
+          "packetsLost": 0,
+          "jitter": 0,
+          "audioLevel": 0.08142338328196051,
+          "totalAudioEnergy": 1.9126176007412807,
+          "totalSamplesReceived": 372000
+        },
+        "outboundAudio": {
+          "bytesSent": 22879,
+          "packetsSent": 391
+        },
+        "audioElement": {
+          "paused": false,
+          "muted": false,
+          "volume": 1,
+          "hasSrcObject": true,
+          "srcObjectAudioTracks": 1,
+          "srcIsSilentClip": false
+        },
+        "diagnostics": {
+          "wsStatus": "connected",
+          "pcState": "connected",
+          "iceState": "connected",
+          "iceGatheringState": "complete",
+          "dtlsState": "connected",
+          "selectedLocalType": "relay",
+          "selectedRemoteType": "relay",
+          "relayPath": true,
+          "candidates": {
+            "host": 0,
+            "srflx": 0,
+            "prflx": 0,
+            "relay": 1
+          },
+          "bytesSent": 21497,
+          "bytesReceived": 21258,
+          "sendBitrateKbps": 25,
+          "receiveBitrateKbps": 25,
+          "localSenderCount": 1,
+          "localTrackState": "live",
+          "remoteTrackState": "live",
+          "remoteTrackMuted": false,
+          "audioElementPaused": false,
+          "audioElementMuted": false,
+          "audioElementVolume": 1,
+          "playbackError": null,
+          "hasTurn": true,
+          "iceTransportPolicy": "relay"
+        },
+        "mediaFlowing": true,
+        "selectedPairLabel": "relay → relay",
+        "relayCandidates": 1
+      },
+      "customer": {
+        "states": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selectedPair": {
+          "local": {
+            "type": "relay",
+            "protocol": "udp",
+            "address": "127.0.0.1",
+            "port": 53622,
+            "url": "turn:127.0.0.1:3478?transport=udp",
+            "relayProtocol": "udp"
+          },
+          "remote": {
+            "type": "relay",
+            "protocol": "udp",
+            "address": "127.0.0.1",
+            "port": 50736
+          },
+          "state": "succeeded",
+          "nominated": true,
+          "bytesSent": 44312,
+          "bytesReceived": 44299,
+          "currentRoundTripTime": 0.001
+        },
+        "localCandidateTypes": {
+          "relay": 1
+        },
+        "remoteCandidateTypes": {
+          "relay": 1
+        },
+        "inboundAudio": {
+          "bytesReceived": 22879,
+          "packetsReceived": 391,
+          "packetsLost": 0,
+          "jitter": 0,
+          "audioLevel": 0.06247138889736625,
+          "totalAudioEnergy": 2.0842981296851435,
+          "totalSamplesReceived": 371520
+        },
+        "outboundAudio": {
+          "bytesSent": 22635,
+          "packetsSent": 391
+        },
+        "audioElement": {
+          "paused": false,
+          "muted": false,
+          "volume": 1,
+          "hasSrcObject": true,
+          "srcObjectAudioTracks": 1,
+          "srcIsSilentClip": false
+        },
+        "diagnostics": {
+          "wsStatus": "connected",
+          "pcState": "connected",
+          "iceState": "connected",
+          "iceGatheringState": "complete",
+          "dtlsState": "connected",
+          "selectedLocalType": "relay",
+          "selectedRemoteType": "relay",
+          "relayPath": true,
+          "candidates": {
+            "host": 0,
+            "srflx": 0,
+            "prflx": 0,
+            "relay": 1
+          },
+          "bytesSent": 21258,
+          "bytesReceived": 21497,
+          "sendBitrateKbps": 25,
+          "receiveBitrateKbps": 25,
+          "localSenderCount": 1,
+          "localTrackState": "live",
+          "remoteTrackState": "live",
+          "remoteTrackMuted": false,
+          "audioElementPaused": false,
+          "audioElementMuted": false,
+          "audioElementVolume": 1,
+          "playbackError": null,
+          "hasTurn": true,
+          "iceTransportPolicy": "relay"
+        },
+        "mediaFlowing": true,
+        "selectedPairLabel": "relay → relay",
+        "relayCandidates": 1
+      }
+    }
+  ],
+  "salesperson": {
+    "pcCount": 1,
+    "openPcCount": 1,
+    "config": {
+      "iceTransportPolicy": "relay",
+      "iceServers": [
+        {
+          "urls": [
+            "stun:stun.l.google.com:19302"
+          ],
+          "hasCredential": false
+        },
+        {
+          "urls": [
+            "turn:127.0.0.1:3478?transport=udp"
+          ],
+          "hasCredential": true
+        }
+      ],
+      "bundlePolicy": "max-bundle",
+      "rtcpMuxPolicy": "require"
+    },
+    "states": {
+      "connectionState": "connected",
+      "iceConnectionState": "connected",
+      "iceGatheringState": "complete",
+      "signalingState": "have-local-offer"
+    },
+    "localCandidates": [
+      {
+        "type": "relay",
+        "protocol": "udp",
+        "address": "127.0.0.1",
+        "port": 50736,
+        "url": "turn:127.0.0.1:3478?transport=udp",
+        "relayProtocol": "udp"
+      }
+    ],
+    "remoteCandidates": [
+      {
+        "type": "relay",
+        "protocol": "udp",
+        "address": "127.0.0.1",
+        "port": 53622
+      }
+    ],
+    "selectedPair": {
+      "local": {
+        "type": "relay",
+        "protocol": "udp",
+        "address": "127.0.0.1",
+        "port": 50736,
+        "url": "turn:127.0.0.1:3478?transport=udp",
+        "relayProtocol": "udp"
+      },
+      "remote": {
+        "type": "relay",
+        "protocol": "udp",
+        "address": "127.0.0.1",
+        "port": 53622
+      },
+      "state": "succeeded",
+      "nominated": true,
+      "bytesSent": 44299,
+      "bytesReceived": 44312,
+      "currentRoundTripTime": 0.001
+    },
+    "pairSummary": [
+      {
+        "state": "succeeded",
+        "nominated": true,
+        "local": {
+          "type": "relay",
+          "protocol": "udp",
+          "address": "127.0.0.1",
+          "port": 50736,
+          "url": "turn:127.0.0.1:3478?transport=udp",
+          "relayProtocol": "udp"
+        },
+        "remote": {
+          "type": "relay",
+          "protocol": "udp",
+          "address": "127.0.0.1",
+          "port": 53622
+        },
+        "bytesSent": 44299,
+        "bytesReceived": 44312
+      }
+    ],
+    "localSdp": {
+      "candidateTypes": {
+        "relay": 1
+      },
+      "candidateLines": 1,
+      "ufrag": "dJ/+",
+      "iceOptions": [
+        "trickle"
+      ],
+      "setup": "actpass",
+      "bundle": true,
+      "mAudio": "m=audio 50736 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+      "length": 1437
+    },
+    "remoteSdp": {
+      "candidateTypes": {
+        "relay": 1
+      },
+      "candidateLines": 1,
+      "ufrag": "L7x0",
+      "iceOptions": [
+        "trickle"
+      ],
+      "setup": "active",
+      "bundle": true,
+      "mAudio": "m=audio 53622 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+      "length": 1338
+    },
+    "inboundAudio": {
+      "bytesReceived": 22635,
+      "packetsReceived": 391,
+      "packetsLost": 0,
+      "jitter": 0,
+      "audioLevel": 0.08142338328196051,
+      "totalAudioEnergy": 1.9126176007412807,
+      "totalSamplesReceived": 372000
+    },
+    "outboundAudio": {
+      "bytesSent": 22879,
+      "packetsSent": 391
+    },
+    "transport": {
+      "dtlsState": "connected",
+      "dtlsRole": "server",
+      "iceRole": "controlling",
+      "iceLocalUsernameFragment": "dJ/+",
+      "selectedCandidatePairId": "CP16BmFtco_Wt8IKT7V",
+      "bytesSent": 44299,
+      "bytesReceived": 44312
+    },
+    "audioElement": {
+      "paused": false,
+      "muted": false,
+      "volume": 1,
+      "hasSrcObject": true,
+      "srcObjectAudioTracks": 1,
+      "srcIsSilentClip": false
+    },
+    "snapshot": {
+      "sessionId": "xlpTzW3J5XliTK4GHtwogw",
+      "role": "salesperson",
+      "participantId": "mlcn_6pmJWmnh7ef",
+      "wsStatus": "connected",
+      "callState": "connected",
+      "peerPresent": true,
+      "peerParticipantId": "9oQHB9HPzvhmoCVZ",
+      "peerRole": "customer",
+      "participants": [
+        {
+          "participantId": "mlcn_6pmJWmnh7ef",
+          "role": "salesperson",
+          "joinedAt": 1792948391600
+        },
+        {
+          "participantId": "9oQHB9HPzvhmoCVZ",
+          "role": "customer",
+          "joinedAt": 1792948391607
+        }
+      ],
+      "micPermission": "granted",
+      "micMuted": false,
+      "localTrackState": "live",
+      "localTrackMuted": false,
+      "localSenderCount": 1,
+      "remoteTrackState": "live",
+      "speakerMuted": false,
+      "audioUnlocked": true,
+      "playbackBlocked": false,
+      "aiStatus": "reconnecting",
+      "aiError": "Session socket closed abnormally. code=1006 reason=",
+      "ai": {
+        "state": "reconnecting",
+        "status": null,
+        "connected": false,
+        "error": "Session socket closed abnormally. code=1006 reason=",
+        "callId": null,
+        "reconnectAttempt": 3,
+        "maxReconnectAttempts": 3,
+        "reconnecting": true,
+        "audioReachingAi": false,
+        "lastEventAt": 1792948397204,
+        "lastSuggestionAt": null,
+        "lastResponseAt": null,
+        "source": "remote"
+      },
+      "aiReconnectRequestedAt": null,
+      "suggestions": [],
+      "customerSpeech": "",
+      "captionStatus": "listening",
+      "salespersonCaption": "",
+      "reconnectAttempt": 0,
+      "lastError": null,
+      "lastServerError": null,
+      "iceConfigLoaded": true,
+      "iceConfigError": null,
+      "iceConfigWarnings": [
+        "TURN uses static credentials. Prefer TURN_SECRET (coturn REST credentials) so browsers receive short-lived credentials."
+      ],
+      "turnConfigured": true,
+      "turnCredentialMode": "static",
+      "turnExpiresAt": null,
+      "relayCandidates": 1,
+      "selectedPair": "relay → relay",
+      "mediaFlowing": true,
+      "diagnostics": {
+        "wsStatus": "connected",
+        "pcState": "connected",
+        "iceState": "connected",
+        "iceGatheringState": "complete",
+        "dtlsState": "connected",
+        "selectedLocalType": "relay",
+        "selectedRemoteType": "relay",
+        "relayPath": true,
+        "candidates": {
+          "host": 0,
+          "srflx": 0,
+          "prflx": 0,
+          "relay": 1
+        },
+        "bytesSent": 21497,
+        "bytesReceived": 21258,
+        "sendBitrateKbps": 25,
+        "receiveBitrateKbps": 25,
+        "localSenderCount": 1,
+        "localTrackState": "live",
+        "remoteTrackState": "live",
+        "remoteTrackMuted": false,
+        "audioElementPaused": false,
+        "audioElementMuted": false,
+        "audioElementVolume": 1,
+        "playbackError": null,
+        "hasTurn": true,
+        "iceTransportPolicy": "relay"
+      },
+      "logs": [
+        "[5:13:11 PM] ICE configuration loaded: 2 server entr(ies), TURN configured (static, 1 entry), policy relay.",
+        "[5:13:11 PM] ICE warning: TURN uses static credentials. Prefer TURN_SECRET (coturn REST credentials) so browsers receive short-lived credentials.",
+        "[5:13:11 PM] Remote audio element unlocked by user gesture.",
+        "[5:13:11 PM] Microphone captured (track live).",
+        "[5:13:11 PM] Salesperson speech recognition started (captions to customer only).",
+        "[5:13:11 PM] Connecting signaling socket (initial).",
+        "[5:13:11 PM] Signaling connected. Authenticating session membership...",
+        "[5:13:11 PM] Session membership confirmed as salesperson (mlcn_6pm).",
+        "[5:13:11 PM] Peer joined: customer.",
+        "[5:13:11 PM] Establishing a fresh peer connection for customer (peer_joined).",
+        "[5:13:11 PM] Created RTCPeerConnection (peer customer, 2 ICE entr(ies), TURN static, policy relay).",
+        "[5:13:11 PM] Added local microphone track to the peer connection.",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Offer skipped: another offer is being negotiated.",
+        "[5:13:11 PM] Offer sent [peer_joined].",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:11 PM] Received remote audio track from customer.",
+        "[5:13:11 PM] Answer applied.",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Offer skipped: another offer is being negotiated.",
+        "[5:13:11 PM] Playing remote audio stream live.",
+        "[5:13:11 PM] Offer sent [presence refresh: session_state].",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:11 PM] ICE connection state: checking",
+        "[5:13:11 PM] Peer connection state: connecting",
+        "[5:13:11 PM] ICE candidate gathering complete.",
+        "[5:13:11 PM] ICE connection state: connected",
+        "[5:13:11 PM] Peer connection state: connected",
+        "[5:13:11 PM] Remote audio resumed after user interaction.",
+        "[5:13:11 PM] Remote audio track unmuted (media arriving).",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection."
+      ]
+    },
+    "events": [
+      {
+        "t": 368,
+        "id": 0,
+        "event": "created",
+        "iceServers": [
+          {
+            "urls": [
+              "stun:stun.l.google.com:19302"
+            ],
+            "hasCredential": false
+          },
+          {
+            "urls": [
+              "turn:127.0.0.1:3478?transport=udp"
+            ],
+            "hasCredential": true
+          }
+        ],
+        "iceTransportPolicy": "relay"
+      },
+      {
+        "t": 371,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "have-local-offer"
+      },
+      {
+        "t": 371,
+        "id": 0,
+        "event": "icegatheringstatechange",
+        "state": "gathering"
+      },
+      {
+        "t": 380,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "stable"
+      },
+      {
+        "t": 380,
+        "id": 0,
+        "event": "track",
+        "kind": "audio"
+      },
+      {
+        "t": 385,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "have-local-offer"
+      },
+      {
+        "t": 432,
+        "id": 0,
+        "event": "icecandidate",
+        "candidate": {
+          "type": "relay",
+          "protocol": "udp",
+          "address": "127.0.0.1",
+          "port": 50736,
+          "relatedAddress": "0.0.0.0"
+        },
+        "endOfCandidates": false
+      },
+      {
+        "t": 432,
+        "id": 0,
+        "event": "iceconnectionstatechange",
+        "state": "checking"
+      },
+      {
+        "t": 433,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "connecting"
+      },
+      {
+        "t": 435,
+        "id": 0,
+        "event": "icegatheringstatechange",
+        "state": "complete"
+      },
+      {
+        "t": 435,
+        "id": 0,
+        "event": "icecandidate",
+        "candidate": null,
+        "endOfCandidates": true
+      },
+      {
+        "t": 435,
+        "id": 0,
+        "event": "iceconnectionstatechange",
+        "state": "connected"
+      },
+      {
+        "t": 438,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "connected"
+      }
+    ]
+  },
+  "customer": {
+    "pcCount": 1,
+    "openPcCount": 1,
+    "config": {
+      "iceTransportPolicy": "relay",
+      "iceServers": [
+        {
+          "urls": [
+            "stun:stun.l.google.com:19302"
+          ],
+          "hasCredential": false
+        },
+        {
+          "urls": [
+            "turn:127.0.0.1:3478?transport=udp"
+          ],
+          "hasCredential": true
+        }
+      ],
+      "bundlePolicy": "max-bundle",
+      "rtcpMuxPolicy": "require"
+    },
+    "states": {
+      "connectionState": "connected",
+      "iceConnectionState": "connected",
+      "iceGatheringState": "complete",
+      "signalingState": "stable"
+    },
+    "localCandidates": [
+      {
+        "type": "relay",
+        "protocol": "udp",
+        "address": "127.0.0.1",
+        "port": 53622,
+        "url": "turn:127.0.0.1:3478?transport=udp",
+        "relayProtocol": "udp"
+      }
+    ],
+    "remoteCandidates": [
+      {
+        "type": "relay",
+        "protocol": "udp",
+        "address": "127.0.0.1",
+        "port": 50736
+      }
+    ],
+    "selectedPair": {
+      "local": {
+        "type": "relay",
+        "protocol": "udp",
+        "address": "127.0.0.1",
+        "port": 53622,
+        "url": "turn:127.0.0.1:3478?transport=udp",
+        "relayProtocol": "udp"
+      },
+      "remote": {
+        "type": "relay",
+        "protocol": "udp",
+        "address": "127.0.0.1",
+        "port": 50736
+      },
+      "state": "succeeded",
+      "nominated": true,
+      "bytesSent": 44312,
+      "bytesReceived": 44299,
+      "currentRoundTripTime": 0.001
+    },
+    "pairSummary": [
+      {
+        "state": "succeeded",
+        "nominated": true,
+        "local": {
+          "type": "relay",
+          "protocol": "udp",
+          "address": "127.0.0.1",
+          "port": 53622,
+          "url": "turn:127.0.0.1:3478?transport=udp",
+          "relayProtocol": "udp"
+        },
+        "remote": {
+          "type": "relay",
+          "protocol": "udp",
+          "address": "127.0.0.1",
+          "port": 50736
+        },
+        "bytesSent": 44312,
+        "bytesReceived": 44299
+      }
+    ],
+    "localSdp": {
+      "candidateTypes": {
+        "relay": 1
+      },
+      "candidateLines": 1,
+      "ufrag": "L7x0",
+      "iceOptions": [
+        "trickle"
+      ],
+      "setup": "active",
+      "bundle": true,
+      "mAudio": "m=audio 53622 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+      "length": 1338
+    },
+    "remoteSdp": {
+      "candidateTypes": {
+        "relay": 1
+      },
+      "candidateLines": 1,
+      "ufrag": "dJ/+",
+      "iceOptions": [
+        "trickle"
+      ],
+      "setup": "actpass",
+      "bundle": true,
+      "mAudio": "m=audio 50736 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+      "length": 1437
+    },
+    "inboundAudio": {
+      "bytesReceived": 22879,
+      "packetsReceived": 391,
+      "packetsLost": 0,
+      "jitter": 0,
+      "audioLevel": 0.06247138889736625,
+      "totalAudioEnergy": 2.0842981296851435,
+      "totalSamplesReceived": 371520
+    },
+    "outboundAudio": {
+      "bytesSent": 22635,
+      "packetsSent": 391
+    },
+    "transport": {
+      "dtlsState": "connected",
+      "dtlsRole": "client",
+      "iceRole": "controlled",
+      "iceLocalUsernameFragment": "L7x0",
+      "selectedCandidatePairId": "CPNlDkxMLA_P5SNUgko",
+      "bytesSent": 44312,
+      "bytesReceived": 44299
+    },
+    "audioElement": {
+      "paused": false,
+      "muted": false,
+      "volume": 1,
+      "hasSrcObject": true,
+      "srcObjectAudioTracks": 1,
+      "srcIsSilentClip": false
+    },
+    "snapshot": {
+      "sessionId": "xlpTzW3J5XliTK4GHtwogw",
+      "role": "customer",
+      "participantId": "9oQHB9HPzvhmoCVZ",
+      "wsStatus": "connected",
+      "callState": "connected",
+      "peerPresent": true,
+      "peerParticipantId": "mlcn_6pmJWmnh7ef",
+      "peerRole": "salesperson",
+      "participants": [
+        {
+          "participantId": "mlcn_6pmJWmnh7ef",
+          "role": "salesperson",
+          "joinedAt": 1792948391600
+        },
+        {
+          "participantId": "9oQHB9HPzvhmoCVZ",
+          "role": "customer",
+          "joinedAt": 1792948391607
+        }
+      ],
+      "micPermission": "granted",
+      "micMuted": false,
+      "localTrackState": "live",
+      "localTrackMuted": false,
+      "localSenderCount": 1,
+      "remoteTrackState": "live",
+      "speakerMuted": false,
+      "audioUnlocked": true,
+      "playbackBlocked": false,
+      "aiStatus": "reconnecting",
+      "aiError": "Session socket closed abnormally. code=1006 reason=",
+      "ai": {
+        "state": "reconnecting",
+        "status": null,
+        "connected": false,
+        "error": "Session socket closed abnormally. code=1006 reason=",
+        "callId": "call_probe",
+        "reconnectAttempt": 3,
+        "maxReconnectAttempts": 3,
+        "reconnecting": true,
+        "audioReachingAi": false,
+        "lastEventAt": 1792948397172,
+        "lastSuggestionAt": null,
+        "lastResponseAt": null,
+        "source": "local"
+      },
+      "aiReconnectRequestedAt": null,
+      "suggestions": [],
+      "customerSpeech": "",
+      "captionStatus": "off",
+      "salespersonCaption": "",
+      "reconnectAttempt": 0,
+      "lastError": null,
+      "lastServerError": null,
+      "iceConfigLoaded": true,
+      "iceConfigError": null,
+      "iceConfigWarnings": [
+        "TURN uses static credentials. Prefer TURN_SECRET (coturn REST credentials) so browsers receive short-lived credentials."
+      ],
+      "turnConfigured": true,
+      "turnCredentialMode": "static",
+      "turnExpiresAt": null,
+      "relayCandidates": 1,
+      "selectedPair": "relay → relay",
+      "mediaFlowing": true,
+      "diagnostics": {
+        "wsStatus": "connected",
+        "pcState": "connected",
+        "iceState": "connected",
+        "iceGatheringState": "complete",
+        "dtlsState": "connected",
+        "selectedLocalType": "relay",
+        "selectedRemoteType": "relay",
+        "relayPath": true,
+        "candidates": {
+          "host": 0,
+          "srflx": 0,
+          "prflx": 0,
+          "relay": 1
+        },
+        "bytesSent": 21258,
+        "bytesReceived": 21497,
+        "sendBitrateKbps": 25,
+        "receiveBitrateKbps": 25,
+        "localSenderCount": 1,
+        "localTrackState": "live",
+        "remoteTrackState": "live",
+        "remoteTrackMuted": false,
+        "audioElementPaused": false,
+        "audioElementMuted": false,
+        "audioElementVolume": 1,
+        "playbackError": null,
+        "hasTurn": true,
+        "iceTransportPolicy": "relay"
+      },
+      "logs": [
+        "[5:13:11 PM] ICE configuration loaded: 2 server entr(ies), TURN configured (static, 1 entry), policy relay.",
+        "[5:13:11 PM] ICE warning: TURN uses static credentials. Prefer TURN_SECRET (coturn REST credentials) so browsers receive short-lived credentials.",
+        "[5:13:11 PM] Remote audio element unlocked by user gesture.",
+        "[5:13:11 PM] Microphone captured (track live).",
+        "[5:13:11 PM] Connecting signaling socket (initial).",
+        "[5:13:11 PM] Signaling connected. Authenticating session membership...",
+        "[5:13:11 PM] Session membership confirmed as customer (9oQHB9HP).",
+        "[5:13:11 PM] Establishing a fresh peer connection for salesperson (join).",
+        "[5:13:11 PM] Created RTCPeerConnection (peer salesperson, 2 ICE entr(ies), TURN static, policy relay).",
+        "[5:13:11 PM] Added local microphone track to the peer connection.",
+        "[5:13:11 PM] Requesting a new AI call from the server...",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Received offer. Creating answer...",
+        "[5:13:11 PM] Received remote audio track from salesperson.",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Playing remote audio stream live.",
+        "[5:13:11 PM] Answer sent.",
+        "[5:13:11 PM] New AI call created (call_pro).",
+        "[5:13:11 PM] Joining the new AI call (call_pro).",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Ignoring duplicate offer: ICE credentials match the active session.",
+        "[5:13:11 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:13:11 PM] AI recovery scheduled in 1500ms (attempt 1/3).",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] ICE connection state: checking",
+        "[5:13:11 PM] Peer connection state: connecting",
+        "[5:13:11 PM] ICE candidate gathering complete.",
+        "[5:13:11 PM] ICE connection state: connected",
+        "[5:13:11 PM] Peer connection state: connected",
+        "[5:13:11 PM] Remote audio resumed after user interaction.",
+        "[5:13:11 PM] Remote audio track unmuted (media arriving).",
+        "[5:13:13 PM] Requesting a new AI call from the server...",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] New AI call created (call_pro).",
+        "[5:13:13 PM] Joining the new AI call (call_pro).",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:13:13 PM] AI recovery scheduled in 4000ms (attempt 2/3).",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Requesting a new AI call from the server...",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] New AI call created (call_pro).",
+        "[5:13:17 PM] Joining the new AI call (call_pro).",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:13:17 PM] AI recovery scheduled in 9000ms (attempt 3/3).",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection."
+      ]
+    },
+    "events": [
+      {
+        "t": 189,
+        "id": 0,
+        "event": "created",
+        "iceServers": [
+          {
+            "urls": [
+              "stun:stun.l.google.com:19302"
+            ],
+            "hasCredential": false
+          },
+          {
+            "urls": [
+              "turn:127.0.0.1:3478?transport=udp"
+            ],
+            "hasCredential": true
+          }
+        ],
+        "iceTransportPolicy": "relay"
+      },
+      {
+        "t": 194,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "have-remote-offer"
+      },
+      {
+        "t": 194,
+        "id": 0,
+        "event": "track",
+        "kind": "audio"
+      },
+      {
+        "t": 198,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "stable"
+      },
+      {
+        "t": 200,
+        "id": 0,
+        "event": "icegatheringstatechange",
+        "state": "gathering"
+      },
+      {
+        "t": 251,
+        "id": 0,
+        "event": "icecandidate",
+        "candidate": {
+          "type": "relay",
+          "protocol": "udp",
+          "address": "127.0.0.1",
+          "port": 53622,
+          "relatedAddress": "0.0.0.0"
+        },
+        "endOfCandidates": false
+      },
+      {
+        "t": 252,
+        "id": 0,
+        "event": "iceconnectionstatechange",
+        "state": "checking"
+      },
+      {
+        "t": 253,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "connecting"
+      },
+      {
+        "t": 255,
+        "id": 0,
+        "event": "icegatheringstatechange",
+        "state": "complete"
+      },
+      {
+        "t": 255,
+        "id": 0,
+        "event": "icecandidate",
+        "candidate": null,
+        "endOfCandidates": true
+      },
+      {
+        "t": 255,
+        "id": 0,
+        "event": "iceconnectionstatechange",
+        "state": "connected"
+      },
+      {
+        "t": 258,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "connected"
+      }
+    ]
+  },
+  "failureTimeline": [
+    {
+      "t": 2,
+      "salesperson": {
+        "pcStates": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "states": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "selected": {
+          "local": {
+            "type": "relay",
+            "protocol": "udp",
+            "address": "127.0.0.1",
+            "port": 50736,
+            "url": "turn:127.0.0.1:3478?transport=udp",
+            "relayProtocol": "udp"
+          },
+          "remote": {
+            "type": "relay",
+            "protocol": "udp",
+            "address": "127.0.0.1",
+            "port": 53622
+          },
+          "state": "succeeded",
+          "nominated": true,
+          "bytesSent": 54326,
+          "bytesReceived": 44312,
+          "currentRoundTripTime": 0.001
+        },
+        "callState": "connected",
+        "mediaFlowing": true,
+        "recentLogs": [
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection."
+        ]
+      },
+      "customer": {
+        "pcStates": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "states": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selected": {
+          "local": {
+            "type": "relay",
+            "protocol": "udp",
+            "address": "127.0.0.1",
+            "port": 53622,
+            "url": "turn:127.0.0.1:3478?transport=udp",
+            "relayProtocol": "udp"
+          },
+          "remote": {
+            "type": "relay",
+            "protocol": "udp",
+            "address": "127.0.0.1",
+            "port": 50736
+          },
+          "state": "succeeded",
+          "nominated": true,
+          "bytesSent": 54538,
+          "bytesReceived": 44299,
+          "currentRoundTripTime": 0.001
+        },
+        "callState": "connected",
+        "mediaFlowing": true,
+        "recentLogs": [
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:17 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+          "[5:13:17 PM] AI recovery scheduled in 9000ms (attempt 3/3).",
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection."
+        ]
+      }
+    },
+    {
+      "t": 4,
+      "salesperson": {
+        "pcStates": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "states": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "selected": null,
+        "callState": "connected",
+        "mediaFlowing": true,
+        "recentLogs": [
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection."
+        ]
+      },
+      "customer": {
+        "pcStates": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "states": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selected": null,
+        "callState": "connected",
+        "mediaFlowing": true,
+        "recentLogs": [
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:17 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+          "[5:13:17 PM] AI recovery scheduled in 9000ms (attempt 3/3).",
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection."
+        ]
+      }
+    },
+    {
+      "t": 6,
+      "salesperson": {
+        "pcStates": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "states": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "selected": null,
+        "callState": "connected",
+        "mediaFlowing": true,
+        "recentLogs": [
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection."
+        ]
+      },
+      "customer": {
+        "pcStates": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "states": {
+          "connectionState": "connected",
+          "iceConnectionState": "connected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selected": null,
+        "callState": "connected",
+        "mediaFlowing": true,
+        "recentLogs": [
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:17 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+          "[5:13:17 PM] AI recovery scheduled in 9000ms (attempt 3/3).",
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection."
+        ]
+      }
+    },
+    {
+      "t": 8,
+      "salesperson": {
+        "pcStates": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "states": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "selected": null,
+        "callState": "disconnected",
+        "mediaFlowing": false,
+        "recentLogs": [
+          "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:26 PM] ICE connection state: disconnected",
+          "[5:13:26 PM] Peer connection state: disconnected"
+        ]
+      },
+      "customer": {
+        "pcStates": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "states": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selected": null,
+        "callState": "disconnected",
+        "mediaFlowing": false,
+        "recentLogs": [
+          "[5:13:26 PM] AI recovery stopped after the bounded retry limit.",
+          "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:26 PM] ICE connection state: disconnected",
+          "[5:13:26 PM] Peer connection state: disconnected"
+        ]
+      }
+    },
+    {
+      "t": 10,
+      "salesperson": {
+        "pcStates": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "states": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "selected": null,
+        "callState": "disconnected",
+        "mediaFlowing": false,
+        "recentLogs": [
+          "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:26 PM] ICE connection state: disconnected",
+          "[5:13:26 PM] Peer connection state: disconnected"
+        ]
+      },
+      "customer": {
+        "pcStates": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "states": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selected": null,
+        "callState": "disconnected",
+        "mediaFlowing": false,
+        "recentLogs": [
+          "[5:13:26 PM] AI recovery stopped after the bounded retry limit.",
+          "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:26 PM] ICE connection state: disconnected",
+          "[5:13:26 PM] Peer connection state: disconnected"
+        ]
+      }
+    },
+    {
+      "t": 12,
+      "salesperson": {
+        "pcStates": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "states": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "selected": null,
+        "callState": "disconnected",
+        "mediaFlowing": false,
+        "recentLogs": [
+          "[5:13:30 PM] Offer skipped: signalingState is \"have-local-offer\".",
+          "[5:13:30 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:30 PM] Offer skipped: signalingState is \"have-local-offer\".",
+          "[5:13:30 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:30 PM] Offer skipped: signalingState is \"have-local-offer\"."
+        ]
+      },
+      "customer": {
+        "pcStates": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "states": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selected": null,
+        "callState": "disconnected",
+        "mediaFlowing": false,
+        "recentLogs": [
+          "[5:13:30 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:30 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+          "[5:13:30 PM] AI recovery scheduled in 1500ms (attempt 1/3).",
+          "[5:13:30 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:30 PM] Presence refreshed (session_state); keeping the existing peer connection."
+        ]
+      }
+    },
+    {
+      "t": 14,
+      "salesperson": {
+        "pcStates": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "states": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "selected": null,
+        "callState": "disconnected",
+        "mediaFlowing": false,
+        "recentLogs": [
+          "[5:13:31 PM] Offer skipped: signalingState is \"have-local-offer\".",
+          "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:31 PM] Offer skipped: signalingState is \"have-local-offer\".",
+          "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:31 PM] Offer skipped: signalingState is \"have-local-offer\"."
+        ]
+      },
+      "customer": {
+        "pcStates": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "states": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selected": null,
+        "callState": "disconnected",
+        "mediaFlowing": false,
+        "recentLogs": [
+          "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:31 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+          "[5:13:31 PM] AI recovery scheduled in 4000ms (attempt 2/3).",
+          "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection."
+        ]
+      }
+    },
+    {
+      "t": 16,
+      "salesperson": {
+        "pcStates": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "states": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "selected": null,
+        "callState": "disconnected",
+        "mediaFlowing": false,
+        "recentLogs": [
+          "[5:13:31 PM] Offer skipped: signalingState is \"have-local-offer\".",
+          "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:31 PM] Offer skipped: signalingState is \"have-local-offer\".",
+          "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:31 PM] Offer skipped: signalingState is \"have-local-offer\"."
+        ]
+      },
+      "customer": {
+        "pcStates": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "states": {
+          "connectionState": "disconnected",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selected": null,
+        "callState": "disconnected",
+        "mediaFlowing": false,
+        "recentLogs": [
+          "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:31 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+          "[5:13:31 PM] AI recovery scheduled in 4000ms (attempt 2/3).",
+          "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection."
+        ]
+      }
+    },
+    {
+      "t": 18,
+      "salesperson": {
+        "pcStates": {
+          "connectionState": "failed",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "states": {
+          "connectionState": "failed",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "have-local-offer"
+        },
+        "selected": null,
+        "callState": "failed",
+        "mediaFlowing": false,
+        "recentLogs": [
+          "[5:13:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:35 PM] Offer skipped: signalingState is \"have-local-offer\".",
+          "[5:13:36 PM] Peer connection state: failed",
+          "[5:13:36 PM] Attempting ICE restart after a failed connection.",
+          "[5:13:36 PM] Offer skipped: signalingState is \"have-local-offer\"."
+        ]
+      },
+      "customer": {
+        "pcStates": {
+          "connectionState": "failed",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "states": {
+          "connectionState": "failed",
+          "iceConnectionState": "disconnected",
+          "iceGatheringState": "complete",
+          "signalingState": "stable"
+        },
+        "selected": null,
+        "callState": "failed",
+        "mediaFlowing": false,
+        "recentLogs": [
+          "[5:13:35 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+          "[5:13:35 PM] AI recovery scheduled in 9000ms (attempt 3/3).",
+          "[5:13:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+          "[5:13:36 PM] Peer connection state: failed"
+        ]
+      }
+    }
+  ],
+  "salespersonAfterFailure": {
+    "pcCount": 1,
+    "openPcCount": 1,
+    "config": {
+      "iceTransportPolicy": "relay",
+      "iceServers": [
+        {
+          "urls": [
+            "stun:stun.l.google.com:19302"
+          ],
+          "hasCredential": false
+        },
+        {
+          "urls": [
+            "turn:127.0.0.1:3478?transport=udp"
+          ],
+          "hasCredential": true
+        }
+      ],
+      "bundlePolicy": "max-bundle",
+      "rtcpMuxPolicy": "require"
+    },
+    "states": {
+      "connectionState": "failed",
+      "iceConnectionState": "disconnected",
+      "iceGatheringState": "complete",
+      "signalingState": "have-local-offer"
+    },
+    "localCandidates": [
+      {
+        "type": "relay",
+        "protocol": "udp",
+        "address": "127.0.0.1",
+        "port": 50736,
+        "url": "turn:127.0.0.1:3478?transport=udp",
+        "relayProtocol": "udp"
+      }
+    ],
+    "remoteCandidates": [],
+    "selectedPair": null,
+    "pairSummary": [],
+    "localSdp": {
+      "candidateTypes": {
+        "relay": 1
+      },
+      "candidateLines": 1,
+      "ufrag": "dJ/+",
+      "iceOptions": [
+        "trickle"
+      ],
+      "setup": "actpass",
+      "bundle": true,
+      "mAudio": "m=audio 50736 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+      "length": 1437
+    },
+    "remoteSdp": {
+      "candidateTypes": {
+        "relay": 1
+      },
+      "candidateLines": 1,
+      "ufrag": "L7x0",
+      "iceOptions": [
+        "trickle"
+      ],
+      "setup": "active",
+      "bundle": true,
+      "mAudio": "m=audio 53622 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+      "length": 1338
+    },
+    "inboundAudio": {
+      "bytesReceived": 22635,
+      "packetsReceived": 391,
+      "packetsLost": 0,
+      "jitter": 0,
+      "audioLevel": 0,
+      "totalAudioEnergy": 1.9131302701423294,
+      "totalSamplesReceived": 1240320
+    },
+    "outboundAudio": {
+      "bytesSent": 76895,
+      "packetsSent": 1298
+    },
+    "transport": {
+      "dtlsState": "connected",
+      "dtlsRole": "server",
+      "iceRole": "controlling",
+      "iceLocalUsernameFragment": "dJ/+",
+      "bytesSent": 81806,
+      "bytesReceived": 44312
+    },
+    "audioElement": {
+      "paused": false,
+      "muted": false,
+      "volume": 1,
+      "hasSrcObject": true,
+      "srcObjectAudioTracks": 1,
+      "srcIsSilentClip": false
+    },
+    "snapshot": {
+      "sessionId": "xlpTzW3J5XliTK4GHtwogw",
+      "role": "salesperson",
+      "participantId": "mlcn_6pmJWmnh7ef",
+      "wsStatus": "connected",
+      "callState": "failed",
+      "peerPresent": false,
+      "peerParticipantId": "9oQHB9HPzvhmoCVZ",
+      "peerRole": "customer",
+      "participants": [
+        {
+          "participantId": "mlcn_6pmJWmnh7ef",
+          "role": "salesperson",
+          "joinedAt": 1792948391600
+        },
+        {
+          "participantId": "9oQHB9HPzvhmoCVZ",
+          "role": "customer",
+          "joinedAt": 1792948391607
+        }
+      ],
+      "micPermission": "granted",
+      "micMuted": false,
+      "localTrackState": "live",
+      "localTrackMuted": false,
+      "localSenderCount": 1,
+      "remoteTrackState": "live",
+      "speakerMuted": false,
+      "audioUnlocked": true,
+      "playbackBlocked": false,
+      "aiStatus": "reconnecting",
+      "aiError": "Session socket closed abnormally. code=1006 reason=",
+      "ai": {
+        "state": "reconnecting",
+        "status": null,
+        "connected": false,
+        "error": "Session socket closed abnormally. code=1006 reason=",
+        "callId": null,
+        "reconnectAttempt": 3,
+        "maxReconnectAttempts": 3,
+        "reconnecting": true,
+        "audioReachingAi": false,
+        "lastEventAt": 1792948415784,
+        "lastSuggestionAt": null,
+        "lastResponseAt": null,
+        "source": "remote"
+      },
+      "aiReconnectRequestedAt": null,
+      "suggestions": [],
+      "customerSpeech": "",
+      "captionStatus": "listening",
+      "salespersonCaption": "",
+      "reconnectAttempt": 0,
+      "lastError": null,
+      "lastServerError": null,
+      "iceConfigLoaded": true,
+      "iceConfigError": null,
+      "iceConfigWarnings": [
+        "TURN uses static credentials. Prefer TURN_SECRET (coturn REST credentials) so browsers receive short-lived credentials."
+      ],
+      "turnConfigured": true,
+      "turnCredentialMode": "static",
+      "turnExpiresAt": null,
+      "relayCandidates": 1,
+      "selectedPair": "relay → relay",
+      "mediaFlowing": false,
+      "diagnostics": {
+        "wsStatus": "connected",
+        "pcState": "failed",
+        "iceState": "disconnected",
+        "iceGatheringState": "complete",
+        "dtlsState": "connected",
+        "selectedLocalType": "relay",
+        "selectedRemoteType": "relay",
+        "relayPath": true,
+        "candidates": {
+          "host": 0,
+          "srflx": 0,
+          "prflx": 0,
+          "relay": 1
+        },
+        "bytesSent": 75412,
+        "bytesReceived": 22635,
+        "sendBitrateKbps": 24,
+        "receiveBitrateKbps": 0,
+        "localSenderCount": 1,
+        "localTrackState": "live",
+        "remoteTrackState": "live",
+        "remoteTrackMuted": false,
+        "audioElementPaused": false,
+        "audioElementMuted": false,
+        "audioElementVolume": 1,
+        "playbackError": null,
+        "hasTurn": true,
+        "iceTransportPolicy": "relay"
+      },
+      "logs": [
+        "[5:13:11 PM] ICE configuration loaded: 2 server entr(ies), TURN configured (static, 1 entry), policy relay.",
+        "[5:13:11 PM] ICE warning: TURN uses static credentials. Prefer TURN_SECRET (coturn REST credentials) so browsers receive short-lived credentials.",
+        "[5:13:11 PM] Remote audio element unlocked by user gesture.",
+        "[5:13:11 PM] Microphone captured (track live).",
+        "[5:13:11 PM] Salesperson speech recognition started (captions to customer only).",
+        "[5:13:11 PM] Connecting signaling socket (initial).",
+        "[5:13:11 PM] Signaling connected. Authenticating session membership...",
+        "[5:13:11 PM] Session membership confirmed as salesperson (mlcn_6pm).",
+        "[5:13:11 PM] Peer joined: customer.",
+        "[5:13:11 PM] Establishing a fresh peer connection for customer (peer_joined).",
+        "[5:13:11 PM] Created RTCPeerConnection (peer customer, 2 ICE entr(ies), TURN static, policy relay).",
+        "[5:13:11 PM] Added local microphone track to the peer connection.",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Offer skipped: another offer is being negotiated.",
+        "[5:13:11 PM] Offer sent [peer_joined].",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:11 PM] Received remote audio track from customer.",
+        "[5:13:11 PM] Answer applied.",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Offer skipped: another offer is being negotiated.",
+        "[5:13:11 PM] Playing remote audio stream live.",
+        "[5:13:11 PM] Offer sent [presence refresh: session_state].",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:11 PM] ICE connection state: checking",
+        "[5:13:11 PM] Peer connection state: connecting",
+        "[5:13:11 PM] ICE candidate gathering complete.",
+        "[5:13:11 PM] ICE connection state: connected",
+        "[5:13:11 PM] Peer connection state: connected",
+        "[5:13:11 PM] Remote audio resumed after user interaction.",
+        "[5:13:11 PM] Remote audio track unmuted (media arriving).",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:26 PM] ICE connection state: disconnected",
+        "[5:13:26 PM] Peer connection state: disconnected",
+        "[5:13:30 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:30 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:30 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:30 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:30 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:30 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:30 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:30 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:30 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:30 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:30 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:30 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:31 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:31 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:31 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:31 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:31 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:31 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:35 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:35 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:35 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:35 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:35 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:35 PM] Offer skipped: signalingState is \"have-local-offer\".",
+        "[5:13:36 PM] Peer connection state: failed",
+        "[5:13:36 PM] Attempting ICE restart after a failed connection.",
+        "[5:13:36 PM] Offer skipped: signalingState is \"have-local-offer\"."
+      ]
+    },
+    "events": [
+      {
+        "t": 368,
+        "id": 0,
+        "event": "created",
+        "iceServers": [
+          {
+            "urls": [
+              "stun:stun.l.google.com:19302"
+            ],
+            "hasCredential": false
+          },
+          {
+            "urls": [
+              "turn:127.0.0.1:3478?transport=udp"
+            ],
+            "hasCredential": true
+          }
+        ],
+        "iceTransportPolicy": "relay"
+      },
+      {
+        "t": 371,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "have-local-offer"
+      },
+      {
+        "t": 371,
+        "id": 0,
+        "event": "icegatheringstatechange",
+        "state": "gathering"
+      },
+      {
+        "t": 380,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "stable"
+      },
+      {
+        "t": 380,
+        "id": 0,
+        "event": "track",
+        "kind": "audio"
+      },
+      {
+        "t": 385,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "have-local-offer"
+      },
+      {
+        "t": 432,
+        "id": 0,
+        "event": "icecandidate",
+        "candidate": {
+          "type": "relay",
+          "protocol": "udp",
+          "address": "127.0.0.1",
+          "port": 50736,
+          "relatedAddress": "0.0.0.0"
+        },
+        "endOfCandidates": false
+      },
+      {
+        "t": 432,
+        "id": 0,
+        "event": "iceconnectionstatechange",
+        "state": "checking"
+      },
+      {
+        "t": 433,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "connecting"
+      },
+      {
+        "t": 435,
+        "id": 0,
+        "event": "icegatheringstatechange",
+        "state": "complete"
+      },
+      {
+        "t": 435,
+        "id": 0,
+        "event": "icecandidate",
+        "candidate": null,
+        "endOfCandidates": true
+      },
+      {
+        "t": 435,
+        "id": 0,
+        "event": "iceconnectionstatechange",
+        "state": "connected"
+      },
+      {
+        "t": 438,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "connected"
+      },
+      {
+        "t": 15725,
+        "id": 0,
+        "event": "iceconnectionstatechange",
+        "state": "disconnected"
+      },
+      {
+        "t": 15726,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "disconnected"
+      },
+      {
+        "t": 25725,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "failed"
+      }
+    ]
+  },
+  "customerAfterFailure": {
+    "pcCount": 1,
+    "openPcCount": 1,
+    "config": {
+      "iceTransportPolicy": "relay",
+      "iceServers": [
+        {
+          "urls": [
+            "stun:stun.l.google.com:19302"
+          ],
+          "hasCredential": false
+        },
+        {
+          "urls": [
+            "turn:127.0.0.1:3478?transport=udp"
+          ],
+          "hasCredential": true
+        }
+      ],
+      "bundlePolicy": "max-bundle",
+      "rtcpMuxPolicy": "require"
+    },
+    "states": {
+      "connectionState": "failed",
+      "iceConnectionState": "disconnected",
+      "iceGatheringState": "complete",
+      "signalingState": "stable"
+    },
+    "localCandidates": [
+      {
+        "type": "relay",
+        "protocol": "udp",
+        "address": "127.0.0.1",
+        "port": 53622,
+        "url": "turn:127.0.0.1:3478?transport=udp",
+        "relayProtocol": "udp"
+      }
+    ],
+    "remoteCandidates": [],
+    "selectedPair": null,
+    "pairSummary": [],
+    "localSdp": {
+      "candidateTypes": {
+        "relay": 1
+      },
+      "candidateLines": 1,
+      "ufrag": "L7x0",
+      "iceOptions": [
+        "trickle"
+      ],
+      "setup": "active",
+      "bundle": true,
+      "mAudio": "m=audio 53622 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+      "length": 1338
+    },
+    "remoteSdp": {
+      "candidateTypes": {
+        "relay": 1
+      },
+      "candidateLines": 1,
+      "ufrag": "dJ/+",
+      "iceOptions": [
+        "trickle"
+      ],
+      "setup": "actpass",
+      "bundle": true,
+      "mAudio": "m=audio 50736 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+      "length": 1437
+    },
+    "inboundAudio": {
+      "bytesReceived": 22879,
+      "packetsReceived": 391,
+      "packetsLost": 0,
+      "jitter": 0,
+      "audioLevel": 0,
+      "totalAudioEnergy": 2.0846388519621915,
+      "totalSamplesReceived": 1240320
+    },
+    "outboundAudio": {
+      "bytesSent": 79110,
+      "packetsSent": 1299
+    },
+    "transport": {
+      "dtlsState": "connected",
+      "dtlsRole": "client",
+      "iceRole": "controlled",
+      "iceLocalUsernameFragment": "L7x0",
+      "bytesSent": 82703,
+      "bytesReceived": 44299
+    },
+    "audioElement": {
+      "paused": false,
+      "muted": false,
+      "volume": 1,
+      "hasSrcObject": true,
+      "srcObjectAudioTracks": 1,
+      "srcIsSilentClip": false
+    },
+    "snapshot": {
+      "sessionId": "xlpTzW3J5XliTK4GHtwogw",
+      "role": "customer",
+      "participantId": "9oQHB9HPzvhmoCVZ",
+      "wsStatus": "connected",
+      "callState": "failed",
+      "peerPresent": false,
+      "peerParticipantId": "mlcn_6pmJWmnh7ef",
+      "peerRole": "salesperson",
+      "participants": [
+        {
+          "participantId": "mlcn_6pmJWmnh7ef",
+          "role": "salesperson",
+          "joinedAt": 1792948391600
+        },
+        {
+          "participantId": "9oQHB9HPzvhmoCVZ",
+          "role": "customer",
+          "joinedAt": 1792948391607
+        }
+      ],
+      "micPermission": "granted",
+      "micMuted": false,
+      "localTrackState": "live",
+      "localTrackMuted": false,
+      "localSenderCount": 1,
+      "remoteTrackState": "live",
+      "speakerMuted": false,
+      "audioUnlocked": true,
+      "playbackBlocked": false,
+      "aiStatus": "reconnecting",
+      "aiError": "Session socket closed abnormally. code=1006 reason=",
+      "ai": {
+        "state": "reconnecting",
+        "status": null,
+        "connected": false,
+        "error": "Session socket closed abnormally. code=1006 reason=",
+        "callId": "call_probe",
+        "reconnectAttempt": 3,
+        "maxReconnectAttempts": 3,
+        "reconnecting": true,
+        "audioReachingAi": false,
+        "lastEventAt": 1792948415781,
+        "lastSuggestionAt": null,
+        "lastResponseAt": null,
+        "source": "local"
+      },
+      "aiReconnectRequestedAt": null,
+      "suggestions": [],
+      "customerSpeech": "",
+      "captionStatus": "off",
+      "salespersonCaption": "",
+      "reconnectAttempt": 0,
+      "lastError": null,
+      "lastServerError": null,
+      "iceConfigLoaded": true,
+      "iceConfigError": null,
+      "iceConfigWarnings": [
+        "TURN uses static credentials. Prefer TURN_SECRET (coturn REST credentials) so browsers receive short-lived credentials."
+      ],
+      "turnConfigured": true,
+      "turnCredentialMode": "static",
+      "turnExpiresAt": null,
+      "relayCandidates": 1,
+      "selectedPair": "relay → relay",
+      "mediaFlowing": false,
+      "diagnostics": {
+        "wsStatus": "connected",
+        "pcState": "failed",
+        "iceState": "disconnected",
+        "iceGatheringState": "complete",
+        "dtlsState": "connected",
+        "selectedLocalType": "relay",
+        "selectedRemoteType": "relay",
+        "relayPath": true,
+        "candidates": {
+          "host": 0,
+          "srflx": 0,
+          "prflx": 0,
+          "relay": 1
+        },
+        "bytesSent": 77553,
+        "bytesReceived": 22879,
+        "sendBitrateKbps": 25,
+        "receiveBitrateKbps": 0,
+        "localSenderCount": 1,
+        "localTrackState": "live",
+        "remoteTrackState": "live",
+        "remoteTrackMuted": false,
+        "audioElementPaused": false,
+        "audioElementMuted": false,
+        "audioElementVolume": 1,
+        "playbackError": null,
+        "hasTurn": true,
+        "iceTransportPolicy": "relay"
+      },
+      "logs": [
+        "[5:13:11 PM] ICE configuration loaded: 2 server entr(ies), TURN configured (static, 1 entry), policy relay.",
+        "[5:13:11 PM] ICE warning: TURN uses static credentials. Prefer TURN_SECRET (coturn REST credentials) so browsers receive short-lived credentials.",
+        "[5:13:11 PM] Remote audio element unlocked by user gesture.",
+        "[5:13:11 PM] Microphone captured (track live).",
+        "[5:13:11 PM] Connecting signaling socket (initial).",
+        "[5:13:11 PM] Signaling connected. Authenticating session membership...",
+        "[5:13:11 PM] Session membership confirmed as customer (9oQHB9HP).",
+        "[5:13:11 PM] Establishing a fresh peer connection for salesperson (join).",
+        "[5:13:11 PM] Created RTCPeerConnection (peer salesperson, 2 ICE entr(ies), TURN static, policy relay).",
+        "[5:13:11 PM] Added local microphone track to the peer connection.",
+        "[5:13:11 PM] Requesting a new AI call from the server...",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Received offer. Creating answer...",
+        "[5:13:11 PM] Received remote audio track from salesperson.",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Playing remote audio stream live.",
+        "[5:13:11 PM] Answer sent.",
+        "[5:13:11 PM] New AI call created (call_pro).",
+        "[5:13:11 PM] Joining the new AI call (call_pro).",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Ignoring duplicate offer: ICE credentials match the active session.",
+        "[5:13:11 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:13:11 PM] AI recovery scheduled in 1500ms (attempt 1/3).",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:11 PM] ICE connection state: checking",
+        "[5:13:11 PM] Peer connection state: connecting",
+        "[5:13:11 PM] ICE candidate gathering complete.",
+        "[5:13:11 PM] ICE connection state: connected",
+        "[5:13:11 PM] Peer connection state: connected",
+        "[5:13:11 PM] Remote audio resumed after user interaction.",
+        "[5:13:11 PM] Remote audio track unmuted (media arriving).",
+        "[5:13:13 PM] Requesting a new AI call from the server...",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] New AI call created (call_pro).",
+        "[5:13:13 PM] Joining the new AI call (call_pro).",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:13:13 PM] AI recovery scheduled in 4000ms (attempt 2/3).",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:13 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Requesting a new AI call from the server...",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] New AI call created (call_pro).",
+        "[5:13:17 PM] Joining the new AI call (call_pro).",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:13:17 PM] AI recovery scheduled in 9000ms (attempt 3/3).",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:17 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:26 PM] Requesting a new AI call from the server...",
+        "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:26 PM] New AI call created (call_pro).",
+        "[5:13:26 PM] Joining the new AI call (call_pro).",
+        "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:26 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:13:26 PM] AI recovery stopped after the bounded retry limit.",
+        "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:26 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:26 PM] ICE connection state: disconnected",
+        "[5:13:26 PM] Peer connection state: disconnected",
+        "[5:13:30 PM] Manual AI restart requested; a brand new Ultravox call will be created.",
+        "[5:13:30 PM] Requesting a new AI call from the server...",
+        "[5:13:30 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:30 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:30 PM] New AI call created (call_pro).",
+        "[5:13:30 PM] Joining the new AI call (call_pro).",
+        "[5:13:30 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:30 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:30 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:13:30 PM] AI recovery scheduled in 1500ms (attempt 1/3).",
+        "[5:13:30 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:30 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:31 PM] Requesting a new AI call from the server...",
+        "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:31 PM] New AI call created (call_pro).",
+        "[5:13:31 PM] Joining the new AI call (call_pro).",
+        "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:31 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:13:31 PM] AI recovery scheduled in 4000ms (attempt 2/3).",
+        "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:31 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:35 PM] Requesting a new AI call from the server...",
+        "[5:13:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:35 PM] New AI call created (call_pro).",
+        "[5:13:35 PM] Joining the new AI call (call_pro).",
+        "[5:13:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:35 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:13:35 PM] AI recovery scheduled in 9000ms (attempt 3/3).",
+        "[5:13:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:35 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:13:36 PM] Peer connection state: failed"
+      ]
+    },
+    "events": [
+      {
+        "t": 189,
+        "id": 0,
+        "event": "created",
+        "iceServers": [
+          {
+            "urls": [
+              "stun:stun.l.google.com:19302"
+            ],
+            "hasCredential": false
+          },
+          {
+            "urls": [
+              "turn:127.0.0.1:3478?transport=udp"
+            ],
+            "hasCredential": true
+          }
+        ],
+        "iceTransportPolicy": "relay"
+      },
+      {
+        "t": 194,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "have-remote-offer"
+      },
+      {
+        "t": 194,
+        "id": 0,
+        "event": "track",
+        "kind": "audio"
+      },
+      {
+        "t": 198,
+        "id": 0,
+        "event": "signalingstatechange",
+        "state": "stable"
+      },
+      {
+        "t": 200,
+        "id": 0,
+        "event": "icegatheringstatechange",
+        "state": "gathering"
+      },
+      {
+        "t": 251,
+        "id": 0,
+        "event": "icecandidate",
+        "candidate": {
+          "type": "relay",
+          "protocol": "udp",
+          "address": "127.0.0.1",
+          "port": 53622,
+          "relatedAddress": "0.0.0.0"
+        },
+        "endOfCandidates": false
+      },
+      {
+        "t": 252,
+        "id": 0,
+        "event": "iceconnectionstatechange",
+        "state": "checking"
+      },
+      {
+        "t": 253,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "connecting"
+      },
+      {
+        "t": 255,
+        "id": 0,
+        "event": "icegatheringstatechange",
+        "state": "complete"
+      },
+      {
+        "t": 255,
+        "id": 0,
+        "event": "icecandidate",
+        "candidate": null,
+        "endOfCandidates": true
+      },
+      {
+        "t": 255,
+        "id": 0,
+        "event": "iceconnectionstatechange",
+        "state": "connected"
+      },
+      {
+        "t": 258,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "connected"
+      },
+      {
+        "t": 15544,
+        "id": 0,
+        "event": "iceconnectionstatechange",
+        "state": "disconnected"
+      },
+      {
+        "t": 15545,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "disconnected"
+      },
+      {
+        "t": 25545,
+        "id": 0,
+        "event": "connectionstatechange",
+        "state": "failed"
+      }
+    ]
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "file": "direct-relay.json",
+  "scenario": "direct-relay",
+  "error": null,
+  "env": {
+    "TURN_URLS": null,
+    "TURN_USERNAME": null,
+    "STUN_URLS": null,
+    "ICE_TRANSPORT_POLICY": "relay",
+    "INTERCEPT_ICE": "0"
+  },
+  "samples": [
+    {
+      "t": 1792948346823,
+      "flowS": false
+    },
+    {
+      "t": 1792948349326,
+      "flowS": false
+    },
+    {
+      "t": 1792948351831,
+      "flowS": false
+    }
+  ],
+  "finals": {
+    "sales": {
+      "pc": 0,
+      "open": 0,
+      "callState": "failed",
+      "lastError": "ICE_TRANSPORT_POLICY=relay requires a usable TURN relay (TURN_URLS plus TURN_SECRET or TURN_USERNAME/TURN_CREDENTIAL). Relay-only mode cannot work with STUN alone.",
+      "mediaFlowing": false,
+      "logTail": [
+        "[5:11:34 PM] ICE configuration unavailable; refusing to start with unverified ICE settings. ICE_TRANSPORT_POLICY=relay requires a usable TURN relay (TURN_URLS plus TURN_SECRET or TURN_USERNAME/TURN_CREDENTIAL). Relay-only mode cannot work with STUN alone.",
+        "[5:11:34 PM] Remote audio element unlocked by user gesture."
+      ]
+    },
+    "customer": {
+      "pc": 0,
+      "open": 0,
+      "callState": "failed",
+      "lastError": "ICE_TRANSPORT_POLICY=relay requires a usable TURN relay (TURN_URLS plus TURN_SECRET or TURN_USERNAME/TURN_CREDENTIAL). Relay-only mode cannot work with STUN alone.",
+      "mediaFlowing": false,
+      "logTail": [
+        "[5:11:34 PM] ICE configuration unavailable; refusing to start with unverified ICE settings. ICE_TRANSPORT_POLICY=relay requires a usable TURN relay (TURN_URLS plus TURN_SECRET or TURN_USERNAME/TURN_CREDENTIAL). Relay-only mode cannot work with STUN alone.",
+        "[5:11:34 PM] Remote audio element unlocked by user gesture."
+      ]
+    }
+  }
+}

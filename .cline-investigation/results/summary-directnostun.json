@@ -1,0 +1,263 @@
+{
+  "file": "directnostun.json",
+  "scenario": "direct",
+  "error": null,
+  "env": {
+    "TURN_URLS": null,
+    "TURN_USERNAME": null,
+    "STUN_URLS": null,
+    "ICE_TRANSPORT_POLICY": "all",
+    "INTERCEPT_ICE": "1"
+  },
+  "samples": [
+    {
+      "t": 1792948269160,
+      "sl": {
+        "connectionState": "connected",
+        "iceConnectionState": "connected",
+        "iceGatheringState": "complete",
+        "signalingState": "stable"
+      },
+      "cl": {
+        "connectionState": "connected",
+        "iceConnectionState": "connected",
+        "iceGatheringState": "complete",
+        "signalingState": "stable"
+      },
+      "sSel": "host->host",
+      "cSel": "host->host",
+      "sIn": 7084,
+      "sOut": 7029,
+      "cIn": 7029,
+      "cOut": 7084,
+      "energy": 0.6840073903969774,
+      "flowS": true
+    },
+    {
+      "t": 1792948271673,
+      "sl": {
+        "connectionState": "connected",
+        "iceConnectionState": "connected",
+        "iceGatheringState": "complete",
+        "signalingState": "stable"
+      },
+      "cl": {
+        "connectionState": "connected",
+        "iceConnectionState": "connected",
+        "iceGatheringState": "complete",
+        "signalingState": "stable"
+      },
+      "sSel": "host->host",
+      "cSel": "host->host",
+      "sIn": 14840,
+      "sOut": 14830,
+      "cIn": 14830,
+      "cOut": 14840,
+      "energy": 1.3794098624450446,
+      "flowS": true
+    },
+    {
+      "t": 1792948274187,
+      "sl": {
+        "connectionState": "connected",
+        "iceConnectionState": "connected",
+        "iceGatheringState": "complete",
+        "signalingState": "stable"
+      },
+      "cl": {
+        "connectionState": "connected",
+        "iceConnectionState": "connected",
+        "iceGatheringState": "complete",
+        "signalingState": "stable"
+      },
+      "sSel": "host->host",
+      "cSel": "host->host",
+      "sIn": 22598,
+      "sOut": 22754,
+      "cIn": 22754,
+      "cOut": 22598,
+      "energy": 2.0810985644016404,
+      "flowS": true
+    }
+  ],
+  "finals": {
+    "sales": {
+      "states": {
+        "connectionState": "connected",
+        "iceConnectionState": "connected",
+        "iceGatheringState": "complete",
+        "signalingState": "stable"
+      },
+      "pc": 1,
+      "open": 1,
+      "local": [
+        {
+          "type": "host",
+          "protocol": "udp",
+          "address": "240.112.23.39",
+          "port": 48199
+        },
+        {
+          "type": "srflx",
+          "protocol": "udp",
+          "address": "34.67.51.12",
+          "port": 2048,
+          "relatedAddress": "240.112.23.39",
+          "url": "stun:stun.l.google.com:19302"
+        }
+      ],
+      "selected": {
+        "local": {
+          "type": "host",
+          "protocol": "udp",
+          "address": "240.112.23.39",
+          "port": 48199
+        },
+        "remote": {
+          "type": "host",
+          "protocol": "udp",
+          "address": "240.112.23.39",
+          "port": 51604
+        },
+        "state": "succeeded",
+        "nominated": true,
+        "bytesSent": 44210,
+        "bytesReceived": 44219,
+        "currentRoundTripTime": 0
+      },
+      "callState": "connected",
+      "lastError": null,
+      "mediaFlowing": true,
+      "localSdp": {
+        "candidateTypes": {
+          "host": 1,
+          "srflx": 1
+        },
+        "candidateLines": 2,
+        "ufrag": "y7VY",
+        "iceOptions": [
+          "trickle"
+        ],
+        "setup": "actpass",
+        "bundle": true,
+        "mAudio": "m=audio 2048 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+        "length": 1548
+      },
+      "remoteSdp": {
+        "candidateTypes": {
+          "host": 1
+        },
+        "candidateLines": 1,
+        "ufrag": "WMxF",
+        "iceOptions": [
+          "trickle"
+        ],
+        "setup": "active",
+        "bundle": true,
+        "mAudio": "m=audio 51604 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+        "length": 1324
+      },
+      "audio": {
+        "paused": false,
+        "muted": false,
+        "volume": 1,
+        "hasSrcObject": true,
+        "srcObjectAudioTracks": 1,
+        "srcIsSilentClip": false
+      },
+      "logTail": [
+        "[5:11:12 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:11:12 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:11:12 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:11:12 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:11:12 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:11:12 PM] Presence refreshed (session_state); keeping the existing peer connection."
+      ]
+    },
+    "customer": {
+      "states": {
+        "connectionState": "connected",
+        "iceConnectionState": "connected",
+        "iceGatheringState": "complete",
+        "signalingState": "stable"
+      },
+      "pc": 1,
+      "open": 1,
+      "local": [
+        {
+          "type": "host",
+          "protocol": "udp",
+          "address": "240.112.23.39",
+          "port": 51604
+        }
+      ],
+      "selected": {
+        "local": {
+          "type": "host",
+          "protocol": "udp",
+          "address": "240.112.23.39",
+          "port": 51604
+        },
+        "remote": {
+          "type": "host",
+          "protocol": "udp",
+          "address": "240.112.23.39",
+          "port": 48199
+        },
+        "state": "succeeded",
+        "nominated": true,
+        "bytesSent": 44219,
+        "bytesReceived": 44210,
+        "currentRoundTripTime": 0
+      },
+      "callState": "connected",
+      "lastError": null,
+      "mediaFlowing": true,
+      "localSdp": {
+        "candidateTypes": {
+          "host": 1
+        },
+        "candidateLines": 1,
+        "ufrag": "WMxF",
+        "iceOptions": [
+          "trickle"
+        ],
+        "setup": "active",
+        "bundle": true,
+        "mAudio": "m=audio 51604 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+        "length": 1324
+      },
+      "remoteSdp": {
+        "candidateTypes": {
+          "host": 1,
+          "srflx": 1
+        },
+        "candidateLines": 2,
+        "ufrag": "y7VY",
+        "iceOptions": [
+          "trickle"
+        ],
+        "setup": "actpass",
+        "bundle": true,
+        "mAudio": "m=audio 2048 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+        "length": 1548
+      },
+      "audio": {
+        "paused": false,
+        "muted": false,
+        "volume": 1,
+        "hasSrcObject": true,
+        "srcObjectAudioTracks": 1,
+        "srcIsSilentClip": false
+      },
+      "logTail": [
+        "[5:11:12 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:11:12 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:11:12 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:11:12 PM] AI recovery scheduled in 9000ms (attempt 3/3).",
+        "[5:11:12 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:11:12 PM] Presence refreshed (session_state); keeping the existing peer connection."
+      ]
+    }
+  }
+}

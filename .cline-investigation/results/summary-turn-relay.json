@@ -1,0 +1,261 @@
+{
+  "file": "turn-relay.json",
+  "scenario": "turn-relay",
+  "error": null,
+  "env": {
+    "TURN_URLS": "turn:127.0.0.1:3478?transport=udp",
+    "TURN_USERNAME": "probe-user",
+    "STUN_URLS": "stun:stun.l.google.com:19302",
+    "ICE_TRANSPORT_POLICY": "relay",
+    "INTERCEPT_ICE": "0"
+  },
+  "samples": [
+    {
+      "t": 1792948148888,
+      "sl": {
+        "connectionState": "connected",
+        "iceConnectionState": "connected",
+        "iceGatheringState": "complete",
+        "signalingState": "have-local-offer"
+      },
+      "cl": {
+        "connectionState": "connected",
+        "iceConnectionState": "connected",
+        "iceGatheringState": "complete",
+        "signalingState": "stable"
+      },
+      "sSel": "relay->relay",
+      "cSel": "relay->relay",
+      "sIn": 7114,
+      "sOut": 6797,
+      "cIn": 6797,
+      "cOut": 7195,
+      "energy": 0.6405879898312643,
+      "flowS": true
+    },
+    {
+      "t": 1792948151398,
+      "sl": {
+        "connectionState": "connected",
+        "iceConnectionState": "connected",
+        "iceGatheringState": "complete",
+        "signalingState": "have-local-offer"
+      },
+      "cl": {
+        "connectionState": "connected",
+        "iceConnectionState": "connected",
+        "iceGatheringState": "complete",
+        "signalingState": "stable"
+      },
+      "sSel": "relay->relay",
+      "cSel": "relay->relay",
+      "sIn": 14971,
+      "sOut": 14679,
+      "cIn": 14679,
+      "cOut": 14971,
+      "energy": 1.3359904618793352,
+      "flowS": true
+    },
+    {
+      "t": 1792948153907,
+      "sl": {
+        "connectionState": "connected",
+        "iceConnectionState": "connected",
+        "iceGatheringState": "complete",
+        "signalingState": "have-local-offer"
+      },
+      "cl": {
+        "connectionState": "connected",
+        "iceConnectionState": "connected",
+        "iceGatheringState": "complete",
+        "signalingState": "stable"
+      },
+      "sSel": "relay->relay",
+      "cSel": "relay->relay",
+      "sIn": 22716,
+      "sOut": 22522,
+      "cIn": 22603,
+      "cOut": 22793,
+      "energy": 2.0382777007474613,
+      "flowS": true
+    }
+  ],
+  "finals": {
+    "sales": {
+      "states": {
+        "connectionState": "connected",
+        "iceConnectionState": "connected",
+        "iceGatheringState": "complete",
+        "signalingState": "have-local-offer"
+      },
+      "pc": 1,
+      "open": 1,
+      "local": [
+        {
+          "type": "relay",
+          "protocol": "udp",
+          "address": "127.0.0.1",
+          "port": 59141,
+          "url": "turn:127.0.0.1:3478?transport=udp",
+          "relayProtocol": "udp"
+        }
+      ],
+      "selected": {
+        "local": {
+          "type": "relay",
+          "protocol": "udp",
+          "address": "127.0.0.1",
+          "port": 59141,
+          "url": "turn:127.0.0.1:3478?transport=udp",
+          "relayProtocol": "udp"
+        },
+        "remote": {
+          "type": "relay",
+          "protocol": "udp",
+          "address": "127.0.0.1",
+          "port": 50867
+        },
+        "state": "succeeded",
+        "nominated": true,
+        "bytesSent": 43936,
+        "bytesReceived": 44182,
+        "currentRoundTripTime": 0.001
+      },
+      "callState": "connected",
+      "lastError": null,
+      "mediaFlowing": true,
+      "localSdp": {
+        "candidateTypes": {
+          "relay": 1
+        },
+        "candidateLines": 1,
+        "ufrag": "sA2O",
+        "iceOptions": [
+          "trickle"
+        ],
+        "setup": "actpass",
+        "bundle": true,
+        "mAudio": "m=audio 59141 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+        "length": 1438
+      },
+      "remoteSdp": {
+        "candidateTypes": {
+          "relay": 1
+        },
+        "candidateLines": 1,
+        "ufrag": "OB/x",
+        "iceOptions": [
+          "trickle"
+        ],
+        "setup": "active",
+        "bundle": true,
+        "mAudio": "m=audio 50867 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+        "length": 1338
+      },
+      "audio": {
+        "paused": false,
+        "muted": false,
+        "volume": 1,
+        "hasSrcObject": true,
+        "srcObjectAudioTracks": 1,
+        "srcIsSilentClip": false
+      },
+      "logTail": [
+        "[5:09:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:09:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:09:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:09:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:09:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:09:11 PM] Presence refreshed (session_state); keeping the existing peer connection."
+      ]
+    },
+    "customer": {
+      "states": {
+        "connectionState": "connected",
+        "iceConnectionState": "connected",
+        "iceGatheringState": "complete",
+        "signalingState": "stable"
+      },
+      "pc": 1,
+      "open": 1,
+      "local": [
+        {
+          "type": "relay",
+          "protocol": "udp",
+          "address": "127.0.0.1",
+          "port": 50867,
+          "url": "turn:127.0.0.1:3478?transport=udp",
+          "relayProtocol": "udp"
+        }
+      ],
+      "selected": {
+        "local": {
+          "type": "relay",
+          "protocol": "udp",
+          "address": "127.0.0.1",
+          "port": 50867,
+          "url": "turn:127.0.0.1:3478?transport=udp",
+          "relayProtocol": "udp"
+        },
+        "remote": {
+          "type": "relay",
+          "protocol": "udp",
+          "address": "127.0.0.1",
+          "port": 59141
+        },
+        "state": "succeeded",
+        "nominated": true,
+        "bytesSent": 44297,
+        "bytesReceived": 44055,
+        "currentRoundTripTime": 0.001
+      },
+      "callState": "connected",
+      "lastError": null,
+      "mediaFlowing": true,
+      "localSdp": {
+        "candidateTypes": {
+          "relay": 1
+        },
+        "candidateLines": 1,
+        "ufrag": "OB/x",
+        "iceOptions": [
+          "trickle"
+        ],
+        "setup": "active",
+        "bundle": true,
+        "mAudio": "m=audio 50867 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+        "length": 1338
+      },
+      "remoteSdp": {
+        "candidateTypes": {
+          "relay": 1
+        },
+        "candidateLines": 1,
+        "ufrag": "sA2O",
+        "iceOptions": [
+          "trickle"
+        ],
+        "setup": "actpass",
+        "bundle": true,
+        "mAudio": "m=audio 59141 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+        "length": 1438
+      },
+      "audio": {
+        "paused": false,
+        "muted": false,
+        "volume": 1,
+        "hasSrcObject": true,
+        "srcObjectAudioTracks": 1,
+        "srcIsSilentClip": false
+      },
+      "logTail": [
+        "[5:09:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:09:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:09:11 PM] AI session error: Session socket closed abnormally. code=1006 reason=",
+        "[5:09:11 PM] AI recovery scheduled in 9000ms (attempt 3/3).",
+        "[5:09:11 PM] Presence refreshed (session_state); keeping the existing peer connection.",
+        "[5:09:11 PM] Presence refreshed (session_state); keeping the existing peer connection."
+      ]
+    }
+  }
+}
