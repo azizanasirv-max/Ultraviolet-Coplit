@@ -1,5 +1,5 @@
 {
-  "name": "react-example",
+  "name": "ultraviolet-copilot",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -9,7 +9,15 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "npm run test:unit && npm run test:turn && npm run test:signaling",
+    "test:unit": "node --import tsx --test tests/sessionStore.test.ts",
+    "test:signaling": "node --import tsx --test tests/signaling.test.ts",
+    "test:browser": "node --import tsx --test tests/browser-audio.test.ts",
+    "test:all": "npm run test && npm run test:browser",
+    "start:prod": "NODE_ENV=production tsx server.ts",
+    "verify": "npm run lint && npm run test",
+    "test:turn": "node --import tsx --test tests/turn.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -21,6 +29,8 @@
     "motion": "^12.23.24",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.21.0",
     "ultravox-client": "^0.6.0",
     "vite": "^8.3.0",
     "ws": "^8.22.0"
@@ -32,9 +42,10 @@
     "@types/react-dom": "^19.3.0",
     "@types/ws": "^8.18.2",
     "autoprefixer": "^10.4.21",
-    "esbuild": "^0.25.0",
-    "tailwindcss": "^4.3.3",
-    "tsx": "^4.21.0",
+    "playwright": "^1.64.1",
     "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=22.12.0 <25"
   }
 }

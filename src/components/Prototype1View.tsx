@@ -384,11 +384,11 @@ export const Prototype1View: React.FC = () => {
             {!isConnected ? (
               <button
                 onClick={handleStartListening}
-                disabled={sessionStatus === UltravoxSessionStatus.CONNECTING}
+                disabled={(sessionStatus as UltravoxSessionStatus) === UltravoxSessionStatus.CONNECTING}
                 className="flex-1 sm:flex-initial flex items-center justify-center gap-2 px-6 py-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold rounded-xl shadow-lg shadow-emerald-600/20 text-sm transition-all"
               >
                 <Mic className="w-4 h-4" />
-                {sessionStatus === UltravoxSessionStatus.CONNECTING
+                {(sessionStatus as UltravoxSessionStatus) === UltravoxSessionStatus.CONNECTING
                   ? 'Connecting...'
                   : 'Start Listening'}
               </button>

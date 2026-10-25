@@ -1,20 +1,46 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Prototype1View } from './components/Prototype1View';
-import { Prototype2View } from './components/Prototype2View';
+import { SalespersonDashboard } from './components/prototype2/SalespersonDashboard';
+import { CustomerDashboard } from './components/prototype2/CustomerDashboard';
+import { RouteInfo, readRoute } from './lib/routes';
 import { Bot, Users, ExternalLink, Radio } from 'lucide-react';
 
+/**
+ * Role-specific routes:
+ *   /join?invite=...  customer only (no prototype tabs, no salesperson UI)
+ *   /sales            salesperson only
+ *   /                 prototype selector (Prototype 2 tab = salesperson)
+ *
+ * The route only selects a UI shell. Authorization is always enforced by the
+ * server against the participant credential.
+ */
 export default function App() {
+  const [route, setRoute] = useState<RouteInfo>(() => readRoute());
   const [activeTab, setActiveTab] = useState<'prototype2' | 'prototype1'>('prototype2');
 
   useEffect(() => {
+    const sync = () => setRoute(readRoute());
+    window.addEventListener('popstate', sync);
     const params = new URLSearchParams(window.location.search);
-    const protoParam = params.get('prototype');
-    if (protoParam === '1') {
-      setActiveTab('prototype1');
-    } else if (protoParam === '2') {
-      setActiveTab('prototype2');
-    }
+    if (params.get('prototype') === '1') setActiveTab('prototype1');
+    return () => window.removeEventListener('popstate', sync);
   }, []);
+
+  if (route.kind === 'customer') {
+    return (
+      <div className="min-h-screen w-full bg-slate-950 text-slate-100 font-sans antialiased selection:bg-emerald-500 selection:text-black">
+        <CustomerDashboard inviteToken={route.inviteToken} legacyInvitation={route.legacyInvitation} />
+      </div>
+    );
+  }
+
+  if (route.kind === 'salesperson') {
+    return (
+      <div className="h-screen w-screen bg-slate-950 text-slate-100 flex flex-col font-sans overflow-hidden antialiased selection:bg-emerald-500 selection:text-black">
+        <SalespersonDashboard />
+      </div>
+    );
+  }
 
   return (
     <div className="h-screen w-screen bg-slate-950 text-slate-100 flex flex-col font-sans overflow-hidden antialiased selection:bg-emerald-500 selection:text-black">
@@ -32,7 +58,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Prototype Version Selector Tabs */}
         <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800/80 text-xs">
           <button
             onClick={() => setActiveTab('prototype2')}
@@ -61,7 +86,7 @@ export default function App() {
           <button
             onClick={() => window.open(window.location.href, '_blank', 'noopener,noreferrer')}
             className="px-2.5 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white font-semibold rounded-lg text-xs flex items-center gap-1 shadow transition-colors ml-1"
-            title="Launch in standalone browser tab to grant direct microphone permissions"
+            title="Launch in a standalone browser tab so microphone permissions are granted directly"
           >
             <ExternalLink className="w-3.5 h-3.5" />
             <span className="hidden md:inline">Standalone</span>
@@ -69,9 +94,8 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Active Prototype View */}
       <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
-        {activeTab === 'prototype2' ? <Prototype2View /> : <Prototype1View />}
+        {activeTab === 'prototype2' ? <SalespersonDashboard /> : <Prototype1View />}
       </main>
     </div>
   );
