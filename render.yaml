@@ -33,6 +33,11 @@ services:
         sync: false
       - key: TURN_SECRET
         sync: false
+      # Optional managed provider issuing short-lived credentials server-side.
+      - key: TURN_CREDENTIALS_URL
+        sync: false
+      - key: TURN_CREDENTIALS_AUTH
+        sync: false
       - key: TURN_USERNAME
         sync: false
       - key: TURN_CREDENTIAL

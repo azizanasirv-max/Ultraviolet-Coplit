@@ -152,3 +152,170 @@ test('health summary never contains URLs, usernames, credentials, or the secret'
   assert.ok(!serialized.includes('super-secret'));
 });
 
+
+// ---------------------------------------------------------------------------
+// Provider-issued (short-lived) credentials — mocked HTTP only.
+// ---------------------------------------------------------------------------
+import { clearProviderIceCache, fetchProviderIceServers, mergeProviderIceServers, parseProviderIceServers } from '../server/turn';
+
+test('parses provider payload shapes and drops non-TURN entries', () => {
+  const fromArray = parseProviderIceServers([
+    { url: 'turn:relay.example.com:3478', username: 'u1', credential: 'c1' },
+    { urls: ['turns:relay.example.com:5349'], username: 'u2', password: 'c2' },
+    { urls: 'stun:stun.example.com:3478', username: 'u3', credential: 'c3' },
+    { urls: 'turn:missing-auth.example.com:3478' },
+  ]);
+  assert.equal(fromArray.length, 2);
+  assert.deepEqual(fromArray[0], { urls: 'turn:relay.example.com:3478', username: 'u1', credential: 'c1' });
+  assert.deepEqual(fromArray[1], { urls: 'turns:relay.example.com:5349', username: 'u2', credential: 'c2' });
+
+  assert.equal(parseProviderIceServers({ iceServers: fromArray }).length, 2);
+  assert.equal(parseProviderIceServers({ ice_servers: fromArray }).length, 2);
+  assert.equal(parseProviderIceServers({ data: fromArray }).length, 2);
+  assert.deepEqual(parseProviderIceServers({}), []);
+});
+
+test('fetches, caches, and expires provider credentials (mock HTTP)', async () => {
+  clearProviderIceCache();
+  let calls = 0;
+  const fetchImpl = (async () => {
+    calls += 1;
+    return new Response(
+      JSON.stringify({
+        iceServers: [{ urls: 'turn:provider.invalid:3478', username: 'temp-user', credential: 'temp-pass' }],
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+  }) as unknown as typeof fetch;
+
+  const cache = new Map();
+  const first = await fetchProviderIceServers({
+    credentialsUrl: 'https://provider.invalid/creds',
+    fetchImpl,
+    now: 1_000,
+    cacheTtlMs: 60_000,
+    cache,
+  });
+  assert.equal(calls, 1);
+  assert.equal(first.iceServers[0].username, 'temp-user');
+  assert.equal(first.expiresAt, 61_000);
+
+  const second = await fetchProviderIceServers({
+    credentialsUrl: 'https://provider.invalid/creds',
+    fetchImpl,
+    now: 2_000,
+    cacheTtlMs: 60_000,
+    cache,
+  });
+  assert.equal(calls, 1, 'cached credentials must not trigger another request');
+  assert.deepEqual(second, first);
+});
+
+test('provider failures are actionable and leak no URL or auth header', async () => {
+  clearProviderIceCache();
+  const failing = (async () => new Response('nope', { status: 401 })) as unknown as typeof fetch;
+  await assert.rejects(
+    fetchProviderIceServers({
+      credentialsUrl: 'https://provider.invalid/creds?apiKey=super-secret',
+      authorization: 'Bearer provider-secret',
+      fetchImpl: failing,
+      cache: new Map(),
+    }),
+    (error: Error) => {
+      assert.match(error.message, /HTTP 401/);
+      assert.ok(!error.message.includes('super-secret'));
+      assert.ok(!error.message.includes('provider-secret'));
+      return true;
+    }
+  );
+
+  const unreachable = (async () => {
+    throw new Error('ECONNREFUSED 10.0.0.1');
+  }) as unknown as typeof fetch;
+  await assert.rejects(
+    fetchProviderIceServers({
+      credentialsUrl: 'https://provider.invalid/creds',
+      fetchImpl: unreachable,
+      cache: new Map(),
+    }),
+    /could not be reached/i
+  );
+});
+
+test('provider success replaces TURN entries; failure is fatal only for relay policy', () => {
+  const base = buildIceConfig({ env: { TURN_CREDENTIALS_URL: 'https://provider.invalid/creds' } });
+  assert.equal(base.turn.credentialMode, 'provider');
+  assert.equal(base.turn.providerConfigured, true);
+
+  const merged = mergeProviderIceServers(
+    base,
+    {
+      iceServers: [{ urls: 'turn:provider.invalid:3478', username: 'temp', credential: 'pass' }],
+      fetchedAt: 1,
+      expiresAt: 2,
+    },
+    null
+  );
+  assert.equal(merged.providerOk, true);
+  assert.equal(merged.config.hasTurn, true);
+  assert.equal(merged.config.turn.credentialMode, 'provider');
+  assert.ok(
+    merged.config.iceServers.some((entry) =>
+      (Array.isArray(entry.urls) ? entry.urls : [entry.urls]).some((url) => url.startsWith('turn'))
+    )
+  );
+  assert.ok(merged.config.iceServers.some((entry) =>
+    (Array.isArray(entry.urls) ? entry.urls : [entry.urls]).some((url) => url.startsWith('stun'))
+  ));
+
+  const failedAll = mergeProviderIceServers(base, null, new Error('provider down'));
+  assert.equal(failedAll.providerOk, false);
+  assert.equal(failedAll.config.hasTurn, false);
+  assert.ok(failedAll.config.warnings.some((warning) => warning.includes('provider down')));
+
+  const relayBase = buildIceConfig({
+    env: { TURN_CREDENTIALS_URL: 'https://provider.invalid/creds', ICE_TRANSPORT_POLICY: 'relay' },
+  });
+  const failedRelay = mergeProviderIceServers(relayBase, null, new Error('provider down'));
+  assert.ok(failedRelay.config.errors.some((error) => error.includes('provider down')));
+});
+
+test('provider POST mode sends a TTL and accepts an object-shaped iceServers payload', async () => {
+  let method = '';
+  let body = '';
+  let contentType = '';
+  const fetchImpl = (async (_url: string, init?: RequestInit) => {
+    method = String(init?.method);
+    body = String(init?.body ?? '');
+    contentType = String((init?.headers as Record<string, string>)?.['Content-Type'] ?? '');
+    return new Response(
+      JSON.stringify({
+        iceServers: {
+          urls: ['turn:turn.cloudflare.invalid:3478?transport=udp'],
+          username: 'cf-user',
+          credential: 'cf-pass',
+        },
+      }),
+      { status: 201, headers: { 'Content-Type': 'application/json' } }
+    );
+  }) as unknown as typeof fetch;
+
+  const result = await fetchProviderIceServers({
+    credentialsUrl: 'https://rtc.invalid/v1/turn/keys/key/credentials/generate',
+    authorization: 'Bearer cf-token',
+    method: 'POST',
+    ttlSeconds: 900,
+    fetchImpl,
+    cache: new Map(),
+    now: 5_000,
+    cacheTtlMs: 60_000,
+  });
+
+  assert.equal(method, 'POST');
+  assert.equal(contentType, 'application/json');
+  assert.deepEqual(JSON.parse(body), { ttl: 900 });
+  assert.equal(result.iceServers.length, 1);
+  assert.equal(result.iceServers[0].username, 'cf-user');
+  assert.equal(result.iceServers[0].urls, 'turn:turn.cloudflare.invalid:3478?transport=udp');
+  assert.equal(result.expiresAt, 65_000);
+});

@@ -699,7 +699,7 @@ export const SalespersonDashboard: React.FC = () => {
                     ['ice config', snapshot?.iceConfigLoaded ? 'loaded (session auth)' : snapshot?.iceConfigError ? 'error' : 'not loaded'],
                     ['ice policy', snapshot?.diagnostics.iceTransportPolicy ?? 'unknown'],
                     ['turn', snapshot ? `${snapshot.turnConfigured ? 'configured' : 'none'} / ${snapshot.turnCredentialMode}` : 'unknown'],
-                    ['turn cred expiry', snapshot?.turnExpiresAt ? new Date(snapshot.turnExpiresAt).toLocaleTimeString() : 'n/a'],
+                    ['turn cred refresh', snapshot?.turnExpiresAt ? new Date(snapshot.turnExpiresAt).toLocaleTimeString() : 'n/a'],
                     ['relay candidates', String(snapshot?.relayCandidates ?? 0)],
                     ['selected pair', snapshot?.selectedPair ?? 'none'],
                     ['dtls', snapshot?.diagnostics.dtlsState ?? 'none'],

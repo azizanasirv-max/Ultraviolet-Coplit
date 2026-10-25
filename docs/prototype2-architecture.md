@@ -33,7 +33,7 @@ POST /api/sessions/:id/invitations/revoke (Bearer salespersonKey)
 GET  /api/sessions/:id/diagnostics     (Bearer salespersonKey) -> server view
 POST /api/invitations/redeem           { inviteToken, customerKey? } -> customerKey
 POST /api/sessions/:id/ultravox-call   (Bearer customerKey) -> { joinUrl }
-GET  /api/ice-config                   public STUN/TURN configuration
+GET  /api/sessions/:id/ice-config      (Bearer participant credential) STUN/TURN
 GET  /api/health                       capability flags only (no keys)
 WS   /ws                               join + signaling relay
 ```
@@ -104,9 +104,21 @@ Salesperson browser                          Customer browser
   a silent WAV *inside the Join click*, so iOS/Safari allow subsequent playback.
   A blocking banner with an "Enable audio" button recovers if playback is still
   refused.
-* `TURN_URLS`/`TURN_USERNAME`/`TURN_CREDENTIAL` are served from
-  `/api/ice-config`. Without TURN, carrier-NAT/mobile-data pairs still cannot
-  connect; the diagnostics show `relay 0` and `selected ... = host/srflx`.
+* ICE/TURN configuration is fetched **before** any peer connection is created,
+  from `GET /api/sessions/:id/ice-config`, authenticated with the participant's
+  salesperson or customer credential. Anonymous and cross-session requests get
+  401. The payload is applied to every `RTCPeerConnection`, including reconnects
+  and ICE restarts.
+* TURN modes: coturn `TURN_SECRET` (short-lived HMAC credentials, preferred),
+  static `TURN_USERNAME`/`TURN_CREDENTIAL`, or a managed provider's credentials
+  API (`TURN_CREDENTIALS_URL`, GET or POST+`{ttl}`) fetched and cached server-side.
+  Credentials are never logged and never appear in `/api/health`.
+* `ICE_TRANSPORT_POLICY=relay` without a usable relay is a hard failure: the ICE
+  endpoint returns 503 `TURN_MISCONFIGURED`, the engine refuses to create a peer
+  connection or capture the microphone, and the dashboard shows the reason.
+  There is no silent STUN-only fallback.
+* Without TURN, carrier-NAT/mobile-data pairs still cannot connect; diagnostics
+  show `relay candidates 0`, `selected pair host→srflx` and the amber TURN banner.
 
 ### The three communication paths
 
@@ -173,8 +185,9 @@ rising while `answers` stays 0) without reading the frontend console.
 | Command | What it covers | Result |
 | --- | --- | --- |
 | `npm run test:unit` | `SessionStore`: session/credential isolation, role mismatch, single-use invitation, rotation/revocation, expiry, resume identity, duplicate prevention, no plaintext secrets | 11/11 pass |
-| `npm run test:signaling` | Real HTTP + WebSocket server: join authentication, role enforcement, offer/answer/ICE relay, AI text relay to the salesperson only, cross-session isolation, reconnect identity, `peer_left`, invalid JSON, diagnostics authorization, customer-only Ultravox call, health secrecy | 16/16 pass |
-| `npm run test:browser` | Chromium, two isolated browser contexts, synthetic media: role-specific UIs, invitation scoping/replay rejection, legacy URL rejection, bidirectional RTP, `<audio>` playing, mute/unmute on both sides, reconnect without duplicate participants/tracks, AI text appearing on the correct dashboard, AI failure not breaking P2P, server-side client diagnostics, no unexpected console errors | 16/16 pass (2 nested suites) |
+| `npm run test:turn` | ICE/TURN unit tests (synthetic env + mocked provider HTTP): URL parsing, static/ephemeral/provider credentials, HMAC correctness, relay-only fail-fast, provider caching/failure, no secret leakage | 17/17 pass |
+| `npm run test:signaling` | Real HTTP + WebSocket server: join authentication, role enforcement, offer/answer/ICE relay, AI text relay to the salesperson only, cross-session isolation, reconnect identity, `peer_left`, invalid JSON, diagnostics authorization, customer-only Ultravox call, authenticated ICE endpoint, TURN static/ephemeral/provider delivery, relay misconfiguration, APP_URL, AI readiness without a key, secrecy | 25/25 pass |
+| `npm run test:browser` | Chromium, two isolated browser contexts, synthetic media: role-specific UIs, invitation scoping/replay rejection, legacy URL rejection, bidirectional RTP, `<audio>` playing, mute/unmute on both sides, reconnect without duplicate participants/tracks, AI text on the correct dashboard, AI failure isolated, server-side client diagnostics, TURN applied to every PC (incl. reconnect), relay-only policy applied, relay-only-without-TURN refuses to start, no credential leakage in DOM/snapshot | 19/19 pass |
 | `npm run build` | Production Vite build | pass |
 | `npm run lint` | `tsc --noEmit` | pass |
 
@@ -208,6 +221,17 @@ connectivity across carrier NATs. Those require the two-device plan below.
 Both media bugs (3 and 4) were reproduced and fixed while running the browser
 suite, which is why the reconnect and mute assertions exist.
 
+### Deployment causes (separate from the audio bug)
+
+* `vite: not found` happened because the repository had no `package-lock.json`,
+  so Render never installed dependencies before running the build.
+* `ERESOLVE` came from an unused direct `esbuild@^0.25` devDependency conflicting
+  with Vite 8's optional peer `esbuild@^0.27 || ^0.28`.
+* `tsx` (required by `npm start`) lived in devDependencies, so a production
+  install could not start the server.
+
+See [deployment.md](./deployment.md) for the exact fix and Render settings.
+
 ## 7. Environment variables
 
 | Variable | Required | Purpose |
@@ -215,23 +239,33 @@ suite, which is why the reconnect and mute assertions exist.
 | `ULTRAVOX_API_KEY` | yes | Server-side Ultravox call creation. Never sent to clients. |
 | `APP_URL` | recommended | Public origin used to build invitation links (Render URL). Falls back to the request host. |
 | `TURN_URLS` | for cross-network audio | Comma-separated `turn:`/`turns:` URLs |
-| `TURN_USERNAME`, `TURN_CREDENTIAL` | with TURN | Relay credentials |
+| `TURN_SECRET` | preferred TURN auth | coturn shared secret; minted per-session credentials |
+| `TURN_TTL_SECONDS` | optional | Credential lifetime (default 3600) |
+| `TURN_USERNAME`, `TURN_CREDENTIAL` | static fallback | Long-lived relay credentials (not per-session) |
+| `TURN_CREDENTIALS_URL`, `TURN_CREDENTIALS_AUTH`, `TURN_CREDENTIALS_METHOD` | managed provider | Server-side fetch of temporary credentials |
 | `STUN_URLS` | optional | Overrides the default Google STUN servers |
 | `ICE_TRANSPORT_POLICY` | optional | `all` (default) or `relay` |
 | `MAX_SESSIONS` | optional | Cap on in-memory sessions (default 500) |
 | `PORT` | Render-provided | HTTP/WS port |
 
 Render: keep the existing web service (`npm start`, build `npm run build`,
-`NODE_ENV=production`). No new process, port or service is required. A TURN
-service (e.g. coturn, Metered, Twilio) is the only external dependency that
-should be added; `hasTurn` in `/api/health` confirms it is wired.
+`NODE_ENV=production`). Build/start commands and the dependency strategy are
+documented in [deployment.md](./deployment.md); `/api/health` exposes
+`ice.configured`, `ice.credentialMode` and AI readiness without any secrets. A
+TURN relay (coturn on a VPS, or a managed provider) is the only external service
+that must be added.
 
 ## 8. Remaining limitations
 
 * In-memory sessions: restart/redeploy loses sessions and invitations.
 * Single instance only; no shared state across Render instances.
-* TURN credentials are static and sent to both browsers (standard for TURN REST
-  is ephemeral credentials, not implemented here).
+* No real TURN relay was available during development: relay media flow is NOT
+  verified. Static and short-lived credential generation, provider fetching (with
+  mocked HTTP) and the relay-only fail-fast path are covered by automated tests.
+* Static TURN credentials, when used instead of `TURN_SECRET`, are delivered to
+  every authorized browser and cannot be rotated per session.
+* Managed-provider response shapes are covered by mocks; no live vendor API was
+  exercised (that requires an account and credentials).
 * Customer credentials live in `sessionStorage`; clearing site data or opening the
   link in another browser requires the salesperson to rotate the invitation.
 * The invitation is single-use by design; this is a deliberate anti-hijack

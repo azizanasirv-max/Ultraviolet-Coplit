@@ -63,7 +63,7 @@ export interface SessionDiagnosticsResponse {
   };
   ice: {
     configured: boolean;
-    credentialMode: 'ephemeral' | 'static' | 'none';
+    credentialMode: 'ephemeral' | 'static' | 'provider' | 'none';
     iceTransportPolicy: 'all' | 'relay';
     hasErrors: boolean;
     warnings: string[];
@@ -91,7 +91,7 @@ export interface HealthResponse {
   hasUltravoxKey: boolean;
   ice: {
     configured: boolean;
-    credentialMode: 'ephemeral' | 'static' | 'none';
+    credentialMode: 'ephemeral' | 'static' | 'provider' | 'none';
     iceTransportPolicy: 'all' | 'relay';
     hasErrors: boolean;
     warnings: string[];
@@ -125,7 +125,7 @@ export interface IceConfigResponse {
   iceTransportPolicy: 'all' | 'relay';
   turn: {
     configured: boolean;
-    credentialMode: 'ephemeral' | 'static' | 'none';
+    credentialMode: 'ephemeral' | 'static' | 'provider' | 'none';
     urlCount: number;
     expiresAt: number | null;
   };

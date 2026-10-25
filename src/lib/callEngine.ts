@@ -94,7 +94,7 @@ export interface EngineSnapshot {
   iceConfigError: string | null;
   iceConfigWarnings: string[];
   turnConfigured: boolean;
-  turnCredentialMode: 'ephemeral' | 'static' | 'none';
+  turnCredentialMode: 'ephemeral' | 'static' | 'provider' | 'none';
   turnExpiresAt: number | null;
   relayCandidates: number;
   selectedPair: string;

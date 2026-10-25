@@ -23,6 +23,9 @@ import { ParticipantRole, SessionRecord, SessionStore } from './server/sessionSt
 import {
   buildIceConfig,
   describeIceSettingsForLog,
+  fetchProviderIceServers,
+  mergeProviderIceServers,
+  ProviderIceResult,
   resolveIceTransportPolicy,
   turnSummary,
 } from './server/turn';
@@ -124,6 +127,10 @@ export interface CreateServerOptions {
   serveFrontend?: boolean;
   /** Injected for tests so no real Ultravox call is created. */
   ultravoxFetch?: typeof fetch;
+  /** Injected for tests so no real TURN credential provider is called. */
+  turnFetch?: typeof fetch;
+  /** Per-server cache for provider-issued TURN credentials. */
+  turnCache?: Map<string, ProviderIceResult>;
   /** 0 picks a free port. */
   port?: number;
 }
@@ -139,6 +146,8 @@ interface SocketState {
 export async function createPrototype2Server(options: CreateServerOptions = {}) {
   const store = options.store ?? new SessionStore();
   const fetchImpl = options.ultravoxFetch ?? fetch;
+  const turnFetch = options.turnFetch ?? fetch;
+  const turnCache = options.turnCache ?? new Map<string, ProviderIceResult>();
 
   const app = express();
   app.set('trust proxy', true);
@@ -488,7 +497,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
    * never be handed to an unauthenticated visitor. Both the salesperson and the
    * customer of a session may read it; nobody else can.
    */
-  app.get('/api/sessions/:sessionId/ice-config', (req, res) => {
+  app.get('/api/sessions/:sessionId/ice-config', async (req, res) => {
     const session = store.getSession(req.params.sessionId);
     if (!session || store.isExpiredSession(session.sessionId)) {
       res.status(404).json({ error: 'SESSION_NOT_FOUND', message: 'Unknown or expired session.' });
@@ -508,8 +517,33 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       return;
     }
 
-    const config = buildIceConfig({ sessionId: session.sessionId });
+    let config = buildIceConfig({ sessionId: session.sessionId });
     res.setHeader('Cache-Control', 'no-store');
+
+    if (config.turn.providerConfigured) {
+      const credentialsUrl = process.env.TURN_CREDENTIALS_URL?.trim();
+      try {
+        if (!credentialsUrl) throw new Error('TURN_CREDENTIALS_URL is not configured.');
+        const provider = await fetchProviderIceServers({
+          credentialsUrl,
+          authorization: process.env.TURN_CREDENTIALS_AUTH?.trim() || null,
+          method: process.env.TURN_CREDENTIALS_METHOD === 'POST' ? 'POST' : 'GET',
+          ttlSeconds: Number(process.env.TURN_TTL_SECONDS) || 3600,
+          fetchImpl: turnFetch,
+          cache: turnCache,
+        });
+        config = mergeProviderIceServers(config, provider, null).config;
+        console.log(
+          `[ice] provider issued ${provider.iceServers.length} short-lived TURN entr(ies) for session ${session.sessionId.slice(0, 8)}`
+        );
+      } catch (err) {
+        const error = err as Error;
+        // Never log the provider URL or authorization header.
+        console.error(`[ice] TURN credential provider failed: ${error.message}`);
+        config = mergeProviderIceServers(config, null, error).config;
+        store.recordError(session.sessionId, 'TURN credential provider failed');
+      }
+    }
 
     // Relay-only mode without a usable relay is a deployment error. Returning
     // STUN-only servers here would silently produce a connected-but-silent call.

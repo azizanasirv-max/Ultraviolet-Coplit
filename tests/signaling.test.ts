@@ -11,7 +11,7 @@ interface Harness {
   close: () => Promise<void>;
 }
 
-const startServer = async (): Promise<Harness> => {
+const startServer = async (options: { turnFetch?: typeof fetch } = {}): Promise<Harness> => {
   const instance = await createPrototype2Server({
     serveFrontend: false,
     port: 0,
@@ -20,6 +20,7 @@ const startServer = async (): Promise<Harness> => {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       })) as unknown as typeof fetch,
+    turnFetch: options.turnFetch,
   });
   return { base: `http://127.0.0.1:${instance.port}`, close: instance.close };
 };
@@ -690,4 +691,106 @@ test('prototype2 ICE/TURN delivery is session-authenticated and secret-safe', as
 
     process.env.ULTRAVOX_API_KEY = 'test-ultravox-key';
   });
+});
+
+
+test('TURN credential provider is fetched server-side and never exposed', async (t) => {
+  const saved = {
+    TURN_URLS: process.env.TURN_URLS,
+    TURN_USERNAME: process.env.TURN_USERNAME,
+    TURN_CREDENTIAL: process.env.TURN_CREDENTIAL,
+    TURN_SECRET: process.env.TURN_SECRET,
+    TURN_CREDENTIALS_URL: process.env.TURN_CREDENTIALS_URL,
+    TURN_CREDENTIALS_AUTH: process.env.TURN_CREDENTIALS_AUTH,
+    ICE_TRANSPORT_POLICY: process.env.ICE_TRANSPORT_POLICY,
+  };
+
+  delete process.env.TURN_URLS;
+  delete process.env.TURN_USERNAME;
+  delete process.env.TURN_CREDENTIAL;
+  delete process.env.TURN_SECRET;
+  process.env.TURN_CREDENTIALS_URL = 'https://provider.invalid/turn-credentials';
+  process.env.TURN_CREDENTIALS_AUTH = 'Bearer provider-secret';
+  process.env.ICE_TRANSPORT_POLICY = 'all';
+
+  let providerCalls = 0;
+  let seenAuth: string | null = null;
+  const turnFetch = (async (_url: string, init?: RequestInit) => {
+    providerCalls += 1;
+    seenAuth = (init?.headers as Record<string, string> | undefined)?.Authorization ?? null;
+    return new Response(
+      JSON.stringify({
+        iceServers: [
+          { urls: 'turn:provider.invalid:3478', username: 'temp-user', credential: 'temp-pass' },
+        ],
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+  }) as unknown as typeof fetch;
+
+  const harness = await startServer({ turnFetch });
+  t.after(async () => {
+    await harness.close();
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const fixture = await createFixture(harness.base, 'provider');
+  const response = await get(
+    harness.base,
+    `/api/sessions/${fixture.sessionId}/ice-config`,
+    fixture.customerKey
+  );
+  assert.equal(response.status, 200);
+  assert.equal(providerCalls, 1);
+  assert.equal(seenAuth, 'Bearer provider-secret', 'auth header must be sent server-side');
+  assert.equal(response.body.hasTurn, true);
+  assert.equal(response.body.turn.credentialMode, 'provider');
+
+  const turnEntry = response.body.iceServers.find((entry: any) =>
+    (Array.isArray(entry.urls) ? entry.urls : [entry.urls]).some((url: string) => url.startsWith('turn'))
+  );
+  assert.equal(turnEntry.username, 'temp-user');
+  assert.equal(turnEntry.credential, 'temp-pass');
+
+  const health = JSON.stringify((await get(harness.base, '/api/health')).body);
+  assert.ok(!health.includes('provider-secret'));
+  assert.ok(!health.includes('temp-pass'));
+  assert.ok(!health.includes('provider.invalid'));
+
+  const diagnostics = JSON.stringify(
+    (await get(harness.base, `/api/sessions/${fixture.sessionId}/diagnostics`, fixture.salespersonKey)).body
+  );
+  assert.ok(!diagnostics.includes('provider-secret'));
+  assert.ok(!diagnostics.includes('temp-pass'));
+
+  // Provider outage: relay-only must fail closed; policy "all" may continue
+  // with a warning so same-network calls still work.
+  const failingServer = await startServer({
+    turnFetch: (async () => new Response('down', { status: 503 })) as unknown as typeof fetch,
+  });
+  t.after(async () => {
+    await failingServer.close();
+  });
+  const failingFixture = await createFixture(failingServer.base, 'provider-down');
+
+  const degraded = await get(
+    failingServer.base,
+    `/api/sessions/${failingFixture.sessionId}/ice-config`,
+    failingFixture.customerKey
+  );
+  assert.equal(degraded.status, 200);
+  assert.equal(degraded.body.hasTurn, false);
+  assert.ok(degraded.body.warnings.some((warning: string) => /HTTP 503/.test(warning)));
+
+  process.env.ICE_TRANSPORT_POLICY = 'relay';
+  const relayFailure = await get(
+    failingServer.base,
+    `/api/sessions/${failingFixture.sessionId}/ice-config`,
+    failingFixture.customerKey
+  );
+  assert.equal(relayFailure.status, 503);
+  assert.equal(relayFailure.body.error, 'TURN_MISCONFIGURED');
 });
