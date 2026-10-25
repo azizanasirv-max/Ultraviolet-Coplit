@@ -1247,6 +1247,9 @@ export class CallEngine {
       // Start the AI once per engine. Recovery (after a terminal session) is
       // owned by the bounded AI recovery loop, not by signaling reconnects.
       if (this.ai.state === 'off') void this.startAi({ replace: true });
+      // Re-publish the live state on the new socket so the server/salesperson
+      // do not keep a state that changed while signaling was down.
+      else this.reportAiStatus();
     } else if (this.options.role === 'salesperson') {
       // Last known AI state reported by the customer device (server-persisted).
       this.hydrateRemoteAi(data.ai ?? data.session?.ai);
@@ -1616,7 +1619,7 @@ export class CallEngine {
    * SDK has no reconnect API, and a join URL belongs to one call. The server's
    * cached call is never reused after a failure.
    */
-  private async startAiSession(options: { replace?: boolean; recovery?: boolean } = {}): Promise<void> {
+  private async startAi(options: { replace?: boolean; recovery?: boolean } = {}): Promise<void> {
     if (this.options.role !== 'customer' || !this.options.enableAi) return;
     if (this.stopped || this.intentionalLeave) return;
     if (this.aiOperationInFlight) {
@@ -1856,9 +1859,6 @@ export class CallEngine {
   }
 
 
-  private async startAi(options: { replace?: boolean; recovery?: boolean } = {}): Promise<void> {
-    await this.startAiSession(options);
-  }
   private setAi(
     patch: Partial<AiStatus>,
     options: { report?: boolean } = {}
