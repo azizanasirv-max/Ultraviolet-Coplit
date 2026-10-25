@@ -278,6 +278,54 @@ test('prototype2 signaling protocol', async (t) => {
     customer.close();
   });
 
+  await t.test('customer never receives AI/private data and cannot be sent transcripts reserved for the salesperson', async () => {
+    const fixture = await createFixture(harness.base, 'Privacy');
+    const salesperson = await openSocket(harness.base);
+    const customer = await openSocket(harness.base);
+    const salesJoin = await join(salesperson, {
+      sessionId: fixture.sessionId,
+      role: 'salesperson',
+      credential: fixture.salespersonKey,
+    });
+    const customerJoin = await join(customer, {
+      sessionId: fixture.sessionId,
+      role: 'customer',
+      credential: fixture.customerKey,
+    });
+    assert.equal(customerJoin.type, 'joined');
+
+    // Hydration: the customer's joined payload has no AI/private/diagnostic fields
+    // and no other participant's credentials.
+    const hydration = JSON.stringify(customerJoin);
+    assert.doesNotMatch(hydration, /suggestion|diagnostics|notes|transcript|ultravox|joinUrl|salespersonKey/i);
+    assert.equal(hydration.includes(fixture.salespersonKey), false);
+    assert.equal(hydration.includes(salesJoin.resumeToken), false);
+
+    // The salesperson may not send customer-reserved message types.
+    for (const type of ['customer_speech_transcript', 'ai_suggestion']) {
+      salesperson.send({ type, sessionId: fixture.sessionId, text: 'spoofed', isFinal: true });
+      const rejection = await salesperson.next((message) => message.type === 'error');
+      assert.equal(rejection.code, 'INVALID_SIGNALING_ROLE');
+    }
+
+    // Customer AI output and speech reach the salesperson, and never echo back to the customer.
+    customer.send({ type: 'customer_speech_transcript', sessionId: fixture.sessionId, text: 'hello', isFinal: true, ordinal: 1 });
+    customer.send({ type: 'ai_suggestion', sessionId: fixture.sessionId, text: 'suggest', isFinal: true, ordinal: 2 });
+    const speech = await salesperson.next((message) => message.type === 'customer_speech_transcript');
+    assert.equal(speech.text, 'hello');
+    await salesperson.next((message) => message.type === 'ai_suggestion');
+    await assert.rejects(
+      customer.next(
+        (message) => message.type === 'ai_suggestion' || message.type === 'customer_speech_transcript',
+        700
+      ),
+      /Timed out/
+    );
+
+    salesperson.close();
+    customer.close();
+  });
+
   await t.test('keeps two customer sessions isolated', async () => {
     const a = await createFixture(harness.base, 'A');
     const b = await createFixture(harness.base, 'B');
