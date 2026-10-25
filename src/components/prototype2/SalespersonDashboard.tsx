@@ -4,6 +4,7 @@ import {
   RefreshCw, ShieldCheck, Sparkles, Users, Volume2, VolumeX, Activity, UserRound,
 } from 'lucide-react';
 import { CallEngine, EngineSnapshot, ParticipantRole } from '../../lib/callEngine';
+import { AiLifecycleState, aiStateLabel, aiTone } from '../../lib/aiStatus';
 import {
   ApiError, CreatedSession, SessionDiagnosticsResponse, SessionPublicState,
   createSession, getSession, getSessionDiagnostics, revokeInvitation, rotateInvitation,
@@ -228,6 +229,15 @@ export const SalespersonDashboard: React.FC = () => {
     engine.setSpeakerMuted(!snapshot.speakerMuted);
   };
 
+  const reconnectAi = () => {
+    const engine = engineRef.current;
+    if (!engine) {
+      setActionError('Start the call before asking the customer device to restart the AI.');
+      return;
+    }
+    engine.requestAiReconnect();
+  };
+
   const copyInvite = async () => {
     if (!inviteUrl) return;
     try {
@@ -284,6 +294,43 @@ export const SalespersonDashboard: React.FC = () => {
     () => (snapshot?.suggestions.length ? snapshot.suggestions[snapshot.suggestions.length - 1] : null),
     [snapshot?.suggestions]
   );
+
+  /**
+   * AI status shown to the salesperson.
+   *
+   * The Ultravox session lives on the customer device. `snapshot.ai` is the
+   * live value relayed over signaling; `sessionState.ai` is the server's
+   * persisted copy (used before the first relay or after a signaling blip).
+   * Both are real reported states, never "the server has an API key".
+   */
+  const aiView = useMemo(() => {
+    const live = snapshot?.ai;
+    const polled = sessionState?.ai;
+    // `off` is the engine's initial value, not a report. Prefer the polled state
+    // in that case so an already-running AI is not briefly shown as "not started".
+    const liveHasReport = Boolean(live && live.state !== 'off');
+    const rawState = ((liveHasReport ? live?.state : null) ?? polled?.state ?? 'off') as AiLifecycleState;
+    const known: AiLifecycleState[] = [
+      'off', 'creating', 'connecting', 'connected', 'reconnecting', 'disconnected', 'closed', 'error',
+    ];
+    const state = known.includes(rawState) ? rawState : 'error';
+    const reported = liveHasReport ? live : null;
+    return {
+      state,
+      label: aiStateLabel(state),
+      tone: aiTone(state),
+      error: (reported ? reported.error : polled?.error) ?? null,
+      connected: Boolean((reported ? reported.connected : polled?.connected) && state === 'connected'),
+      reconnecting: state === 'creating' || state === 'connecting' || state === 'reconnecting',
+      reconnectAttempt: reported?.reconnectAttempt ?? polled?.reconnectAttempt ?? 0,
+      maxReconnectAttempts: reported?.maxReconnectAttempts ?? 3,
+      audioReachingAi: Boolean((reported ? reported.audioReachingAi : polled?.audioReachingAi) && state === 'connected'),
+      lastResponseAt: reported?.lastSuggestionAt ?? polled?.lastSuggestionAt ?? null,
+      callCreated: Boolean(sessionState?.aiCallCreated ?? sessionState?.aiReady),
+      callId: reported?.callId ?? null,
+      source: liveHasReport ? 'live signaling' : polled?.state ? 'server poll' : 'none',
+    };
+  }, [snapshot?.ai, sessionState?.ai, sessionState?.aiCallCreated, sessionState?.aiReady]);
 
   if (booting) {
     return (
@@ -357,6 +404,17 @@ export const SalespersonDashboard: React.FC = () => {
                     : 'border-slate-700 text-slate-400 bg-slate-900'
             }`} data-testid="call-state">
               {callState.label}
+            </span>
+            <span className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${
+              aiView.tone === 'emerald'
+                ? 'border-emerald-500/40 text-emerald-300 bg-emerald-500/10'
+                : aiView.tone === 'amber'
+                  ? 'border-amber-500/40 text-amber-300 bg-amber-500/10'
+                  : aiView.tone === 'red'
+                    ? 'border-rose-500/40 text-rose-300 bg-rose-500/10'
+                    : 'border-slate-700 text-slate-400 bg-slate-900'
+            }`} data-testid="ai-state-chip">
+              {aiView.label}
             </span>
           </div>
         </header>
@@ -609,6 +667,85 @@ export const SalespersonDashboard: React.FC = () => {
           </Panel>
         </div>
 
+        {/* AI copilot status: the real customer-side Ultravox session */}
+        <Panel
+          title="AI copilot status"
+          icon={<Sparkles className="w-3.5 h-3.5" />}
+          action={
+            <button
+              onClick={reconnectAi}
+              data-testid="ai-reconnect"
+              disabled={!engineStarted || !sessionState?.customerConnected}
+              title={
+                !engineStarted
+                  ? 'Start the call first'
+                  : !sessionState?.customerConnected
+                    ? 'The customer device must be connected to restart the AI'
+                    : 'Ask the customer device to create a fresh AI session'
+              }
+              className="text-[10px] px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold disabled:opacity-40"
+            >
+              Restart AI
+            </button>
+          }
+        >
+          <div className="space-y-2" data-testid="ai-panel">
+            <StatusLine
+              label="AI session"
+              value={aiView.label}
+              tone={aiView.tone}
+              detail={aiView.error ?? undefined}
+              testId="ai-state"
+              detailTestId="ai-error"
+            />
+            <StatusLine
+              label="Customer voice reaches the AI"
+              value={
+                !engineStarted
+                  ? 'not started'
+                  : aiView.audioReachingAi
+                    ? 'yes'
+                    : aiView.connected
+                      ? 'not yet'
+                      : 'no'
+              }
+              tone={aiView.audioReachingAi ? 'emerald' : 'amber'}
+              testId="ai-audio"
+            />
+            <StatusLine
+              label="Last AI response"
+              value={aiView.lastResponseAt ? new Date(aiView.lastResponseAt).toLocaleTimeString() : 'none yet'}
+              tone={aiView.lastResponseAt ? 'emerald' : 'slate'}
+              testId="ai-last-response"
+            />
+            <StatusLine
+              label="Ultravox call created"
+              value={aiView.callCreated ? 'yes (not proof of connection)' : 'no'}
+              tone={aiView.callCreated ? 'indigo' : 'slate'}
+              detail={`state source: ${aiView.source}${aiView.callId ? ` · call ${aiView.callId.slice(0, 8)}` : ''}`}
+              testId="ai-call-created"
+            />
+            {aiView.reconnecting ? (
+              <p className="text-[11px] text-amber-300" data-testid="ai-reconnecting">
+                {aiView.state === 'reconnecting'
+                  ? `Reconnecting AI (attempt ${aiView.reconnectAttempt} of ${aiView.maxReconnectAttempts}); the customer call audio is unaffected.`
+                  : 'The customer device is creating/connecting a new AI session…'}
+              </p>
+            ) : null}
+            {snapshot?.aiReconnectRequestedAt && !aiView.reconnecting && !aiView.connected ? (
+              <p className="text-[11px] text-slate-400" data-testid="ai-reconnect-pending">
+                Restart requested at {new Date(snapshot.aiReconnectRequestedAt).toLocaleTimeString()}; waiting for the
+                customer device to report the new session.
+              </p>
+            ) : null}
+            {!sessionState?.customerConnected ? (
+              <p className="text-[11px] text-slate-500">
+                The AI runs on the customer device. It cannot start or recover until the customer is connected.
+              </p>
+            ) : null}
+          </div>
+        </Panel>
+
         {/* AI suggestions */}
         <Panel
           title="AI copilot responses"
@@ -717,7 +854,13 @@ export const SalespersonDashboard: React.FC = () => {
                       ['customer online', String(serverDiagnostics.diagnostics.customerConnected)],
                       ['salesperson online', String(serverDiagnostics.diagnostics.salespersonConnected)],
                       ['invitation', serverDiagnostics.diagnostics.invitationStatus],
-                      ['AI call', serverDiagnostics.diagnostics.aiReady ? 'created' : 'not created'],
+                      ['AI call created', serverDiagnostics.diagnostics.aiCallCreated ? `yes (${serverDiagnostics.diagnostics.aiCallId?.slice(0, 10) ?? 'unknown'})` : 'no'],
+                      ['AI live (customer)', serverDiagnostics.diagnostics.ai.connected ? 'yes' : 'no'],
+                      ['AI state', serverDiagnostics.diagnostics.ai.state ?? 'none'],
+                      ['AI error', serverDiagnostics.diagnostics.aiLastError ?? 'none'],
+                      ['AI audio in', serverDiagnostics.diagnostics.ai.audioReachingAi ? 'yes' : 'no'],
+                      ['AI last response', serverDiagnostics.diagnostics.ai.lastSuggestionAt ? new Date(serverDiagnostics.diagnostics.ai.lastSuggestionAt).toLocaleTimeString() : 'none'],
+                      ['AI reconnect attempt', String(serverDiagnostics.diagnostics.ai.reconnectAttempt)],
                       ['offers', String(serverDiagnostics.diagnostics.signals.offers)],
                       ['answers', String(serverDiagnostics.diagnostics.signals.answers)],
                       ['ice relayed', String(serverDiagnostics.diagnostics.signals.iceCandidates)],
@@ -729,7 +872,7 @@ export const SalespersonDashboard: React.FC = () => {
                       ['TURN credentials', serverDiagnostics.ice.credentialMode],
                       ['ICE policy', serverDiagnostics.ice.iceTransportPolicy],
                       ['ICE warnings', String(serverDiagnostics.ice.warnings.length)],
-                      ['AI ready', serverDiagnostics.ai.ready ? 'yes' : `no (${serverDiagnostics.ai.missing.join(', ')})`],
+                      ['AI server readiness', serverDiagnostics.ai.ready ? 'key configured' : `no (${serverDiagnostics.ai.missing.join(', ')})`],
                       ['storage', serverDiagnostics.diagnostics.storage],
                     ]}
                   />

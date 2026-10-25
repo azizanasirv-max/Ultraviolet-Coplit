@@ -4,6 +4,7 @@ import {
   ShieldCheck, Sparkles, Volume2, VolumeX, Activity, UserRound,
 } from 'lucide-react';
 import { CallEngine, EngineSnapshot } from '../../lib/callEngine';
+import { aiStateLabel, aiTone } from '../../lib/aiStatus';
 import { ApiError, RedeemedInvitation, SessionPublicState, redeemInvitation } from '../../lib/sessionApi';
 import {
   loadCustomerSession, loadResumeToken, saveCustomerSession, saveResumeToken,
@@ -349,7 +350,7 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
             </span>
             <span className="text-[11px] text-slate-600">·</span>
             <span className="text-[11px] text-slate-400">
-              AI: {snapshot?.aiStatus ?? 'not started'}
+              AI: {snapshot ? aiStateLabel(snapshot.ai.state) : 'not started'}
             </span>
           </div>
         ) : null}
@@ -426,16 +427,37 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
             <div className="space-y-2" data-testid="ai-status">
               <StatusLine
                 label="AI session"
-                value={snapshot?.aiStatus ?? 'not started'}
-                tone={
-                  snapshot?.aiStatus === 'listening' || snapshot?.aiStatus === 'thinking' || snapshot?.aiStatus === 'speaking'
-                    ? 'emerald'
-                    : snapshot?.aiStatus === 'error'
-                      ? 'red'
-                      : 'amber'
-                }
-                detail={snapshot?.aiError ?? undefined}
+                value={snapshot ? aiStateLabel(snapshot.ai.state) : 'not started'}
+                tone={snapshot ? aiTone(snapshot.ai.state) : 'slate'}
+                detail={snapshot?.ai.error ?? undefined}
+                testId="customer-ai-state"
+                detailTestId="customer-ai-error"
               />
+              <StatusLine
+                label="Your voice reaches the AI"
+                value={
+                  !snapshot
+                    ? 'unknown'
+                    : snapshot.ai.audioReachingAi
+                      ? 'yes'
+                      : snapshot.ai.connected
+                        ? 'not yet'
+                        : 'no'
+                }
+                tone={snapshot?.ai.audioReachingAi ? 'emerald' : 'amber'}
+                testId="customer-ai-audio"
+              />
+              {snapshot?.ai.reconnecting ? (
+                <p className="text-[11px] text-amber-300" data-testid="customer-ai-reconnecting">
+                  Reconnecting AI (attempt {snapshot.ai.reconnectAttempt} of {snapshot.ai.maxReconnectAttempts})…
+                  the call audio is unaffected.
+                </p>
+              ) : null}
+              {snapshot?.ai.lastSuggestionAt ? (
+                <p className="text-[11px] text-slate-500" data-testid="customer-ai-last-response">
+                  Last AI response: {new Date(snapshot.ai.lastSuggestionAt).toLocaleTimeString()}
+                </p>
+              ) : null}
               {snapshot?.customerSpeech ? (
                 <p className="text-[11px] text-slate-400 border-t border-slate-800 pt-2">
                   AI heard: <span className="text-slate-200">{snapshot.customerSpeech}</span>
@@ -498,7 +520,12 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
                     ['selected pair', snapshot?.selectedPair ?? 'none'],
                     ['dtls', snapshot?.diagnostics.dtlsState ?? 'none'],
                     ['media flowing', snapshot?.mediaFlowing ? 'yes (RTP received)' : 'no RTP yet'],
-                    ['ai', snapshot?.aiStatus ?? 'not started'],
+                    ['ai', snapshot ? aiStateLabel(snapshot.ai.state) : 'not started'],
+                    ['ai sdk status', String(snapshot?.ai.status ?? 'none')],
+                    ['ai call id', snapshot?.ai.callId ? `${snapshot.ai.callId.slice(0, 10)}…` : 'none'],
+                    ['ai audio in', snapshot?.ai.audioReachingAi ? 'yes' : 'no'],
+                    ['ai reconnect', `${snapshot?.ai.reconnectAttempt ?? 0}/${snapshot?.ai.maxReconnectAttempts ?? 0}`],
+                    ['ai last response', snapshot?.ai.lastSuggestionAt ? new Date(snapshot.ai.lastSuggestionAt).toLocaleTimeString() : 'none'],
                     ['reconnects', String(snapshot?.reconnectAttempt ?? 0)],
                   ]}
                 />

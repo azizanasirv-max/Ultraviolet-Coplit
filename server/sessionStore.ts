@@ -54,9 +54,28 @@ export interface SessionSignalingCounters {
 
 export interface UltravoxCallRecord {
   callId: string;
+  /** Media credential. Only ever returned to the authorized session customer. */
   joinUrl: string;
   createdAt: number;
   createdByParticipantId: string;
+}
+
+/**
+ * Live AI-session state reported by the customer device (the only place the
+ * Ultravox session exists). Stored so the salesperson can see the real state
+ * even if an individual signaling message was missed, and so diagnostics show
+ * liveness rather than "a call record exists".
+ */
+export interface AiRuntimeRecord {
+  state: string;
+  connected: boolean;
+  error: string | null;
+  callId: string | null;
+  reconnectAttempt: number;
+  audioReachingAi: boolean;
+  lastResponseAt: number | null;
+  lastSuggestionAt: number | null;
+  updatedAt: number;
 }
 
 export interface SessionRecord {
@@ -70,6 +89,7 @@ export interface SessionRecord {
   salesperson: ParticipantRecord | null;
   customer: ParticipantRecord | null;
   ultravox: UltravoxCallRecord | null;
+  ai: AiRuntimeRecord | null;
   signaling: SessionSignalingCounters;
 }
 
@@ -82,10 +102,29 @@ export interface SessionPublicState {
   customerConnected: boolean;
   invitationStatus: InvitationStatus | 'expired' | 'missing';
   invitationExpiresAt: number | null;
+  /**
+   * True when a server-side Ultravox call record exists. This is *not* proof
+   * that a live session is connected; use `ai.live` / `ai.state` for that.
+   */
   aiReady: boolean;
+  /** True when the server holds an Ultravox call record for this session. */
+  aiCallCreated: boolean;
+  /** Sanitised, caller-safe live AI state reported by the customer device. */
+  ai: {
+    state: string | null;
+    connected: boolean;
+    error: string | null;
+    reconnectAttempt: number;
+    audioReachingAi: boolean;
+    lastResponseAt: number | null;
+    lastSuggestionAt: number | null;
+    updatedAt: number | null;
+  };
 }
 
 export interface SessionDiagnostics extends SessionPublicState {
+  aiCallId: string | null;
+  aiLastError: string | null;
   participants: Array<{
     participantId: string;
     role: ParticipantRole;
@@ -186,6 +225,7 @@ export class SessionStore {
       salesperson: null,
       customer: null,
       ultravox: null,
+      ai: null,
       signaling: {
         offers: 0,
         answers: 0,
@@ -577,6 +617,47 @@ export class SessionStore {
     session.ultravox = call;
   }
 
+  /**
+   * Forgets the session's Ultravox call. A join URL is a one-time media
+   * credential for a specific call; once that call has ended (or before a new
+   * customer device joins) the only safe recovery is a brand new call.
+   */
+  clearUltravoxCall(sessionId: string): UltravoxCallRecord | null {
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+    const previous = session.ultravox;
+    session.ultravox = null;
+    return previous;
+  }
+
+  /** Stores the customer-reported AI runtime state (already sanitised). */
+  setAiRuntime(
+    sessionId: string,
+    patch: Partial<Omit<AiRuntimeRecord, 'updatedAt'>> & { state: string }
+  ): AiRuntimeRecord | null {
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+    const previous = session.ai;
+    session.ai = {
+      state: patch.state,
+      connected: patch.connected ?? previous?.connected ?? false,
+      error: patch.error !== undefined ? patch.error : previous?.error ?? null,
+      callId: patch.callId !== undefined ? patch.callId : previous?.callId ?? null,
+      reconnectAttempt: patch.reconnectAttempt ?? previous?.reconnectAttempt ?? 0,
+      audioReachingAi: patch.audioReachingAi ?? previous?.audioReachingAi ?? false,
+      lastResponseAt:
+        patch.lastResponseAt !== undefined ? patch.lastResponseAt : previous?.lastResponseAt ?? null,
+      lastSuggestionAt:
+        patch.lastSuggestionAt !== undefined ? patch.lastSuggestionAt : previous?.lastSuggestionAt ?? null,
+      updatedAt: this.now(),
+    };
+    return session.ai;
+  }
+
+  getAiRuntime(sessionId: string): AiRuntimeRecord | null {
+    return this.sessions.get(sessionId)?.ai ?? null;
+  }
+
   publicState(session: SessionRecord): SessionPublicState {
     const invitation = session.invitation;
     let invitationStatus: SessionPublicState['invitationStatus'] = 'missing';
@@ -594,7 +675,20 @@ export class SessionStore {
       customerConnected: Boolean(session.customer?.connected),
       invitationStatus,
       invitationExpiresAt: invitation?.expiresAt ?? null,
+      // Meaning: a call record exists. Never treat this as proof of a live
+      // connection; `ai.connected`/`ai.state` carry the reported live state.
       aiReady: Boolean(session.ultravox),
+      aiCallCreated: Boolean(session.ultravox),
+      ai: {
+        state: session.ai?.state ?? null,
+        connected: Boolean(session.ai?.connected),
+        error: session.ai?.error ?? null,
+        reconnectAttempt: session.ai?.reconnectAttempt ?? 0,
+        audioReachingAi: Boolean(session.ai?.audioReachingAi),
+        lastResponseAt: session.ai?.lastResponseAt ?? null,
+        lastSuggestionAt: session.ai?.lastSuggestionAt ?? null,
+        updatedAt: session.ai?.updatedAt ?? null,
+      },
     };
   }
 
@@ -613,6 +707,8 @@ export class SessionStore {
 
     return {
       ...this.publicState(session),
+      aiCallId: session.ultravox?.callId ?? session.ai?.callId ?? null,
+      aiLastError: session.ai?.error ?? null,
       participants,
       signals: { ...session.signaling },
       serverTime: this.now(),

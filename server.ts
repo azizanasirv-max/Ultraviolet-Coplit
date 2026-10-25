@@ -65,9 +65,54 @@ const aiReadiness = () => {
     model: 'ultravox-v0.7',
     missing: ready ? [] : ['ULTRAVOX_API_KEY'],
     message: ready
-      ? 'AI conversation can be started for a session.'
+      ? 'The server can create Ultravox calls. Readiness is not proof that a live AI session is connected; see the session AI state.'
       : 'AI suggestions are unavailable until ULTRAVOX_API_KEY is set on the server. Human-to-human audio is unaffected.',
   };
+};
+
+/** AI lifecycle states the customer device is allowed to report. */
+const AI_STATES = new Set([
+  'off',
+  'creating',
+  'connecting',
+  'connected',
+  'reconnecting',
+  'disconnected',
+  'closed',
+  'error',
+]);
+
+/**
+ * Removes anything that could be a credential or an authenticated endpoint from
+ * provider/SDK error text before it is stored, relayed or rendered.
+ */
+const sanitizeAiDetail = (value: unknown, maxLength = 300): string | null => {
+  if (typeof value !== 'string') return null;
+  let text = value;
+  text = text.replace(/wss?:\/\/[^\s"']+/gi, '[url redacted]');
+  text = text.replace(/https?:\/\/[^\s"']+/gi, '[url redacted]');
+  text = text.replace(
+    /((?:token|api[_-]?key|authorization|credential|password|secret)\s*[=:]\s*)[^\s&,;"']+/gi,
+    '$1[redacted]'
+  );
+  text = text.replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
+};
+
+/** Accepts only a plausible call id; call ids are not secrets but keep them bounded. */
+const sanitizeCallId = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 100 || !/^[A-Za-z0-9._:-]+$/.test(trimmed)) return null;
+  return trimmed;
+};
+
+/** Rejects non-epoch or far-future timestamps from a browser. */
+const sanitizeTimestamp = (value: unknown): number | null => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  if (value <= 0 || value > Date.now() + 60_000) return null;
+  return Math.round(value);
 };
 
 /** APP_URL sanity checks: invitation links and WSS depend on it. */
@@ -148,6 +193,34 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
   const fetchImpl = options.ultravoxFetch ?? fetch;
   const turnFetch = options.turnFetch ?? fetch;
   const turnCache = options.turnCache ?? new Map<string, ProviderIceResult>();
+
+  /**
+   * One in-flight AI call creation per session. Two concurrent "reconnect"
+   * presses must not create (and pay for) two Ultravox calls.
+   */
+  const aiCallInFlight = new Set<string>();
+
+  /**
+   * Best-effort termination of a superseded Ultravox call so a replaced
+   * session stops consuming provider minutes. Never awaited on a path that can
+   * block the new call for long, and the call id/URL are never logged.
+   */
+  const endUltravoxCallQuietly = async (callId: string, apiKey: string): Promise<void> => {
+    try {
+      const response = await Promise.race([
+        fetchImpl(`https://api.ultravox.ai/api/calls/${encodeURIComponent(callId)}`, {
+          method: 'DELETE',
+          headers: { 'X-API-Key': apiKey },
+        }),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500)),
+      ]);
+      if (response && !response.ok) {
+        console.warn(`[ai] previous Ultravox call cleanup returned HTTP ${response.status}`);
+      }
+    } catch {
+      console.warn('[ai] previous Ultravox call cleanup failed (ignored).');
+    }
+  };
 
   const app = express();
   app.set('trust proxy', true);
@@ -335,8 +408,15 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
   });
 
   /**
-   * Creates (or returns) the single Ultravox call for this session. Only the
-   * customer may fetch the join URL: it is a media credential.
+   * Creates (or, when `replace` is true, replaces) the single Ultravox call for
+   * this session. Only the customer may fetch the join URL: it is a media
+   * credential.
+   *
+   * Why replacement exists: an Ultravox call has a finite lifetime, and its
+   * join URL belongs to that call. Once the call's socket closes, the SDK
+   * cannot reconnect and the same join URL cannot revive the call. Reusing the
+   * cached record here was the reason "Reconnect" and new invitations could
+   * never restore the AI. A fresh call is the supported recovery.
    */
   app.post('/api/sessions/:sessionId/ultravox-call', async (req, res) => {
     const session = store.getSession(req.params.sessionId);
@@ -358,12 +438,14 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       return;
     }
 
+    const replace = req.body?.replace === true || req.body?.rotate === true;
     const existing = store.getUltravoxCall(session.sessionId);
-    if (existing) {
+    if (existing && !replace) {
       res.json({
         callId: existing.callId,
         joinUrl: existing.joinUrl,
         isReused: true,
+        createdAt: existing.createdAt,
         model: 'ultravox-v0.7',
       });
       return;
@@ -377,6 +459,20 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       });
       return;
     }
+
+    if (aiCallInFlight.has(session.sessionId)) {
+      res.status(409).json({
+        error: 'ULTRAVOX_CALL_IN_PROGRESS',
+        message: 'A new AI call is already being created for this session. Retry in a moment.',
+      });
+      return;
+    }
+    aiCallInFlight.add(session.sessionId);
+
+    // Forget the old record before contacting Ultravox: if creation fails, a
+    // subsequent retry must not hand out the dead join URL again.
+    const previous = replace ? store.clearUltravoxCall(session.sessionId) : null;
+    if (previous) void endUltravoxCallQuietly(previous.callId, apiKey);
 
     // The prompt is operator-controlled: a customer must not be able to steer the
     // paid model with arbitrary instructions.
@@ -397,38 +493,72 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       });
 
       if (!response.ok) {
-        const errText = await response.text();
+        const errText = await response.text().catch(() => '');
         store.recordError(session.sessionId, `Ultravox HTTP ${response.status}`);
+        console.warn(
+          `[ai] Ultravox call creation failed for session ${session.sessionId.slice(0, 8)}: HTTP ${response.status}`
+        );
         res.status(response.status).json({
           error: 'ULTRAVOX_API_ERROR',
           status: response.status,
           message: `Ultravox API returned HTTP ${response.status}`,
-          details: errText.slice(0, 500),
+          details: sanitizeAiDetail(errText, 500),
         });
         return;
       }
 
-      const data = (await response.json()) as { callId: string; joinUrl: string; model?: string };
+      const data = (await response.json()) as { callId?: unknown; joinUrl?: unknown; model?: unknown };
+      const callId = sanitizeCallId(data.callId);
+      const joinUrl = typeof data.joinUrl === 'string' ? data.joinUrl.trim() : '';
+      const validJoinUrl = /^wss?:\/\/\S+$/i.test(joinUrl) && joinUrl.length <= 2048;
+      if (!callId || !validJoinUrl) {
+        store.recordError(session.sessionId, 'Ultravox returned an invalid call payload');
+        console.warn(
+          `[ai] Ultravox returned an unusable call payload for session ${session.sessionId.slice(0, 8)}`
+        );
+        res.status(502).json({
+          error: 'ULTRAVOX_INVALID_RESPONSE',
+          message: 'Ultravox did not return a usable call id and join URL.',
+        });
+        return;
+      }
+
       store.setUltravoxCall(session.sessionId, {
-        callId: data.callId,
-        joinUrl: data.joinUrl,
+        callId,
+        joinUrl,
         createdAt: Date.now(),
         createdByParticipantId: session.customer?.participantId || 'unknown',
+      });
+      store.setAiRuntime(session.sessionId, {
+        state: 'creating',
+        connected: false,
+        error: null,
+        callId,
+        reconnectAttempt: 0,
+        audioReachingAi: false,
       });
       broadcastSession(store.getSession(session.sessionId) as SessionRecord);
 
       res.json({
-        callId: data.callId,
-        joinUrl: data.joinUrl,
+        callId,
+        joinUrl,
         isReused: false,
-        model: data.model || 'ultravox-v0.7',
+        createdAt: Date.now(),
+        model: typeof data.model === 'string' ? data.model : 'ultravox-v0.7',
       });
     } catch (err) {
       store.recordError(session.sessionId, 'Ultravox request failed');
+      console.warn(
+        `[ai] Ultravox request failed for session ${session.sessionId.slice(0, 8)}: ${
+          sanitizeAiDetail((err as Error)?.message, 160) || 'network error'
+        }`
+      );
       res.status(502).json({
         error: 'ULTRAVOX_UNREACHABLE',
-        message: (err as Error)?.message || 'Failed to reach Ultravox.',
+        message: sanitizeAiDetail((err as Error)?.message, 200) || 'Failed to reach Ultravox.',
       });
+    } finally {
+      aiCallInFlight.delete(session.sessionId);
     }
   });
 
@@ -596,6 +726,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       'wsStatus', 'callState', 'micPermission', 'muted', 'localTrackState', 'localSenderCount',
       'remoteTrackState', 'playbackBlocked', 'bytesSent', 'bytesReceived', 'pcState', 'iceState',
       'iceGatheringState', 'selectedLocalType', 'selectedRemoteType', 'relayPath', 'aiStatus',
+      'aiConnected', 'aiState', 'aiAudioReaching', 'aiLastResponseAt', 'aiReconnectAttempt',
       'reconnectAttempt', 'candidates', 'iceConfigLoaded', 'turnConfigured',
       'turnCredentialMode', 'relayCandidates', 'mediaFlowing', 'dtlsState',
     ]);
@@ -693,6 +824,9 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
         peers: peersOf(session, result.participantId),
         participants: connectedParticipants(session),
         session: store.publicState(session),
+        // Last AI state reported by the customer device, so the salesperson
+        // dashboard is accurate immediately after (re)joining.
+        ai: store.publicState(session).ai,
         replacedConnection: result.replacedConnection,
         serverTime: new Date().toISOString(),
       });
@@ -747,6 +881,30 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       safeSend(ws, { type: 'error', code, message });
     };
 
+    /**
+     * AI status is observational: if the counterpart is not connected yet it is
+     * still stored server-side and must not surface as a signaling error on the
+     * customer dashboard.
+     */
+    const relayStatusToCounterpart = (
+      session: SessionRecord,
+      current: NonNullable<ReturnType<typeof store.getParticipant>>,
+      type: string,
+      data: Record<string, unknown>
+    ) => {
+      const counterpart = counterpartOf(session, current.participant.role);
+      const targetWs = counterpart?.connected ? sockets.get(counterpart.participantId) : undefined;
+      if (!targetWs) return;
+      safeSend(targetWs, {
+        ...data,
+        type,
+        sessionId: session.sessionId,
+        from: current.participant.participantId,
+        fromRole: current.participant.role,
+        relayedAt: Date.now(),
+      });
+    };
+
     const handleMessage = (data: Record<string, unknown>) => {
       if (!state) return;
       const type = typeof data.type === 'string' ? data.type : '';
@@ -779,6 +937,69 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
 
       if (type === 'client_diagnostics') {
         store.setDiagnostics(state.participantId, sanitizeDiagnostics(data.diagnostics));
+        return;
+      }
+
+      /**
+       * Customer-reported AI lifecycle. The Ultravox session exists only on the
+       * customer device, so this is the authoritative live state. It is stored
+       * for polling/diagnostics and relayed to the salesperson.
+       */
+      if (type === 'ai_status') {
+        if (state.role !== 'customer') {
+          rejectMessage(session.sessionId, 'INVALID_SIGNALING_ROLE', 'Only the customer may report AI status.');
+          return;
+        }
+        const aiState = typeof data.state === 'string' && AI_STATES.has(data.state) ? data.state : null;
+        if (!aiState) {
+          rejectMessage(session.sessionId, 'INVALID_SIGNALING_PAYLOAD', 'A known AI state is required.');
+          return;
+        }
+        const connected = data.connected === true && aiState === 'connected';
+        const runtime = store.setAiRuntime(session.sessionId, {
+          state: aiState,
+          connected,
+          error: sanitizeAiDetail(data.error),
+          callId: sanitizeCallId(data.callId),
+          reconnectAttempt:
+            typeof data.reconnectAttempt === 'number' &&
+            Number.isFinite(data.reconnectAttempt) &&
+            data.reconnectAttempt >= 0
+              ? Math.min(Math.round(data.reconnectAttempt), 20)
+              : 0,
+          audioReachingAi: connected && data.audioReachingAi === true,
+          lastResponseAt: sanitizeTimestamp(data.lastResponseAt),
+          lastSuggestionAt: sanitizeTimestamp(data.lastSuggestionAt),
+        });
+        if (!runtime) return;
+        relayStatusToCounterpart(session, current, 'ai_status', {
+          state: runtime.state,
+          connected: runtime.connected,
+          error: runtime.error,
+          callId: runtime.callId,
+          reconnectAttempt: runtime.reconnectAttempt,
+          audioReachingAi: runtime.audioReachingAi,
+          lastResponseAt: runtime.lastResponseAt,
+          lastSuggestionAt: runtime.lastSuggestionAt,
+          updatedAt: runtime.updatedAt,
+        });
+        broadcastSession(session);
+        return;
+      }
+
+      /** The salesperson may ask the customer device to create a fresh AI call. */
+      if (type === 'ai_reconnect') {
+        if (state.role !== 'salesperson') {
+          rejectMessage(
+            session.sessionId,
+            'INVALID_SIGNALING_ROLE',
+            'Only the salesperson may request an AI reconnect.'
+          );
+          return;
+        }
+        relayToCounterpart(session, current, 'ai_reconnect', {
+          reason: typeof data.reason === 'string' ? data.reason.slice(0, 120) : 'salesperson requested',
+        });
         return;
       }
 
@@ -894,6 +1115,18 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       const detached = store.detach(own.participantId);
       if (!detached) return;
       const session = detached.session;
+
+      // The AI session and microphone live on the customer device. Once that
+      // device disconnects, the server must not keep reporting a live AI.
+      if (detached.role === 'customer' && session.ai) {
+        store.setAiRuntime(session.sessionId, {
+          state: 'disconnected',
+          connected: false,
+          error: 'The customer device disconnected; the AI session ended with it.',
+          audioReachingAi: false,
+          reconnectAttempt: 0,
+        });
+      }
 
       const counterpart = counterpartOf(session, detached.role);
       if (counterpart?.connected) {
