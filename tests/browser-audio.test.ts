@@ -85,6 +85,23 @@ const openContext = async (browser: Browser): Promise<BrowserContext> => {
   return context;
 };
 
+/**
+ * Reads the invitation link and returns to the dashboard. A fresh visit opens
+ * the separate invitation screen; creating an invitation never disturbs a call.
+ */
+const readInvitationAndOpenDashboard = async (page: Page): Promise<string> => {
+  await page.waitForSelector('[data-testid="role-salesperson"]', { timeout: 20000 });
+  if ((await page.locator('[data-testid="back-to-dashboard"]').count()) === 0) {
+    await page.waitForSelector('[data-testid="show-invitation"]', { timeout: 20000 });
+    await page.click('[data-testid="show-invitation"]');
+    await page.waitForSelector('[data-testid="salesperson-invite-url"]', { timeout: 20000 });
+  }
+  const inviteUrl = await page.inputValue('[data-testid="salesperson-invite-url"]');
+  await page.click('[data-testid="back-to-dashboard"]');
+  await page.waitForSelector('[data-testid="join-call"]', { timeout: 20000 });
+  return inviteUrl;
+};
+
 const launchBrowser = (): Promise<Browser> =>
   chromium.launch({
     args: [
@@ -107,7 +124,7 @@ test('prototype2 role-specific interfaces', async (t) => {
   const salesContext = await openContext(browser);
   const salesPage = await salesContext.newPage();
   await salesPage.goto(`${base}/sales`, { waitUntil: 'domcontentloaded' });
-  await salesPage.waitForSelector('[data-testid="salesperson-invite-url"]', { timeout: 20000 });
+  await salesPage.waitForSelector('[data-testid="salesperson-invitation"]', { timeout: 20000 });
 
   await t.test('salesperson sees only the salesperson interface', async () => {
     assert.equal(await salesPage.locator('[data-testid="role-salesperson"]').count(), 1);
@@ -116,9 +133,13 @@ test('prototype2 role-specific interfaces', async (t) => {
 
     const inviteUrl = await salesPage.inputValue('[data-testid="salesperson-invite-url"]');
     assert.match(inviteUrl, /\/join\?invite=[A-Za-z0-9_-]{40,}$/);
+    // The invitation lives on its own screen with copy + back actions.
+    assert.equal(await salesPage.locator('[data-testid="copy-invite"]').count(), 1);
+    assert.equal(await salesPage.locator('[data-testid="back-to-dashboard"]').count(), 1);
+    assert.equal(await salesPage.locator('[data-testid="join-call"]').count(), 0);
   });
 
-  const inviteUrl = await salesPage.inputValue('[data-testid="salesperson-invite-url"]');
+  const inviteUrl = await readInvitationAndOpenDashboard(salesPage);
   const customerContext = await openContext(browser);
   const customerPage = await customerContext.newPage();
   await customerPage.goto(inviteUrl, { waitUntil: 'domcontentloaded' });
@@ -129,6 +150,14 @@ test('prototype2 role-specific interfaces', async (t) => {
     assert.equal(await customerPage.locator('[data-testid="role-salesperson"]').count(), 0);
     assert.equal(await customerPage.getByText('Prototype 1 (Engine Test)').count(), 0);
     assert.equal(await customerPage.getByText('AI copilot responses').count(), 0);
+
+    // No AI status, AI-listening indicators, suggestions or private diagnostics.
+    const text = (await customerPage.textContent('[data-testid="role-customer"]')) || '';
+    assert.doesNotMatch(text, /AI heard|AI suggested|AI session|AI assistant|suggestion|diagnostic|sales note/i);
+    assert.equal(await customerPage.locator('[data-testid="ai-suggestions"]').count(), 0);
+    assert.equal(await customerPage.locator('[data-testid="ai-suggestion-latest"]').count(), 0);
+    assert.equal(await customerPage.locator('[data-testid="diagnostics-panel"]').count(), 0);
+    assert.equal(await customerPage.locator('[data-testid="captions-status"]').count(), 0);
   });
 
   await t.test('the invitation resolves to the salesperson\'s session', async () => {
@@ -190,8 +219,7 @@ test('prototype2 three-path audio with synthetic media', async (t) => {
   }
 
   await salespersonPage.goto(`${base}/sales`, { waitUntil: 'domcontentloaded' });
-  await salespersonPage.waitForSelector('[data-testid="salesperson-invite-url"]', { timeout: 20000 });
-  const inviteUrl = await salespersonPage.inputValue('[data-testid="salesperson-invite-url"]');
+  const inviteUrl = await readInvitationAndOpenDashboard(salespersonPage);
 
   await customerPage.goto(inviteUrl, { waitUntil: 'domcontentloaded' });
   await customerPage.waitForSelector('[data-testid="customer-prejoin"]', { timeout: 20000 });
@@ -494,8 +522,7 @@ test('TURN configuration is fetched with session auth and applied to every peer 
   const customerPage = await customerContext.newPage();
 
   await salespersonPage.goto(`${base}/sales`, { waitUntil: 'domcontentloaded' });
-  await salespersonPage.waitForSelector('[data-testid="salesperson-invite-url"]', { timeout: 20000 });
-  const inviteUrl = await salespersonPage.inputValue('[data-testid="salesperson-invite-url"]');
+  const inviteUrl = await readInvitationAndOpenDashboard(salespersonPage);
   await customerPage.goto(inviteUrl, { waitUntil: 'domcontentloaded' });
   await customerPage.waitForSelector('[data-testid="customer-prejoin"]', { timeout: 20000 });
 
@@ -588,8 +615,7 @@ test('relay-only policy is applied and never reported as working audio without r
   const customerPage = await customerContext.newPage();
 
   await salespersonPage.goto(`${base}/sales`, { waitUntil: 'domcontentloaded' });
-  await salespersonPage.waitForSelector('[data-testid="salesperson-invite-url"]', { timeout: 20000 });
-  const inviteUrl = await salespersonPage.inputValue('[data-testid="salesperson-invite-url"]');
+  const inviteUrl = await readInvitationAndOpenDashboard(salespersonPage);
   await customerPage.goto(inviteUrl, { waitUntil: 'domcontentloaded' });
   await customerPage.waitForSelector('[data-testid="customer-prejoin"]', { timeout: 20000 });
 
@@ -650,7 +676,7 @@ test('relay-only mode without TURN refuses to start instead of silently using ST
   const context = await openContext(browser);
   const page = await context.newPage();
   await page.goto(`${base}/sales`, { waitUntil: 'domcontentloaded' });
-  await page.waitForSelector('[data-testid="salesperson-invite-url"]', { timeout: 20000 });
+  await readInvitationAndOpenDashboard(page);
   await page.click('[data-testid="join-call"]');
 
   const state = await waitFor(() => snapshot(page), (value) => value.callState === 'failed', 15000);

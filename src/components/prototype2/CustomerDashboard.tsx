@@ -1,14 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  AlertCircle, Bot, Headphones, Mic, MicOff, PhoneCall, PhoneOff, RefreshCw,
-  ShieldCheck, Sparkles, Volume2, VolumeX, Activity, UserRound,
+  AlertCircle, Headphones, Mic, MicOff, PhoneCall, PhoneOff, RefreshCw,
+  ShieldCheck, Volume2, VolumeX, UserRound,
 } from 'lucide-react';
 import { CallEngine, EngineSnapshot } from '../../lib/callEngine';
 import { ApiError, RedeemedInvitation, SessionPublicState, redeemInvitation } from '../../lib/sessionApi';
 import {
   loadCustomerSession, loadResumeToken, saveCustomerSession, saveResumeToken,
 } from '../../lib/participantStorage';
-import { Banner, DiagGrid, Panel, StatusLine } from './ui';
+import { Banner } from './ui';
 
 const ROLE = 'customer' as const;
 
@@ -43,7 +43,6 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
   const [sessionState, setSessionState] = useState<SessionPublicState | null>(null);
   const [snapshot, setSnapshot] = useState<EngineSnapshot | null>(null);
   const [joined, setJoined] = useState(false);
-  const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [customerName, setCustomerName] = useState('');
 
   const engineRef = useRef<CallEngine | null>(null);
@@ -187,61 +186,69 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
     );
   }
 
+
+
+  /**
+   * AI recovery is internal bookkeeping. The customer screen never renders AI
+   * status, errors, transcripts or suggestions; if the AI session drops it is
+   * retried a few times in the background and the human call is unaffected.
+   */
+  const aiRetriesRef = useRef(0);
+  useEffect(() => {
+    if (!joined || snapshot?.aiStatus !== 'error') return;
+    if (aiRetriesRef.current >= 3) return;
+    const timer = window.setTimeout(() => {
+      aiRetriesRef.current += 1;
+      void engineRef.current?.retryAi();
+    }, 4000);
+    return () => window.clearTimeout(timer);
+  }, [joined, snapshot?.aiStatus]);
+
   const callState = callStateLabel(snapshot);
   const salespersonConnected = Boolean(snapshot?.peerParticipantId);
-  const incomingLive = Boolean(snapshot && snapshot.mediaFlowing && !snapshot.speakerMuted);
-  const latestAi = [...(snapshot?.suggestions ?? [])].reverse().find((item) => item.text) ?? null;
+  const captionText = snapshot?.salespersonCaption ?? '';
 
   return (
-    <div className="min-h-screen overflow-y-auto bg-slate-950" data-testid="role-customer">
+    <div className="min-h-screen bg-slate-950" data-testid="role-customer">
       <audio ref={audioRef} autoPlay playsInline className="hidden" data-testid="remote-audio" />
 
-      <div className="max-w-3xl mx-auto p-4 space-y-4">
-        <header className="flex flex-wrap items-center justify-between gap-3">
+      <div className="max-w-xl mx-auto p-4 space-y-4">
+        <header className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-xl bg-gradient-to-tr from-emerald-600 to-cyan-500 text-white">
+            <div className="p-2.5 rounded-xl bg-slate-800 text-slate-200">
               <UserRound className="w-5 h-5" />
             </div>
             <div>
               <h1 className="text-base font-bold text-slate-100">Customer call</h1>
-              <p className="text-[11px] text-slate-400 font-mono">
-                {customerName ? `${customerName} · ` : ''}session {redeemed?.sessionId.slice(0, 10)}
-              </p>
+              {customerName ? <p className="text-[11px] text-slate-400">{customerName}</p> : null}
             </div>
           </div>
-          <span className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${
-            callState.tone === 'emerald'
-              ? 'border-emerald-500/40 text-emerald-300 bg-emerald-500/10'
-              : callState.tone === 'amber'
-                ? 'border-amber-500/40 text-amber-300 bg-amber-500/10'
-                : callState.tone === 'red'
-                  ? 'border-rose-500/40 text-rose-300 bg-rose-500/10'
-                  : 'border-slate-700 text-slate-400 bg-slate-900'
-          }`} data-testid="call-state">
+          <span
+            className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${
+              callState.tone === 'emerald'
+                ? 'border-emerald-500/40 text-emerald-300 bg-emerald-500/10'
+                : callState.tone === 'amber'
+                  ? 'border-amber-500/40 text-amber-300 bg-amber-500/10'
+                  : callState.tone === 'red'
+                    ? 'border-rose-500/40 text-rose-300 bg-rose-500/10'
+                    : 'border-slate-700 text-slate-400 bg-slate-900'
+            }`}
+            data-testid="call-state"
+          >
             {callState.label}
           </span>
         </header>
 
         {snapshot?.iceConfigError ? (
-          <Banner tone="red" title="ICE / TURN configuration problem" testId="ice-error">
-            {snapshot.iceConfigError}
-          </Banner>
-        ) : null}
-        {snapshot && !snapshot.turnConfigured && !snapshot.iceConfigError ? (
-          <Banner tone="amber" title="TURN relay not configured" testId="turn-warning">
-            The call may stay silent on mobile data or strict NATs. The operator must configure TURN on the server.
+          <Banner tone="red" title="Connection setup problem" testId="ice-error">
+            The call could not start on this network. Ask the salesperson to check the call setup.
           </Banner>
         ) : null}
         {snapshot?.diagnostics.iceTransportPolicy === 'relay' && snapshot.relayCandidates === 0 ? (
-          <Banner tone="red" title="No relay path available" testId="relay-warning">
-            Relay-only mode is enabled but this network could not reach the TURN server. Check your connection or ask
-            the salesperson to verify the TURN configuration.
+          <Banner tone="red" title="No audio path available" testId="relay-warning">
+            This network could not reach the call relay. Check your connection and try reconnect.
           </Banner>
         ) : null}
-        {snapshot?.iceConfigWarnings.length && !snapshot.iceConfigError ? (
-          <Banner tone="amber" title="ICE warning">{snapshot.iceConfigWarnings[0]}</Banner>
-        ) : null}
-
         {snapshot?.playbackBlocked ? (
           <Banner
             tone="amber"
@@ -259,17 +266,15 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
           </Banner>
         ) : null}
         {snapshot?.lastError ? <Banner tone="red" title="Connection problem">{snapshot.lastError}</Banner> : null}
-        {snapshot?.lastServerError ? (
-          <Banner tone="amber" title="Server signaling error">{snapshot.lastServerError}</Banner>
-        ) : null}
+
 
         {!joined ? (
           <section className="bg-slate-900/70 border border-slate-800 rounded-2xl p-5 space-y-4" data-testid="customer-prejoin">
             <div className="space-y-1">
-              <h2 className="text-sm font-semibold text-slate-100">You are invited to a live product call</h2>
+              <h2 className="text-sm font-semibold text-slate-100">You are invited to a live call</h2>
               <p className="text-xs text-slate-400">
-                Your microphone is used for two things: an AI assistant that helps the salesperson, and the live
-                conversation with the salesperson. Nothing is recorded by this page.
+                Your microphone is used for the live conversation with the salesperson. Nothing is recorded by this
+                page.
               </p>
             </div>
 
@@ -286,10 +291,9 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
               />
             </div>
 
-            <div className="text-xs text-slate-400 space-y-1">
-              <p>Salesperson: {sessionState?.salespersonConnected ? 'connected and waiting' : 'not connected yet'}</p>
-              <p>Invitation status: {sessionState?.invitationStatus ?? 'unknown'}</p>
-            </div>
+            <p className="text-xs text-slate-400">
+              Salesperson: {sessionState?.salespersonConnected ? 'connected and waiting' : 'not connected yet'}
+            </p>
 
             <button
               onClick={() => void joinCall()}
@@ -303,220 +307,86 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
             </p>
           </section>
         ) : (
-          <div className="flex flex-wrap gap-2">
-            <button
-              onClick={toggleMute}
-              data-testid="mic-toggle"
-              aria-pressed={Boolean(snapshot?.micMuted)}
-              className={`px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-2 ${
-                snapshot?.micMuted ? 'bg-rose-600 hover:bg-rose-500 text-white' : 'bg-emerald-600 hover:bg-emerald-500 text-white'
-              }`}
-            >
-              {snapshot?.micMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
-              {snapshot?.micMuted ? 'Unmute microphone' : 'Mute microphone'}
-            </button>
-            <button
-              onClick={toggleSpeaker}
-              data-testid="speaker-toggle"
-              aria-pressed={Boolean(snapshot?.speakerMuted)}
-              className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 text-sm font-semibold flex items-center gap-2"
-            >
-              {snapshot?.speakerMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-              {snapshot?.speakerMuted ? 'Unmute salesperson' : 'Mute salesperson'}
-            </button>
-            <button
-              onClick={() => void rejoin()}
-              data-testid="reconnect"
-              className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-semibold flex items-center gap-2"
-            >
-              <RefreshCw className="w-4 h-4" /> Reconnect
-            </button>
-            <button
-              onClick={() => void leaveCall()}
-              data-testid="leave-call"
-              className="px-4 py-2 rounded-xl bg-rose-600/90 hover:bg-rose-500 text-white text-sm font-semibold flex items-center gap-2 ml-auto"
-            >
-              <PhoneOff className="w-4 h-4" /> Leave
-            </button>
-          </div>
-        )}
-
-        {joined ? (
-          <div className="flex items-center gap-2 bg-slate-900/70 border border-slate-800 rounded-2xl px-3 py-2">
-            <Mic className="w-4 h-4 text-slate-500" />
-            <span className="text-[11px] text-slate-400">
-              Microphone: {snapshot?.micPermission === 'granted' ? (snapshot.micMuted ? 'muted' : 'live') : snapshot?.micPermission ?? 'unknown'}
-            </span>
-            <span className="text-[11px] text-slate-600">·</span>
-            <span className="text-[11px] text-slate-400">
-              AI: {snapshot?.aiStatus ?? 'not started'}
-            </span>
-          </div>
-        ) : null}
-
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Panel title="Connection & audio" icon={<Activity className="w-3.5 h-3.5" />}>
-            <div className="space-y-1">
-              <StatusLine
-                label="Signaling"
-                value={snapshot?.wsStatus ?? 'not started'}
-                tone={snapshot?.wsStatus === 'connected' ? 'emerald' : snapshot?.wsStatus === 'reconnecting' ? 'amber' : 'slate'}
-              />
-              <StatusLine
-                label="Salesperson"
-                value={salespersonConnected ? 'connected' : 'waiting'}
-                tone={salespersonConnected ? 'emerald' : 'slate'}
-              />
-              <StatusLine
-                label="Your microphone"
-                value={
-                  snapshot?.micPermission !== 'granted'
-                    ? 'not granted'
-                    : snapshot.micMuted
-                      ? 'muted'
-                      : snapshot.localTrackState === 'live'
-                        ? 'live'
-                        : 'stopped'
-                }
-                tone={snapshot?.micPermission === 'granted' && !snapshot?.micMuted && snapshot?.localTrackState === 'live' ? 'emerald' : snapshot?.micMuted ? 'amber' : 'red'}
-              />
-              <StatusLine
-                label="Salesperson voice"
-                value={
-                  !salespersonConnected
-                    ? 'not connected'
-                    : snapshot?.speakerMuted
-                      ? 'muted locally'
-                      : snapshot?.playbackBlocked
-                        ? 'blocked by browser'
-                        : incomingLive
-                          ? `live · ${snapshot?.diagnostics.receiveBitrateKbps} kbps`
-                          : 'waiting for media'
-                }
-                tone={incomingLive ? 'emerald' : snapshot?.playbackBlocked ? 'red' : 'amber'}
-                detail={snapshot ? `rtp in ${snapshot.diagnostics.bytesReceived} B / out ${snapshot.diagnostics.bytesSent} B` : undefined}
-              />
-              <StatusLine
-                label="Network path"
-                value={
-                  snapshot?.diagnostics.relayPath
-                    ? 'TURN relay'
-                    : snapshot && snapshot.diagnostics.selectedLocalType !== 'none'
-                      ? `${snapshot.diagnostics.selectedLocalType} → ${snapshot.diagnostics.selectedRemoteType}`
-                      : 'not negotiated'
-                }
-                tone={snapshot?.diagnostics.relayPath ? 'indigo' : 'slate'}
-              />
-            </div>
-          </Panel>
-
-          <Panel
-            title="AI assistant"
-            icon={<Bot className="w-3.5 h-3.5" />}
-            action={
-              <button
-                onClick={retryAi}
-                disabled={!joined}
-                className="text-[10px] px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold disabled:opacity-40"
+          <>
+            <section className="bg-slate-900/70 border border-slate-800 rounded-2xl p-6 flex flex-col items-center gap-3">
+              <div
+                className={`p-5 rounded-full ${
+                  callState.tone === 'emerald'
+                    ? 'bg-emerald-500/15 text-emerald-300'
+                    : callState.tone === 'red'
+                      ? 'bg-rose-500/15 text-rose-300'
+                      : 'bg-slate-800 text-slate-300'
+                }`}
               >
-                Restart AI
-              </button>
-            }
-          >
-            <div className="space-y-2" data-testid="ai-status">
-              <StatusLine
-                label="AI session"
-                value={snapshot?.aiStatus ?? 'not started'}
-                tone={
-                  snapshot?.aiStatus === 'listening' || snapshot?.aiStatus === 'thinking' || snapshot?.aiStatus === 'speaking'
-                    ? 'emerald'
-                    : snapshot?.aiStatus === 'error'
-                      ? 'red'
-                      : 'amber'
-                }
-                detail={snapshot?.aiError ?? undefined}
-              />
-              {snapshot?.customerSpeech ? (
-                <p className="text-[11px] text-slate-400 border-t border-slate-800 pt-2">
-                  AI heard: <span className="text-slate-200">{snapshot.customerSpeech}</span>
+                <Headphones className="w-10 h-10" />
+              </div>
+              <p className="text-sm font-semibold text-slate-100">
+                {salespersonConnected ? 'Connected to the salesperson' : 'Waiting for the salesperson'}
+              </p>
+              <p className="text-xs text-slate-400 text-center">
+                {snapshot?.mediaFlowing && !snapshot?.speakerMuted
+                  ? 'Audio is flowing.'
+                  : 'Keep this page open to stay in the call.'}
+              </p>
+
+              <div className="flex flex-wrap justify-center gap-2 pt-1">
+                <button
+                  onClick={toggleMute}
+                  data-testid="mic-toggle"
+                  aria-pressed={Boolean(snapshot?.micMuted)}
+                  className={`px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-2 ${
+                    snapshot?.micMuted ? 'bg-rose-600 hover:bg-rose-500 text-white' : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                  }`}
+                >
+                  {snapshot?.micMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                  {snapshot?.micMuted ? 'Unmute microphone' : 'Mute microphone'}
+                </button>
+                <button
+                  onClick={toggleSpeaker}
+                  data-testid="speaker-toggle"
+                  aria-pressed={Boolean(snapshot?.speakerMuted)}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 text-sm font-semibold flex items-center gap-2"
+                >
+                  {snapshot?.speakerMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                  {snapshot?.speakerMuted ? 'Unmute salesperson' : 'Mute salesperson'}
+                </button>
+                <button
+                  onClick={() => void rejoin()}
+                  data-testid="reconnect"
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-semibold flex items-center gap-2"
+                >
+                  <RefreshCw className="w-4 h-4" /> Reconnect
+                </button>
+                <button
+                  onClick={() => void leaveCall()}
+                  data-testid="leave-call"
+                  className="px-4 py-2 rounded-xl bg-rose-600/90 hover:bg-rose-500 text-white text-sm font-semibold flex items-center gap-2"
+                >
+                  <PhoneOff className="w-4 h-4" /> Leave
+                </button>
+              </div>
+
+              <p className="text-[11px] text-slate-500">
+                Microphone: {snapshot?.micPermission === 'granted' ? (snapshot?.micMuted ? 'muted' : 'live') : snapshot?.micPermission ?? 'unknown'}
+              </p>
+            </section>
+
+            <section className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 space-y-2" data-testid="customer-captions">
+              <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400">Salesperson captions</h2>
+              {captionText ? (
+                <p className="text-sm text-slate-100 leading-relaxed" data-testid="salesperson-caption">
+                  {captionText}
                 </p>
               ) : (
-                <p className="text-[11px] text-slate-500">
-                  Speak normally. The AI transcribes your words and sends ready-to-read suggestions to the salesperson.
+                <p className="text-xs text-slate-500">
+                  Captions appear here when the salesperson's browser supports live speech recognition.
                 </p>
               )}
-              {latestAi ? (
-                <p className="text-[11px] text-slate-400 border-t border-slate-800 pt-2">
-                  <Sparkles className="w-3 h-3 inline mr-1 text-indigo-300" />
-                  AI suggested to the salesperson: <span className="text-slate-300">{latestAi.text}</span>
-                </p>
-              ) : null}
-              <p className="text-[10px] text-slate-500 border-t border-slate-800 pt-2 flex items-start gap-1">
-                <Headphones className="w-3 h-3 mt-0.5 shrink-0" />
-                The AI replies as text in this prototype so it never speaks over the salesperson.
-              </p>
-            </div>
-          </Panel>
-        </div>
+            </section>
+          </>
+        )}
 
-        {joined ? (
-          <section className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
-                <Activity className="w-3.5 h-3.5" /> Diagnostics
-              </h2>
-              <button
-                onClick={() => setShowDiagnostics((value) => !value)}
-                data-testid="toggle-diagnostics"
-                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-semibold"
-              >
-                {showDiagnostics ? 'Hide details' : 'Show details'}
-              </button>
-            </div>
-            {showDiagnostics ? (
-              <div className="space-y-2" data-testid="diagnostics-panel">
-                <DiagGrid
-                  rows={[
-                    ['role', 'customer'],
-                    ['participant', snapshot?.participantId?.slice(0, 10) ?? '—'],
-                    ['ws', snapshot?.wsStatus ?? 'not started'],
-                    ['pc', snapshot?.diagnostics.pcState ?? 'none'],
-                    ['ice', snapshot?.diagnostics.iceState ?? 'none'],
-                    ['path', `${snapshot?.diagnostics.selectedLocalType ?? '—'} → ${snapshot?.diagnostics.selectedRemoteType ?? '—'}`],
-                    ['mic perm', snapshot?.micPermission ?? 'unknown'],
-                    ['mic track', snapshot?.diagnostics.localTrackState ?? 'none'],
-                    ['senders', String(snapshot?.diagnostics.localSenderCount ?? 0)],
-                    ['remote', snapshot?.diagnostics.remoteTrackState ?? 'none'],
-                    ['rtp out', `${snapshot?.diagnostics.bytesSent ?? 0} B`],
-                    ['rtp in', `${snapshot?.diagnostics.bytesReceived ?? 0} B`],
-                    ['playback', snapshot?.diagnostics.audioElementPaused ? 'paused' : 'playing'],
-                    ['autoplay error', snapshot?.diagnostics.playbackError ?? 'none'],
-                    ['ice config', snapshot?.iceConfigLoaded ? 'loaded (session auth)' : snapshot?.iceConfigError ? 'error' : 'not loaded'],
-                    ['ice policy', snapshot?.diagnostics.iceTransportPolicy ?? 'unknown'],
-                    ['turn', snapshot ? `${snapshot.turnConfigured ? 'configured' : 'none'} / ${snapshot.turnCredentialMode}` : 'unknown'],
-                    ['relay candidates', String(snapshot?.relayCandidates ?? 0)],
-                    ['selected pair', snapshot?.selectedPair ?? 'none'],
-                    ['dtls', snapshot?.diagnostics.dtlsState ?? 'none'],
-                    ['media flowing', snapshot?.mediaFlowing ? 'yes (RTP received)' : 'no RTP yet'],
-                    ['ai', snapshot?.aiStatus ?? 'not started'],
-                    ['reconnects', String(snapshot?.reconnectAttempt ?? 0)],
-                  ]}
-                />
-                <pre className="text-[10px] leading-4 text-slate-400 bg-slate-950 border border-slate-800 rounded-lg p-2 max-h-40 overflow-auto whitespace-pre-wrap">
-                  {snapshot?.logs.length ? snapshot.logs.join('\n') : 'No events yet.'}
-                </pre>
-              </div>
-            ) : (
-              <p className="text-[11px] text-slate-500">
-                Signaling, ICE, RTP byte counters, microphone state and playback errors are available here.
-              </p>
-            )}
-          </section>
-        ) : null}
-
-        <p className="text-[10px] text-slate-600 text-center pb-6">
-          Prototype 2 · session-scoped, server-authorized conversation
-        </p>
+        <p className="text-[10px] text-slate-600 text-center pb-6">Secure session</p>
       </div>
     </div>
   );

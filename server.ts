@@ -196,16 +196,22 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
   const peersOf = (session: SessionRecord, exceptParticipantId: string) =>
     connectedParticipants(session).filter((p) => p.participantId !== exceptParticipantId);
 
+  // The customer never receives internal AI state (aiReady reveals that an AI
+  // call exists). Role-specific views are built on the server, not hidden in the UI.
+  const stateFor = (session: SessionRecord, role: ParticipantRole) => {
+    const { aiReady: _aiReady, ...customerSafe } = store.publicState(session);
+    return role === 'customer' ? customerSafe : store.publicState(session);
+  };
+
   const broadcastSession = (session: SessionRecord) => {
-    const payload = {
-      type: 'session_state',
-      sessionId: session.sessionId,
-      session: store.publicState(session),
-      participants: connectedParticipants(session),
-    };
     for (const participant of [session.salesperson, session.customer]) {
       if (!participant?.connected) continue;
-      safeSend(sockets.get(participant.participantId), payload);
+      safeSend(sockets.get(participant.participantId), {
+        type: 'session_state',
+        sessionId: session.sessionId,
+        session: stateFor(session, participant.role),
+        participants: connectedParticipants(session),
+      });
     }
   };
 
@@ -329,7 +335,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       sessionId: result.sessionId,
       customerKey: result.customerKey,
       resumed: result.resumed,
-      session: result.session,
+      session: (({ aiReady: _aiReady, ...safe }) => safe)(result.session),
       baseUrl: publicBaseUrl(req),
     });
   });
@@ -692,7 +698,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
         resumeToken: result.resumeToken,
         peers: peersOf(session, result.participantId),
         participants: connectedParticipants(session),
-        session: store.publicState(session),
+        session: stateFor(session, result.role),
         replacedConnection: result.replacedConnection,
         serverTime: new Date().toISOString(),
       });
@@ -842,6 +848,26 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
           isFinal: Boolean(data.isFinal),
           ordinal: typeof data.ordinal === 'number' ? data.ordinal : 0,
           timestamp: typeof data.timestamp === 'string' ? data.timestamp.slice(0, 40) : '',
+        });
+        return;
+      }
+
+      if (type === 'salesperson_caption') {
+        if (state.role !== 'salesperson') {
+          rejectMessage(
+            session.sessionId,
+            'INVALID_SIGNALING_ROLE',
+            'Only the salesperson may send captions.'
+          );
+          return;
+        }
+        if (typeof data.text !== 'string') {
+          rejectMessage(session.sessionId, 'INVALID_SIGNALING_PAYLOAD', 'Caption text is required.');
+          return;
+        }
+        relayToCounterpart(session, current, 'salesperson_caption', {
+          text: data.text.slice(0, 1000),
+          isFinal: Boolean(data.isFinal),
         });
         return;
       }

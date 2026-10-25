@@ -86,6 +86,14 @@ export interface EngineSnapshot {
   aiError: string | null;
   suggestions: SuggestionCard[];
   customerSpeech: string;
+  /**
+   * Salesperson only: browser speech-recognition state for salesperson captions.
+   * 'unsupported' means the browser has no SpeechRecognition implementation; the
+   * call itself keeps working and the customer simply sees no captions.
+   */
+  captionStatus: 'off' | 'listening' | 'paused' | 'unsupported' | 'error';
+  /** Customer only: latest caption text received from the salesperson. */
+  salespersonCaption: string;
   reconnectAttempt: number;
   lastError: string | null;
   lastServerError: string | null;
@@ -235,6 +243,11 @@ export class CallEngine {
   private aiError: string | null = null;
   private suggestions: SuggestionCard[] = [];
   private customerSpeech = '';
+  private captionStatus: EngineSnapshot['captionStatus'] = 'off';
+  private salespersonCaption = '';
+  private recognition: any = null;
+  private recognitionWanted = false;
+  private recognitionRestartTimer: number | null = null;
   private lastError: string | null = null;
   private lastServerError: string | null = null;
   private logs: string[] = [];
@@ -302,6 +315,8 @@ export class CallEngine {
       aiError: this.aiError,
       suggestions: this.suggestions,
       customerSpeech: this.customerSpeech,
+      captionStatus: this.captionStatus,
+      salespersonCaption: this.salespersonCaption,
       reconnectAttempt: this.reconnectAttempt,
       lastError: this.lastError,
       lastServerError: this.lastServerError,
@@ -499,8 +514,141 @@ export class CallEngine {
       return;
     }
 
+    this.startCaptions();
     this.startDiagnosticsLoop();
     this.connectSignaling(false);
+  }
+
+  // -------------------------------------------------------------------------
+  // Salesperson captions (browser SpeechRecognition -> signaling -> customer)
+  //
+  // The salesperson's microphone is NOT sent to Ultravox and is NOT merged into
+  // the customer's AI audio path. Captions are produced locally by the browser's
+  // speech recognizer and forwarded as text over the authenticated signaling
+  // socket, which only relays them to the paired customer.
+  // -------------------------------------------------------------------------
+
+  private speechRecognitionCtor(): any {
+    if (typeof window === 'undefined') return null;
+    const w = window as any;
+    return w.SpeechRecognition || w.webkitSpeechRecognition || null;
+  }
+
+  private startCaptions(): void {
+    if (this.options.role !== 'salesperson') return;
+    const Ctor = this.speechRecognitionCtor();
+    if (!Ctor) {
+      this.captionStatus = 'unsupported';
+      this.log('Browser speech recognition is unavailable; salesperson captions are off.');
+      this.emit();
+      return;
+    }
+    if (this.recognition) return;
+
+    try {
+      const recognition = new Ctor();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = (typeof navigator !== 'undefined' && navigator.language) || 'en-US';
+
+      recognition.onresult = (event: any) => {
+        for (let index = event.resultIndex; index < event.results.length; index += 1) {
+          const result = event.results[index];
+          const text = String(result?.[0]?.transcript || '').trim();
+          if (!text) continue;
+          this.sendSignal({ type: 'salesperson_caption', text, isFinal: Boolean(result.isFinal) });
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        const code = String(event?.error || 'unknown');
+        // 'no-speech' and 'aborted' are routine; anything else is reported once.
+        if (code === 'no-speech' || code === 'aborted') return;
+        this.captionStatus = code === 'not-allowed' || code === 'service-not-allowed' ? 'unsupported' : 'error';
+        this.lastError = null;
+        this.log(`Salesperson caption recognizer error: ${code}. Call audio is unaffected.`);
+        this.emit();
+      };
+
+      recognition.onend = () => {
+        if (!this.recognitionWanted) return;
+        if (this.captionStatus === 'unsupported' || this.captionStatus === 'paused') return;
+        // Chrome ends the session periodically; restart while the call is live.
+        if (this.recognitionRestartTimer !== null) window.clearTimeout(this.recognitionRestartTimer);
+        this.recognitionRestartTimer = window.setTimeout(() => {
+          this.recognitionRestartTimer = null;
+          if (!this.recognitionWanted || !this.recognition) return;
+          try {
+            this.recognition.start();
+            this.captionStatus = 'listening';
+          } catch {
+            // Already started or blocked; the next stop()/start() cycle recovers.
+          }
+          this.emit();
+        }, 400);
+      };
+
+      this.recognition = recognition;
+      this.recognitionWanted = true;
+      recognition.start();
+      this.captionStatus = 'listening';
+      this.log('Salesperson speech recognition started (captions to customer only).');
+      this.emit();
+    } catch (err) {
+      this.recognition = null;
+      this.recognitionWanted = false;
+      this.captionStatus = 'error';
+      this.log(`Could not start salesperson captions: ${(err as Error)?.message || err}. Call audio is unaffected.`);
+      this.emit();
+    }
+  }
+
+  private stopCaptions(): void {
+    this.recognitionWanted = false;
+    if (this.recognitionRestartTimer !== null) {
+      window.clearTimeout(this.recognitionRestartTimer);
+      this.recognitionRestartTimer = null;
+    }
+    const recognition = this.recognition;
+    this.recognition = null;
+    if (recognition) {
+      recognition.onresult = null;
+      recognition.onerror = null;
+      recognition.onend = null;
+      try {
+        recognition.stop();
+      } catch {
+        // Ignore stop errors on an already-stopped recognizer.
+      }
+      this.log('Salesperson speech recognition stopped.');
+    }
+    if (this.options.role === 'salesperson') this.captionStatus = 'off';
+  }
+
+  private pauseCaptions(): void {
+    if (!this.recognition || this.captionStatus === 'unsupported') return;
+    try {
+      this.recognition.stop();
+    } catch {
+      // Ignore.
+    }
+    this.captionStatus = 'paused';
+    this.emit();
+  }
+
+  private resumeCaptions(): void {
+    if (this.options.role !== 'salesperson') return;
+    if (!this.recognition) {
+      this.startCaptions();
+      return;
+    }
+    try {
+      this.recognition.start();
+      this.captionStatus = 'listening';
+    } catch {
+      // Ignore double starts; the restart handler keeps the loop alive.
+    }
+    this.emit();
   }
 
   async stop(reason = 'left the call'): Promise<void> {
@@ -524,6 +672,7 @@ export class CallEngine {
     }
 
     await this.stopAi();
+    this.stopCaptions();
     this.closePeerConnection(`stop: ${reason}`);
     this.releaseLocalMedia(reason);
 
@@ -667,9 +816,16 @@ export class CallEngine {
       }
     }
 
+    // The salesperson's captions come from the same microphone: muting must stop
+    // the recognizer as well, otherwise the customer keeps reading a muted
+    // participant's speech.
+    if (this.options.role === 'salesperson') {
+      if (muted) this.pauseCaptions();
+      else this.resumeCaptions();
+    }
+
     const track = this.localStream?.getAudioTracks()[0];
     if (track) {
-      // Keep the diagnostics view truthful immediately, not at the next sample.
       this.diagnostics = {
         ...this.diagnostics,
         localTrackState: `${track.readyState}${track.enabled ? '' : ' (disabled)'}${track.muted ? ' (muted)' : ''}`,
@@ -1468,6 +1624,15 @@ export class CallEngine {
     if (type === 'customer_speech_transcript') {
       if (this.options.role !== 'salesperson') return;
       this.customerSpeech = typeof data.text === 'string' ? data.text : '';
+      this.emit();
+      return;
+    }
+
+    if (type === 'salesperson_caption') {
+      if (this.options.role !== 'customer') return;
+      const text = typeof data.text === 'string' ? data.text.trim() : '';
+      if (!text) return;
+      this.salespersonCaption = text;
       this.emit();
       return;
     }

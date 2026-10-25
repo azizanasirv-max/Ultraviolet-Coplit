@@ -297,9 +297,11 @@ test('prototype2 signaling protocol', async (t) => {
     // Hydration: the customer's joined payload has no AI/private/diagnostic fields
     // and no other participant's credentials.
     const hydration = JSON.stringify(customerJoin);
-    assert.doesNotMatch(hydration, /suggestion|diagnostics|notes|transcript|ultravox|joinUrl|salespersonKey/i);
+    assert.doesNotMatch(hydration, /suggestion|diagnostics|notes|transcript|ultravox|joinUrl|salespersonKey|aiReady/i);
     assert.equal(hydration.includes(fixture.salespersonKey), false);
     assert.equal(hydration.includes(salesJoin.resumeToken), false);
+    // The salesperson's own view still carries its AI readiness flag.
+    assert.equal(salesJoin.session.aiReady, false);
 
     // The salesperson may not send customer-reserved message types.
     for (const type of ['customer_speech_transcript', 'ai_suggestion']) {
@@ -307,6 +309,11 @@ test('prototype2 signaling protocol', async (t) => {
       const rejection = await salesperson.next((message) => message.type === 'error');
       assert.equal(rejection.code, 'INVALID_SIGNALING_ROLE');
     }
+
+    // The customer may not inject salesperson captions.
+    customer.send({ type: 'salesperson_caption', sessionId: fixture.sessionId, text: 'spoofed', isFinal: true });
+    const captionRejection = await customer.next((message) => message.type === 'error');
+    assert.equal(captionRejection.code, 'INVALID_SIGNALING_ROLE');
 
     // Customer AI output and speech reach the salesperson, and never echo back to the customer.
     customer.send({ type: 'customer_speech_transcript', sessionId: fixture.sessionId, text: 'hello', isFinal: true, ordinal: 1 });
@@ -319,6 +326,21 @@ test('prototype2 signaling protocol', async (t) => {
         (message) => message.type === 'ai_suggestion' || message.type === 'customer_speech_transcript',
         700
       ),
+      /Timed out/
+    );
+
+    // Salesperson captions are relayed to the paired customer only, never echoed.
+    salesperson.send({
+      type: 'salesperson_caption',
+      sessionId: fixture.sessionId,
+      text: 'Our plan starts at $49 per seat.',
+      isFinal: true,
+    });
+    const caption = await customer.next((message) => message.type === 'salesperson_caption');
+    assert.equal(caption.text, 'Our plan starts at $49 per seat.');
+    assert.equal(caption.fromRole, 'salesperson');
+    await assert.rejects(
+      salesperson.next((message) => message.type === 'salesperson_caption', 700),
       /Timed out/
     );
 
