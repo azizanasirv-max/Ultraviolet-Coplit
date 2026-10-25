@@ -552,6 +552,9 @@ export class CallEngine {
       recognition.lang = (typeof navigator !== 'undefined' && navigator.language) || 'en-US';
 
       recognition.onresult = (event: any) => {
+        // Only forward while the customer is actually in this session; otherwise
+        // the server would answer every caption with PEER_UNAVAILABLE.
+        if (!this.peerParticipantId) return;
         for (let index = event.resultIndex; index < event.results.length; index += 1) {
           const result = event.results[index];
           const text = String(result?.[0]?.transcript || '').trim();

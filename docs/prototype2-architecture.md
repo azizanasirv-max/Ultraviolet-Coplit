@@ -9,16 +9,41 @@ limitations.
 
 | Route | Who | Component | Renders |
 | --- | --- | --- | --- |
-| `/sales` | Salesperson | `src/components/prototype2/SalespersonDashboard.tsx` | Session status, invite generation/copy, mic + speaker controls, AI suggestions, connection diagnostics |
-| `/join?invite=<token>` | Customer | `src/components/prototype2/CustomerDashboard.tsx` | Invitation redemption, mic controls, incoming salesperson audio, AI conversation status, diagnostics |
+| `/sales` | Salesperson | `src/components/prototype2/SalespersonDashboard.tsx` | Active call as the main focus (call icon, status, controls), customer speech, private AI suggestions, invitation screen, diagnostics on demand |
+| `/join?invite=<token>` | Customer | `src/components/prototype2/CustomerDashboard.tsx` | Invitation redemption, join/leave, mic + speaker controls, connection status, salesperson captions |
 | `/` | Demo/operator | `src/App.tsx` | Prototype selector; the Prototype 2 tab hosts the salesperson dashboard |
 
 The customer route never renders the salesperson dashboard, the prototype tab
-bar, or the AI suggestion feed. The salesperson route never renders the
+bar, AI status or error text, "AI heard"/listening indicators, AI suggestion
+cards, private notes or diagnostics. The salesperson route never renders the
 customer join screen. **A URL parameter such as `?role=customer` grants
 nothing**: `/` with `?prototype=2&room=...&role=customer` renders an explicit
 "invalid invitation" customer screen, and any `/sales` visit creates or restores
 *that browser's own* session using a stored secret.
+
+### Customer privacy is enforced server-side
+
+* The customer's `joined` / `session_state` payload is built by `stateFor()`,
+  which strips the internal `aiReady` flag (evidence that an Ultravox call
+  exists) and the invitation-redeem response does the same.
+* `ai_suggestion` and `customer_speech_transcript` are customer-only senders and
+  are relayed to the salesperson only; `salesperson_caption` is
+  salesperson-only and relayed to the customer only. Any other sender gets
+  `INVALID_SIGNALING_ROLE`.
+* The customer UI renders no AI state at all. AI recovery (retry) happens in the
+  background without surfacing AI status or errors.
+* Limitation: the Ultravox session runs in the customer's own browser (the
+  preserved architecture), so the AI text is produced on that device. It is
+  never *rendered* there and never returns over signaling, but the server cannot
+  withhold a value that the customer's own page generated.
+
+### Invitations are separate from calls
+
+`/sales` creates an invitation and then shows a dedicated invitation screen
+(link, Copy Link, Back to Dashboard). Creating another invitation calls
+`POST /api/sessions` and never rotates, revokes, disconnects or replaces the
+session of an active call; the dashboard keeps its own session and engine, and
+"Back to Dashboard" returns to it.
 
 ## 2. Authorization and session model
 
@@ -127,6 +152,12 @@ Salesperson browser                          Customer browser
 | A. Customer → AI → salesperson dashboard | Ultravox/LiveKit + WebSocket text relay | Customer runs the `UltravoxSession`; agent transcripts are sent as `ai_suggestion`; the server relays them only to the salesperson of that session |
 | B. Salesperson → customer | WebRTC audio track | Salesperson mic is `addTrack`ed to the PC; the customer's `<audio>` plays it |
 | C. Customer → salesperson | WebRTC audio track | Customer mic is `addTrack`ed to the PC; the salesperson's `<audio>` plays it |
+| D. Salesperson speech caption → customer | Browser `SpeechRecognition` + `salesperson_caption` text relay | The salesperson's browser transcribes its own microphone locally and sends text; the server relays it to the paired customer only. The salesperson microphone is never published to Ultravox and never mixed into the customer's AI audio path. |
+
+If the browser has no `SpeechRecognition` (Firefox, some Safari builds), the
+salesperson dashboard reports "Captions unavailable in this browser" and the
+call continues normally; the customer simply sees no captions. Muting the
+salesperson pauses recognition.
 
 AI output is **text-only** in Prototype 2 (`Medium.TEXT` + `muteSpeaker()`), so
 the AI can never talk over the salesperson. The salesperson has no Ultravox

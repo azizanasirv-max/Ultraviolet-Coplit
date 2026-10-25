@@ -407,6 +407,35 @@ test('prototype2 signaling protocol', async (t) => {
     for (const socket of [salesA, customerA, salesB, customerB, intruder]) socket.close();
   });
 
+  await t.test('creating a second invitation never touches the first session', async () => {
+    const first = await createFixture(harness.base, 'First');
+    const before = await get(harness.base, `/api/sessions/${first.sessionId}`, first.salespersonKey);
+    assert.equal(before.status, 200);
+
+    // A salesperson creating another invitation means a brand-new session; the
+    // original session, its invitation and its customer credential stay valid.
+    const second = await post(harness.base, '/api/sessions', { label: 'Second' });
+    assert.equal(second.status, 201);
+    assert.notEqual(second.body.sessionId, first.sessionId);
+    assert.notEqual(second.body.inviteUrl, first.inviteUrl);
+
+    const after = await get(harness.base, `/api/sessions/${first.sessionId}`, first.salespersonKey);
+    assert.equal(after.status, 200);
+    assert.equal(after.body.session.sessionId, first.sessionId);
+    assert.equal(after.body.session.invitationStatus, before.body.session.invitationStatus);
+    assert.equal(after.body.session.invitationExpiresAt, before.body.session.invitationExpiresAt);
+
+    // The original invitation is still the same one and still redeemable state-wise.
+    const socket = await openSocket(harness.base);
+    const joined = await join(socket, {
+      sessionId: first.sessionId,
+      role: 'customer',
+      credential: first.customerKey,
+    });
+    assert.equal(joined.type, 'joined');
+    socket.close();
+  });
+
   await t.test('reconnection reuses the participant instead of duplicating it', async () => {
     const fixture = await createFixture(harness.base);
     const first = await openSocket(harness.base);
