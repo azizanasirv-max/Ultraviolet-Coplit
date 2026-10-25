@@ -143,6 +143,8 @@ export interface CallEngineOptions {
   createAiSession?: () => UltravoxSession;
   /** Test seam: override automatic AI recovery backoff (ms per attempt). */
   aiRetryDelaysMs?: readonly number[];
+  /** Test seam: override the bounded ICE restart backoff (ms per attempt). */
+  iceRestartDelaysMs?: readonly number[];
 }
 
 const RECONNECT_BASE_DELAY_MS = 800;
@@ -150,6 +152,23 @@ const RECONNECT_MAX_DELAY_MS = 8000;
 const MAX_RECONNECT_ATTEMPTS = 8;
 const JOIN_ACK_TIMEOUT_MS = 10000;
 const MAX_LOGS = 140;
+
+/**
+ * ICE recovery policy.
+ *
+ * A failed ICE negotiation is retried a bounded number of times with a backoff.
+ * Without a bound, every `failed`/`disconnected` event on both the connection
+ * and the ICE transport produced a fresh restart offer forever, which spams
+ * signaling and keeps a hopeless STUN-only call alive instead of reporting the
+ * real problem. The customer cannot offer (the salesperson is the only offerer),
+ * so it asks the salesperson to restart over signaling instead.
+ */
+const MAX_ICE_RESTART_ATTEMPTS = 3;
+const ICE_RESTART_DELAYS_MS = [0, 2000, 6000] as const;
+/** `disconnected` is often transient. Give the transport a moment to recover. */
+const ICE_DISCONNECTED_GRACE_MS = 4000;
+/** Informational only: flags a pair that gathered no candidate at all. */
+const ICE_GATHER_TIMEOUT_MS = 10000;
 
 /**
  * How long the SDK may spend connecting before the attempt is treated as
@@ -235,6 +254,8 @@ export class CallEngine {
   private audioUnlocked = false;
   private pcGeneration = 0;
   private recoveryInFlight = false;
+  private iceRestartAttempt = 0;
+  private iceRestartInFlight = false;
 
   // Timers
   private reconnectTimer: number | null = null;
@@ -243,6 +264,8 @@ export class CallEngine {
   private statsTimer: number | null = null;
   private reportTimer: number | null = null;
   private micRecoveryTimer: number | null = null;
+  private iceRestartTimer: number | null = null;
+  private iceGatherTimer: number | null = null;
 
   // Negotiation state
   private participantId: string | null = null;
@@ -1157,6 +1180,9 @@ export class CallEngine {
 
   private closePeerConnection(reason: string): void {
     this.pcGeneration += 1;
+    this.clearIceRecovery();
+    this.iceRestartAttempt = 0;
+    this.iceRestartInFlight = false;
     const pc = this.pc;
     this.pc = null;
     if (pc) {
@@ -1244,26 +1270,43 @@ export class CallEngine {
       if (this.pc !== pc || this.pcGeneration !== generation) return;
       this.log(`Peer connection state: ${pc.connectionState}`);
       if (pc.connectionState === 'connected') {
+        const recovered = this.callState !== 'connected';
+        this.noteIceHealthy();
+        if (this.callState !== 'connected') this.lastError = null;
         this.callState = 'connected';
         this.emit();
         void this.resumePlayback();
+        if (recovered) this.log('Peer connection is connected.');
       } else if (pc.connectionState === 'connecting') {
         this.callState = 'connecting';
         this.emit();
       } else if (pc.connectionState === 'disconnected') {
-        this.callState = 'disconnected';
+        // Transient in most browsers. Wait for the transport to recover before
+        // creating a restart offer; otherwise a brief blip restarts ICE.
+        this.callState = 'reconnecting';
         this.emit();
+        void this.attemptIceRestart('peer connection disconnected', ICE_DISCONNECTED_GRACE_MS);
       } else if (pc.connectionState === 'failed') {
-        this.callState = 'failed';
+        this.callState = 'reconnecting';
         this.emit();
-        void this.attemptIceRestart();
+        void this.attemptIceRestart('peer connection failed');
       }
     };
 
     pc.oniceconnectionstatechange = () => {
       if (this.pc !== pc || this.pcGeneration !== generation) return;
       this.log(`ICE connection state: ${pc.iceConnectionState}`);
-      if (pc.iceConnectionState === 'failed') void this.attemptIceRestart();
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        this.noteIceHealthy();
+      } else if (pc.iceConnectionState === 'disconnected') {
+        this.callState = 'reconnecting';
+        this.emit();
+        void this.attemptIceRestart('ICE disconnected', ICE_DISCONNECTED_GRACE_MS);
+      } else if (pc.iceConnectionState === 'failed') {
+        this.callState = 'reconnecting';
+        this.emit();
+        void this.attemptIceRestart('ICE failed');
+      }
     };
 
     pc.ontrack = (event) => {
@@ -1291,48 +1334,242 @@ export class CallEngine {
         this.emit();
       };
     };
+
+    this.startIceGatherWatchdog(pc, generation);
   }
 
-  private async makeOffer(options: { iceRestart?: boolean; reason?: string } = {}): Promise<void> {
+  private async makeOffer(options: { iceRestart?: boolean; reason?: string } = {}): Promise<boolean> {
     const pc = this.pc;
     if (!pc || !this.peerParticipantId) {
       this.log('Offer skipped: no peer connection or peer.');
-      return;
+      return false;
     }
     if (this.options.role !== 'salesperson') {
       this.log('Offer skipped: the customer is the answerer.');
-      return;
+      return false;
     }
     if (this.makingOffer) {
       this.log('Offer skipped: another offer is being negotiated.');
-      return;
+      return false;
     }
     if (pc.signalingState !== 'stable') {
       this.log(`Offer skipped: signalingState is "${pc.signalingState}".`);
-      return;
+      return false;
     }
 
     this.makingOffer = true;
     try {
       const offer = await pc.createOffer(options.iceRestart ? { iceRestart: true } : undefined);
-      if (this.pc !== pc) return;
+      if (this.pc !== pc) return false;
       await pc.setLocalDescription(offer);
-      if (!pc.localDescription) return;
+      if (!pc.localDescription) return false;
       const sent = this.sendSignal({ type: 'offer', offer: pc.localDescription });
       this.log(
         `${options.iceRestart ? 'ICE-restart offer' : 'Offer'} ${sent ? 'sent' : 'not sent (signaling unavailable)'}${options.reason ? ` [${options.reason}]` : ''}.`
       );
+      return sent;
     } catch (err) {
       this.log(`Failed to create/send offer: ${(err as Error)?.message || err}`);
+      return false;
     } finally {
       this.makingOffer = false;
     }
   }
 
-  private async attemptIceRestart(): Promise<void> {
-    if (!this.pc || this.options.role !== 'salesperson') return;
-    this.log('Attempting ICE restart after a failed connection.');
-    await this.makeOffer({ iceRestart: true, reason: 'ICE failure' });
+  /**
+   * Bounded ICE recovery.
+   *
+   * `failed` and `disconnected` can both fire on the connection and on the ICE
+   * transport; the timer/in-flight guards collapse those into one restart per
+   * attempt. The budget is reset only when media actually connects again, so a
+   * network that cannot carry peer-to-peer media is reported instead of being
+   * retried forever.
+   */
+  private async attemptIceRestart(reason = 'connection failure', delayOverride?: number): Promise<void> {
+    if (this.stopped || this.intentionalLeave) return;
+    if (!this.pc || !this.peerParticipantId) return;
+
+    if (this.options.role === 'customer') {
+      // Only the salesperson may create offers (glare-free by design). Ask it
+      // to restart instead, so a customer-side ICE failure is recoverable too.
+      this.requestIceRestart(reason, delayOverride);
+      return;
+    }
+
+    if (this.iceRestartTimer !== null || this.iceRestartInFlight) return;
+    if (this.iceRestartAttempt >= MAX_ICE_RESTART_ATTEMPTS) {
+      this.failIceRecovery(reason);
+      return;
+    }
+
+    const attempt = this.iceRestartAttempt + 1;
+    this.iceRestartAttempt = attempt;
+    const delays = this.options.iceRestartDelaysMs ?? ICE_RESTART_DELAYS_MS;
+    const delay = Math.max(
+      0,
+      delayOverride ?? delays[Math.min(attempt - 1, delays.length - 1)] ?? 0
+    );
+
+    if (this.callState !== 'reconnecting') {
+      this.callState = 'reconnecting';
+      this.emit();
+    }
+    this.log(
+      `ICE restart ${attempt}/${MAX_ICE_RESTART_ATTEMPTS} scheduled in ${delay}ms (${reason}).`
+    );
+
+    this.iceRestartTimer = window.setTimeout(() => {
+      this.iceRestartTimer = null;
+      void this.runIceRestart(reason);
+    }, delay);
+  }
+
+  private async runIceRestart(reason: string): Promise<void> {
+    if (this.iceRestartInFlight) return;
+    const pc = this.pc;
+    this.iceRestartInFlight = true;
+    let sent = false;
+    try {
+      sent = await this.makeOffer({
+        iceRestart: true,
+        reason: `ICE recovery ${this.iceRestartAttempt}/${MAX_ICE_RESTART_ATTEMPTS}: ${reason}`,
+      });
+    } finally {
+      this.iceRestartInFlight = false;
+    }
+
+    // The peer connection was replaced while the offer was being created.
+    if (this.pc !== pc) return;
+
+    // A skipped offer (negotiation in flight, signaling not open) is not proof
+    // that recovery was attempted. Retry within the same bounded budget.
+    if (
+      !sent &&
+      !this.stopped &&
+      !this.intentionalLeave &&
+      this.iceRestartAttempt < MAX_ICE_RESTART_ATTEMPTS &&
+      this.pc &&
+      this.peerParticipantId
+    ) {
+      await this.attemptIceRestart(`${reason}; offer deferred`);
+    }
+  }
+
+  /** Customer side: ask the salesperson to send a fresh ICE-restart offer. */
+  private requestIceRestart(reason: string, delayOverride?: number): void {
+    if (this.options.role !== 'customer' || this.stopped || this.intentionalLeave) return;
+    if (!this.pc || !this.peerParticipantId || this.iceRestartTimer !== null) return;
+    if (this.iceRestartAttempt >= MAX_ICE_RESTART_ATTEMPTS) {
+      this.failIceRecovery(reason);
+      return;
+    }
+
+    const attempt = this.iceRestartAttempt + 1;
+    this.iceRestartAttempt = attempt;
+    const delays = this.options.iceRestartDelaysMs ?? ICE_RESTART_DELAYS_MS;
+    const delay = Math.max(
+      0,
+      delayOverride ?? delays[Math.min(attempt - 1, delays.length - 1)] ?? 0
+    );
+
+    if (this.callState !== 'reconnecting') {
+      this.callState = 'reconnecting';
+      this.emit();
+    }
+    this.log(
+      `Requesting an ICE restart from the salesperson in ${delay}ms (attempt ${attempt}/${MAX_ICE_RESTART_ATTEMPTS}; ${reason}).`
+    );
+
+    this.iceRestartTimer = window.setTimeout(() => {
+      this.iceRestartTimer = null;
+      if (!this.pc || !this.peerParticipantId) return;
+      const sent = this.sendSignal({
+        type: 'ice_restart_request',
+        reason: String(reason).slice(0, 120),
+      });
+      this.log(
+        sent
+          ? 'ICE restart requested over signaling.'
+          : 'ICE restart request could not be sent (signaling unavailable).'
+      );
+      if (!sent && this.iceRestartAttempt < MAX_ICE_RESTART_ATTEMPTS) {
+        this.requestIceRestart(`${reason}; signaling unavailable`);
+      }
+    }, delay);
+  }
+
+  private clearIceRecovery(): void {
+    if (this.iceRestartTimer !== null) {
+      window.clearTimeout(this.iceRestartTimer);
+      this.iceRestartTimer = null;
+    }
+    if (this.iceGatherTimer !== null) {
+      window.clearTimeout(this.iceGatherTimer);
+      this.iceGatherTimer = null;
+    }
+  }
+
+  /** A connected transport makes the next failure a fresh problem. */
+  private noteIceHealthy(): void {
+    if (this.iceRestartAttempt > 0) {
+      this.log('Peer connection is healthy again; ICE restart budget reset.');
+    }
+    this.iceRestartAttempt = 0;
+    if (this.iceRestartTimer !== null) {
+      window.clearTimeout(this.iceRestartTimer);
+      this.iceRestartTimer = null;
+    }
+  }
+
+  private failIceRecovery(reason: string): void {
+    this.lastError = this.describeIceFailure(reason);
+    if (this.callState !== 'failed') {
+      this.callState = 'failed';
+      this.log(`ICE recovery exhausted: ${this.lastError}`);
+      this.emit();
+    }
+  }
+
+  /**
+   * The actionable cause, not a generic "connection failed": a deployment
+   * without TURN can only succeed when a direct path exists.
+   */
+  private describeIceFailure(reason: string): string {
+    if (!this.iceConfig.turn.configured) {
+      return (
+        'The audio connection failed: this deployment has no TURN relay configured, so the two ' +
+        'devices could only connect directly and this network blocks peer-to-peer media ' +
+        '(mobile data, symmetric NAT or a corporate firewall). Configure TURN on the server ' +
+        '(TURN_URLS with TURN_SECRET, or TURN_CREDENTIALS_URL) and retry.'
+      );
+    }
+    if (this.iceConfig.iceTransportPolicy === 'relay' && this.candidateTypes.relay === 0) {
+      return (
+        'The audio connection failed: relay-only ICE is enabled but no TURN relay candidate was ' +
+        'gathered. Verify TURN_URLS, the credentials and that the relay is reachable over UDP/TCP.'
+      );
+    }
+    return (
+      `The audio connection failed after ${MAX_ICE_RESTART_ATTEMPTS} recovery attempts (${reason}). ` +
+      'Check both networks; a reachable TURN relay is required when direct connectivity is blocked.'
+    );
+  }
+
+  /** Diagnostics only: never fails the call, never retries gathering. */
+  private startIceGatherWatchdog(pc: RTCPeerConnection, generation: number): void {
+    if (this.iceGatherTimer !== null) window.clearTimeout(this.iceGatherTimer);
+    this.iceGatherTimer = window.setTimeout(() => {
+      this.iceGatherTimer = null;
+      if (this.pc !== pc || this.pcGeneration !== generation) return;
+      const total = Object.values(this.candidateTypes).reduce((sum, count) => sum + count, 0);
+      if (total === 0) {
+        this.log(
+          'ICE gathering produced no candidates within 10s. STUN/TURN may be blocked by the network, ' +
+            'or the ICE configuration could not be used.'
+        );
+        this.emit();
+      }
+    }, ICE_GATHER_TIMEOUT_MS);
   }
 
   // -------------------------------------------------------------------------
@@ -1539,6 +1776,8 @@ export class CallEngine {
     if (type === 'peer_left') {
       if (data.participantId !== this.peerParticipantId) return;
       this.log(`Peer left (${data.role || 'unknown'}).`);
+      this.clearIceRecovery();
+      this.iceRestartAttempt = 0;
       this.closePeerConnection('peer left');
       this.peerParticipantId = null;
       this.peerRole = null;
@@ -1559,6 +1798,14 @@ export class CallEngine {
         this.aiReconnectRequestedAt = null;
       }
       this.emit();
+      return;
+    }
+
+    if (type === 'ice_restart_request') {
+      if (this.options.role !== 'salesperson') return;
+      const reason = typeof data.reason === 'string' ? data.reason.slice(0, 120) : 'peer request';
+      this.log(`The customer requested an ICE restart (${reason}).`);
+      void this.attemptIceRestart(`peer request: ${reason}`);
       return;
     }
 

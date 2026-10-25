@@ -1020,6 +1020,21 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
         return;
       }
 
+      if (type === 'ice_restart_request') {
+        if (state.role !== 'customer') {
+          rejectMessage(
+            session.sessionId,
+            'INVALID_SIGNALING_ROLE',
+            'Only the customer may request an ICE restart.'
+          );
+          return;
+        }
+        relayToCounterpart(session, current, 'ice_restart_request', {
+          reason: typeof data.reason === 'string' ? data.reason.slice(0, 120) : 'peer request',
+        });
+        return;
+      }
+
       if (type === 'offer') {
         if (state.role !== 'salesperson') {
           rejectMessage(session.sessionId, 'INVALID_SIGNALING_ROLE', 'Only the salesperson may send an offer.');

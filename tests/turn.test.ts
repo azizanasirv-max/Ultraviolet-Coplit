@@ -240,6 +240,27 @@ test('provider failures are actionable and leak no URL or auth header', async ()
     }),
     /could not be reached/i
   );
+
+  // Some fetch/runtime errors echo the full request URL. It may contain the
+  // provider API key (Metered style), so it must never reach a log or payload.
+  const echoesUrl = (async () => {
+    throw new Error(
+      'Failed to parse URL from https://app.metered.live/api/v1/turn/credentials?apiKey=super-secret'
+    );
+  }) as unknown as typeof fetch;
+  await assert.rejects(
+    fetchProviderIceServers({
+      credentialsUrl: 'https://app.metered.live/api/v1/turn/credentials?apiKey=super-secret',
+      fetchImpl: echoesUrl,
+      cache: new Map(),
+    }),
+    (error: Error) => {
+      assert.ok(!error.message.includes('super-secret'));
+      assert.ok(!error.message.includes('app.metered.live'));
+      assert.match(error.message, /provider-url/);
+      return true;
+    }
+  );
 });
 
 test('provider success replaces TURN entries; failure is fatal only for relay policy', () => {
@@ -272,6 +293,33 @@ test('provider success replaces TURN entries; failure is fatal only for relay po
   assert.equal(failedAll.providerOk, false);
   assert.equal(failedAll.config.hasTurn, false);
   assert.ok(failedAll.config.warnings.some((warning) => warning.includes('provider down')));
+
+  // A provider deployment may also carry TURN_URLS. Those entries have no
+  // usable credential when the provider fails, so they must not be sent to the
+  // browser (the relay would reject every allocation).
+  const providerWithUrls = buildIceConfig({
+    env: {
+      TURN_CREDENTIALS_URL: 'https://provider.invalid/creds',
+      TURN_URLS: 'turn:turn.example.com:3478?transport=udp',
+      TURN_USERNAME: 'stale-user',
+      TURN_CREDENTIAL: 'stale-pass',
+    },
+  });
+  const failedWithUrls = mergeProviderIceServers(providerWithUrls, null, new Error('provider down'));
+  assert.equal(failedWithUrls.config.hasTurn, false);
+  assert.equal(
+    failedWithUrls.config.iceServers.some((entry) =>
+      (Array.isArray(entry.urls) ? entry.urls : [entry.urls]).some((url) => /^turns?:/i.test(url))
+    ),
+    false,
+    'unauthenticated TURN entries are dropped'
+  );
+  assert.ok(
+    failedWithUrls.config.iceServers.some((entry) =>
+      (Array.isArray(entry.urls) ? entry.urls : [entry.urls]).some((url) => /^stuns?:/i.test(url))
+    ),
+    'STUN is still available for a direct path'
+  );
 
   const relayBase = buildIceConfig({
     env: { TURN_CREDENTIALS_URL: 'https://provider.invalid/creds', ICE_TRANSPORT_POLICY: 'relay' },

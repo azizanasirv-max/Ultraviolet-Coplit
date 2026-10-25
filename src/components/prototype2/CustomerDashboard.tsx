@@ -254,6 +254,13 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
             The call could not start on this network. Ask the salesperson to check the call setup.
           </Banner>
         ) : null}
+        {snapshot?.callState === 'failed' && !snapshot.iceConfigError ? (
+          <Banner tone="red" title="Audio connection failed" testId="connection-failed">
+            {snapshot.turnConfigured
+              ? 'The audio path could not be established. Check your connection and tap Reconnect.'
+              : 'This network blocks a direct audio path. Ask the salesperson to enable the call relay (TURN) on the server, then tap Reconnect.'}
+          </Banner>
+        ) : null}
         {snapshot?.diagnostics.iceTransportPolicy === 'relay' && snapshot.relayCandidates === 0 ? (
           <Banner tone="red" title="No audio path available" testId="relay-warning">
             This network could not reach the call relay. Check your connection and try reconnect.

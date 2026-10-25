@@ -140,6 +140,39 @@ servers for 5 minutes; the provider API key stays server-side.
 is delivered to every authorized browser and cannot be rotated per session.
 Use only as a fallback.
 
+### D. Selected provider for this deployment: Metered (managed, no VPS)
+
+This is the lowest-operations option on Render: the relay is hosted, and the
+server obtains short-lived credentials from Metered at request time. Nothing
+long-lived is shipped to a browser.
+
+1. Create a Metered TURN credential (Dashboard → TURN Server & SFU →
+   Credentials). Note the credential's API key and your app domain
+   (`<appname>.metered.live`). Allow up to two minutes for propagation.
+2. Set exactly these Render environment variables (do **not** also set
+   `TURN_URLS`/`TURN_SECRET`/`TURN_USERNAME`/`TURN_CREDENTIAL`; provider mode
+   takes precedence and mixing them only adds noise):
+
+   ```text
+   TURN_CREDENTIALS_URL=https://<appname>.metered.live/api/v1/turn/credentials?apiKey=<API_KEY>
+   TURN_CREDENTIALS_METHOD=GET
+   TURN_TTL_SECONDS=3600
+   ICE_TRANSPORT_POLICY=all
+   ```
+
+   `TURN_CREDENTIALS_AUTH` is not needed for Metered (the key is in the
+   server-side URL). Mark `TURN_CREDENTIALS_URL` as a Render secret: the URL
+   contains the API key. The server never logs the URL, only the number of
+   entries returned.
+3. Keep `ICE_TRANSPORT_POLICY=all` until a real device test shows relay
+   candidates and media flowing. Then you may temporarily set `relay` to prove
+   that media traverses the relay; return it to `all` afterwards.
+
+Metered's response is `[{urls, username, credential}, ...]` and includes both
+STUN and TURN entries; the server keeps its own STUN list and uses the
+credentialed TURN entries. See
+<https://www.metered.ca/docs/turn-rest-api/get-credential/>.
+
 ### Verification mode
 
 `ICE_TRANSPORT_POLICY=relay` forces every candidate through TURN. With no usable

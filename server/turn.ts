@@ -168,6 +168,16 @@ export const resolveTurnSettings = (env: NodeJS.ProcessEnv = process.env): TurnS
 const redactUrl = (url: string): string => url.replace(/\/\/[^@/]+@/, '//***@');
 
 /**
+ * Provider errors may echo the request URL (which can contain an API key in
+ * query form, e.g. Metered) or a token from a custom endpoint. Strip both
+ * before the message reaches logs or an authenticated browser response.
+ */
+const sanitizeProviderError = (message: string): string =>
+  String(message)
+    .replace(/https?:\/\/[^\s)"']+/gi, '[provider-url]')
+    .replace(/\b(api[_-]?key|key|token|secret|authorization)=([^&\s)"']+)/gi, '$1=[redacted]');
+
+/**
  * Builds the ICE configuration for one authenticated participant.
  *
  * `errors` are fatal only in the sense that the deployment is misconfigured; the
@@ -397,7 +407,9 @@ export const fetchProviderIceServers = async (params: {
     });
   } catch (err) {
     throw new Error(
-      `TURN_CREDENTIALS_URL could not be reached (${(err as Error)?.message || err}). Check the URL and network egress.`
+      `TURN_CREDENTIALS_URL could not be reached (${sanitizeProviderError(
+        String((err as Error)?.message || err)
+      )}). Check the URL and network egress.`
     );
   } finally {
     clearTimeout(timer);
@@ -457,10 +469,19 @@ export const mergeProviderIceServers = (
 
   const message = error?.message || 'TURN credential provider failed.';
   const isRelay = base.iceTransportPolicy === 'relay';
+  // A provider-issued TURN entry needs a temporary username/credential. When
+  // the provider is unavailable, any TURN URL left over from TURN_URLS would be
+  // sent without credentials and rejected by the relay (noisy allocation
+  // failures). Keep only STUN; report the provider failure explicitly.
+  const safeIceServers = base.iceServers.filter((entry) => {
+    const urls = Array.isArray(entry.urls) ? entry.urls : [entry.urls];
+    return !urls.some((url) => /^turns?:/i.test(url));
+  });
   return {
     providerOk: false,
     config: {
       ...base,
+      iceServers: safeIceServers,
       hasTurn: false,
       warnings: isRelay ? base.warnings : [...base.warnings, message],
       errors: [...base.errors, message],

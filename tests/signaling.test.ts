@@ -249,6 +249,28 @@ test('prototype2 signaling protocol', async (t) => {
     const reverseIce = await customer.next((message) => message.type === 'ice_candidate');
     assert.match(reverseIce.candidate.candidate, /5001/);
 
+    // The customer cannot offer, so it may ask the salesperson to restart ICE.
+    customer.send({
+      type: 'ice_restart_request',
+      sessionId: fixture.sessionId,
+      reason: 'customer ICE failed',
+    });
+    const restartRequest = await salesperson.next((message) => message.type === 'ice_restart_request');
+    assert.equal(restartRequest.from, customerJoin.participantId);
+    assert.equal(restartRequest.fromRole, 'customer');
+    assert.equal(restartRequest.reason, 'customer ICE failed');
+
+    // Only the customer may ask for a restart; the salesperson already offers.
+    salesperson.send({
+      type: 'ice_restart_request',
+      sessionId: fixture.sessionId,
+      reason: 'not allowed',
+    });
+    const restartRejection = await salesperson.next(
+      (message) => message.type === 'error' && message.code === 'INVALID_SIGNALING_ROLE'
+    );
+    assert.equal(restartRejection.code, 'INVALID_SIGNALING_ROLE');
+
     // A. customer AI text -> salesperson only
     customer.send({
       type: 'ai_suggestion',
