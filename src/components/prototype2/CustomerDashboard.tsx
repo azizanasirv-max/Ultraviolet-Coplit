@@ -92,9 +92,17 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
       const stored = loadCustomerSession(inviteToken);
       const result = await redeemInvitation(inviteToken, stored?.customerKey);
       if (!mountedRef.current) return;
+      // A 2xx response without the fields the screen needs must not be treated
+      // as success: rendering with a partial payload would crash the tree.
+      if (!result || typeof result.sessionId !== 'string' || typeof result.customerKey !== 'string') {
+        setStatus('invalid');
+        setErrorCode('UNEXPECTED_RESPONSE');
+        setErrorMessage('The server returned an unexpected response. Please try again or ask for a new invitation.');
+        return;
+      }
       saveCustomerSession(inviteToken, { sessionId: result.sessionId, customerKey: result.customerKey });
       setRedeemed(result);
-      setSessionState(result.session);
+      setSessionState(result.session ?? null);
       setStatus('ready');
     } catch (err) {
       if (!mountedRef.current) return;
@@ -108,6 +116,26 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
   useEffect(() => {
     void redeem();
   }, [redeem]);
+
+  /**
+   * AI recovery is internal bookkeeping. The customer screen never renders AI
+   * status, errors, transcripts or suggestions; if the AI session drops it is
+   * retried a few times in the background and the human call is unaffected.
+   *
+   * NOTE: this hook must stay ABOVE the loading/invalid early returns. A hook
+   * after them changes the hook order once the invitation resolves, which makes
+   * React unmount the tree and leaves the customer with a blank page.
+   */
+  const aiRetriesRef = useRef(0);
+  useEffect(() => {
+    if (!joined || snapshot?.aiStatus !== 'error') return;
+    if (aiRetriesRef.current >= 3) return;
+    const timer = window.setTimeout(() => {
+      aiRetriesRef.current += 1;
+      void engineRef.current?.retryAi();
+    }, 4000);
+    return () => window.clearTimeout(timer);
+  }, [joined, snapshot?.aiStatus]);
 
   const joinCall = async () => {
     if (!redeemed || engineRef.current) return;
@@ -185,24 +213,6 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
       </div>
     );
   }
-
-
-
-  /**
-   * AI recovery is internal bookkeeping. The customer screen never renders AI
-   * status, errors, transcripts or suggestions; if the AI session drops it is
-   * retried a few times in the background and the human call is unaffected.
-   */
-  const aiRetriesRef = useRef(0);
-  useEffect(() => {
-    if (!joined || snapshot?.aiStatus !== 'error') return;
-    if (aiRetriesRef.current >= 3) return;
-    const timer = window.setTimeout(() => {
-      aiRetriesRef.current += 1;
-      void engineRef.current?.retryAi();
-    }, 4000);
-    return () => window.clearTimeout(timer);
-  }, [joined, snapshot?.aiStatus]);
 
   const callState = callStateLabel(snapshot);
   const salespersonConnected = Boolean(snapshot?.peerParticipantId);
