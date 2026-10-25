@@ -12,6 +12,15 @@
  * always the answerer. This removes glare by construction.
  */
 import { UltravoxSession, UltravoxSessionStatus, Role, Medium } from 'ultravox-client';
+import {
+  AI_RECONNECT_DELAYS_MS,
+  AI_RECONNECT_MAX_ATTEMPTS,
+  AiStatus,
+  AiLifecycleState,
+  emptyAiStatus,
+  isLiveAiStatus,
+  sanitizeAiDetail,
+} from './aiStatus';
 import { ApiError, getIceConfig, IceConfigResponse } from './sessionApi';
 
 export type ParticipantRole = 'customer' | 'salesperson';
@@ -82,8 +91,12 @@ export interface EngineSnapshot {
   speakerMuted: boolean;
   audioUnlocked: boolean;
   playbackBlocked: boolean;
-  aiStatus: UltravoxSessionStatus | 'off' | 'error';
+  aiStatus: UltravoxSessionStatus | AiLifecycleState;
   aiError: string | null;
+  /** Full AI lifecycle state (local for the customer, reported for the salesperson). */
+  ai: AiStatus;
+  /** Salesperson only: when they asked the customer device to restart the AI. */
+  aiReconnectRequestedAt: number | null;
   suggestions: SuggestionCard[];
   customerSpeech: string;
   /**
@@ -123,6 +136,13 @@ export interface CallEngineOptions {
   enableAi?: boolean;
   /** Notified when the server rotates/returns the resume token. */
   onResumeToken?: (token: string) => void;
+  /**
+   * Test seam: replace the real `UltravoxSession`. Production never sets this.
+   * The fake must implement the same subset of the SDK API.
+   */
+  createAiSession?: () => UltravoxSession;
+  /** Test seam: override automatic AI recovery backoff (ms per attempt). */
+  aiRetryDelaysMs?: readonly number[];
 }
 
 const RECONNECT_BASE_DELAY_MS = 800;
@@ -130,6 +150,14 @@ const RECONNECT_MAX_DELAY_MS = 8000;
 const MAX_RECONNECT_ATTEMPTS = 8;
 const JOIN_ACK_TIMEOUT_MS = 10000;
 const MAX_LOGS = 140;
+
+/**
+ * How long the SDK may spend connecting before the attempt is treated as
+ * failed and a fresh call is requested. The SDK has no public connect timeout.
+ */
+const AI_CONNECT_TIMEOUT_MS = 20000;
+/** Bounded teardown: `leaveCall()` must never delay leaving the human call. */
+const AI_LEAVE_TIMEOUT_MS = 1500;
 
 // Used only before the authenticated payload arrives; start() aborts if the
 // real configuration cannot be fetched, so this never silently goes live.
@@ -195,6 +223,7 @@ export class CallEngine {
   private remoteStream: MediaStream | null = null;
   private audioElement: HTMLAudioElement | null = null;
   private ultravox: UltravoxSession | null = null;
+  private readonly createAiSession: () => UltravoxSession;
 
   // Lifecycle flags
   private started = false;
@@ -204,7 +233,6 @@ export class CallEngine {
   private joinedThisSocket = false;
   private makingOffer = false;
   private audioUnlocked = false;
-  private aiStarting = false;
   private pcGeneration = 0;
   private recoveryInFlight = false;
 
@@ -241,6 +269,16 @@ export class CallEngine {
   private remoteTrackState: EngineSnapshot['remoteTrackState'] = 'none';
   private aiStatus: EngineSnapshot['aiStatus'] = 'off';
   private aiError: string | null = null;
+  private ai: AiStatus = emptyAiStatus('local');
+  /** Incremented on every new/stopped session; stale callbacks are ignored. */
+  private aiGeneration = 0;
+  private aiOperationInFlight = false;
+  private aiRecoveryAttempt = 0;
+  private aiRecoveryTimer: number | null = null;
+  private aiConnectTimer: number | null = null;
+  private aiEverConnected = false;
+  private aiConnectedSince: number | null = null;
+  private aiReconnectRequestedAt: number | null = null;
   private suggestions: SuggestionCard[] = [];
   private customerSpeech = '';
   private captionStatus: EngineSnapshot['captionStatus'] = 'off';
@@ -285,6 +323,8 @@ export class CallEngine {
     this.apiBase = options.apiBase ?? '';
     this.resumeToken = options.resumeToken ?? null;
     this.silentClip = silentClipUrl();
+    this.createAiSession = options.createAiSession ?? (() => new UltravoxSession());
+    this.ai = emptyAiStatus(options.role === 'customer' ? 'local' : 'remote');
   }
 
   // -------------------------------------------------------------------------
@@ -313,6 +353,8 @@ export class CallEngine {
       playbackBlocked: this.playbackBlocked,
       aiStatus: this.aiStatus,
       aiError: this.aiError,
+      ai: this.ai,
+      aiReconnectRequestedAt: this.aiReconnectRequestedAt,
       suggestions: this.suggestions,
       customerSpeech: this.customerSpeech,
       captionStatus: this.captionStatus,
@@ -825,6 +867,15 @@ export class CallEngine {
     if (this.options.role === 'salesperson') {
       if (muted) this.pauseCaptions();
       else this.resumeCaptions();
+    }
+
+    if (this.options.role === 'customer' && this.ai.state !== 'off') {
+      this.ai = {
+        ...this.ai,
+        audioReachingAi:
+          this.ai.connected && !muted && Boolean(this.ultravox?.micSourceNode),
+      };
+      this.reportAiStatus();
     }
 
     const track = this.localStream?.getAudioTracks()[0];
@@ -1352,7 +1403,15 @@ export class CallEngine {
     this.emit();
 
     if (this.options.role === 'customer' && this.options.enableAi) {
-      void this.startAi();
+      // Start the AI once per engine. Recovery (after a terminal session) is
+      // owned by the bounded AI recovery loop, not by signaling reconnects.
+      if (this.ai.state === 'off') void this.startAi({ replace: true });
+      // Re-publish the live state on the new socket so the server/salesperson
+      // do not keep a state that changed while signaling was down.
+      else this.reportAiStatus();
+    } else if (this.options.role === 'salesperson') {
+      // Last known AI state reported by the customer device (server-persisted).
+      this.hydrateRemoteAi(data.ai ?? data.session?.ai);
     }
   }
 
@@ -1456,6 +1515,7 @@ export class CallEngine {
           'session_state'
         );
       }
+      if (this.options.role === 'salesperson') this.hydrateRemoteAi(data.session?.ai);
       this.emit();
       return;
     }
@@ -1485,6 +1545,19 @@ export class CallEngine {
       this.remoteTrackState = 'none';
       this.callState = 'waiting';
       this.participants = Array.isArray(data.participants) ? data.participants : [];
+      // The AI session lives on the customer device; if the customer is gone the
+      // AI is gone too. Say so instead of leaving a stale "connected" badge.
+      if (this.options.role === 'salesperson' && data.role === 'customer') {
+        this.applyRemoteAi({
+          state: 'disconnected',
+          status: null,
+          connected: false,
+          error: 'The customer device left; the AI session ended with it.',
+          audioReachingAi: false,
+          reconnecting: false,
+        });
+        this.aiReconnectRequestedAt = null;
+      }
       this.emit();
       return;
     }
@@ -1593,6 +1666,41 @@ export class CallEngine {
       return;
     }
 
+    if (type === 'ai_status') {
+      if (this.options.role !== 'salesperson') return;
+      const rawState = typeof data.state === 'string' ? data.state : '';
+      const allowed: AiStatus['state'][] = [
+        'off', 'creating', 'connecting', 'connected', 'reconnecting', 'disconnected', 'closed', 'error',
+      ];
+      const state = (allowed as string[]).includes(rawState)
+        ? (rawState as AiStatus['state'])
+        : 'error';
+      this.applyRemoteAi({
+        state,
+        status: null,
+        connected: data.connected === true && state === 'connected',
+        error: sanitizeAiDetail(data.error),
+        callId: typeof data.callId === 'string' ? data.callId.slice(0, 100) : null,
+        reconnectAttempt:
+          typeof data.reconnectAttempt === 'number' ? Math.max(0, Math.round(data.reconnectAttempt)) : 0,
+        reconnecting: state === 'reconnecting' || state === 'creating' || state === 'connecting',
+        audioReachingAi: data.audioReachingAi === true && state === 'connected',
+        lastResponseAt: typeof data.lastResponseAt === 'number' ? data.lastResponseAt : null,
+        lastSuggestionAt: typeof data.lastSuggestionAt === 'number' ? data.lastSuggestionAt : null,
+        lastEventAt: Date.now(),
+      });
+      return;
+    }
+
+    if (type === 'ai_reconnect') {
+      if (this.options.role !== 'customer') return;
+      this.log('The salesperson requested a fresh AI session.');
+      this.aiRecoveryAttempt = 0;
+      this.clearAiRecoveryTimer();
+      void this.startAi({ replace: true });
+      return;
+    }
+
     if (type === 'ai_suggestion') {
       if (this.options.role !== 'salesperson') return;
       const text = typeof data.text === 'string' ? data.text.trim() : '';
@@ -1620,6 +1728,15 @@ export class CallEngine {
           },
         ].sort((a, b) => a.ordinal - b.ordinal);
       }
+      // A suggestion is proof that the live AI produced a response, even if a
+      // status message was lost.
+      this.ai = {
+        ...this.ai,
+        source: 'remote',
+        lastSuggestionAt: Date.now(),
+        lastResponseAt: Date.now(),
+      };
+      this.aiReconnectRequestedAt = null;
       this.emit();
       return;
     }
@@ -1663,59 +1780,178 @@ export class CallEngine {
   // never enter the customer -> AI pipeline.
   // -------------------------------------------------------------------------
 
-  private async startAi(): Promise<void> {
-    if (this.options.role !== 'customer' || this.ultravox || this.aiStarting) return;
-    this.aiStarting = true;
+  /**
+   * Requests a genuinely new Ultravox call and connects a new SDK session.
+   *
+   * Replacement is the supported recovery path: Ultravox calls are finite, the
+   * SDK has no reconnect API, and a join URL belongs to one call. The server's
+   * cached call is never reused after a failure.
+   */
+  private async startAi(options: { replace?: boolean; recovery?: boolean } = {}): Promise<void> {
+    if (this.options.role !== 'customer' || !this.options.enableAi) return;
+    if (this.stopped || this.intentionalLeave) return;
+    if (this.aiOperationInFlight) {
+      this.log('AI start ignored: another AI session operation is already in progress.');
+      return;
+    }
+    // The signaling socket reconnects independently of the AI. If the SDK
+    // session is still live, keep it instead of creating a new (paid) call.
+    if (!options.replace && this.ultravox && this.ai.connected) {
+      this.log('AI session is already connected; not creating another one.');
+      return;
+    }
+
+    this.aiOperationInFlight = true;
+    this.clearAiRecoveryTimer();
+    this.clearAiConnectTimer();
+
+    // Invalidate the previous session before touching it, so its late status,
+    // error or transcript callbacks can never overwrite the new session's state.
+    const generation = ++this.aiGeneration;
+    await this.teardownAiSession('replacing the previous AI session');
+
+    if (this.stopped || this.intentionalLeave || generation !== this.aiGeneration) {
+      // The call was stopped while the previous session was tearing down.
+      this.aiOperationInFlight = false;
+      return;
+    }
+
+    this.setAi({
+      state: options.recovery ? 'reconnecting' : 'creating',
+      status: null,
+      connected: false,
+      error: null,
+      callId: null,
+      reconnectAttempt: options.recovery ? this.aiRecoveryAttempt : 0,
+      reconnecting: Boolean(options.recovery),
+      audioReachingAi: false,
+      lastEventAt: Date.now(),
+    });
+
+    let failure: string | null = null;
     try {
-      this.log('Requesting the session AI call from the server...');
-      const response = await fetch(`${this.apiBase}/api/sessions/${encodeURIComponent(this.options.sessionId)}/ultravox-call`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.options.credential}`,
-        },
-        body: JSON.stringify({}),
-      });
+      this.log('Requesting a new AI call from the server...');
+      const response = await fetch(
+        `${this.apiBase}/api/sessions/${encodeURIComponent(this.options.sessionId)}/ultravox-call`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${this.options.credential}`,
+          },
+          // Explicit replacement: never accept a previously used join URL.
+          body: JSON.stringify({ replace: true }),
+        }
+      );
 
       if (!response.ok) {
-        const errorBody = await response.json().catch(() => ({}));
-        throw new Error(errorBody.message || `AI call request failed (HTTP ${response.status})`);
+        const errorBody = (await response.json().catch(() => ({}))) as {
+          message?: string;
+          error?: string;
+          status?: number;
+        };
+        const code = errorBody.error ? `${errorBody.error}: ` : '';
+        throw new Error(
+          `${code}${errorBody.message || `AI call request failed (HTTP ${response.status})`}` +
+            (errorBody.status ? ` [HTTP ${errorBody.status}]` : '')
+        );
       }
 
-      const call = (await response.json()) as { callId: string; joinUrl: string; isReused: boolean };
-      this.log(`AI call ${call.isReused ? 'reused' : 'created'} (${String(call.callId).slice(0, 8)}).`);
+      const call = (await response.json()) as {
+        callId?: string;
+        joinUrl?: string;
+        isReused?: boolean;
+      };
+      if (!call.callId || !call.joinUrl) throw new Error('The server returned an incomplete AI call.');
+      if (call.isReused) {
+        // Defensive: this client always asks for replacement.
+        throw new Error('The server reused an existing AI call; a fresh call is required.');
+      }
+      if (generation !== this.aiGeneration) return;
 
-      const session = new UltravoxSession();
+      this.log(`New AI call created (${String(call.callId).slice(0, 8)}).`);
+      const session = this.createAiSession();
       this.ultravox = session;
-      this.aiStatus = UltravoxSessionStatus.CONNECTING;
-      this.aiError = null;
-      this.emit();
+      this.aiEverConnected = false;
+      this.aiConnectedSince = null;
+      this.setAi({
+        state: 'connecting',
+        status: UltravoxSessionStatus.CONNECTING,
+        connected: false,
+        error: null,
+        callId: call.callId,
+        audioReachingAi: false,
+        lastEventAt: Date.now(),
+      });
+
+      const isStale = () => generation !== this.aiGeneration || this.ultravox !== session;
 
       session.addEventListener('status', () => {
+        if (isStale()) return; // a previous session must not change this state
         const status = session.status;
-        this.aiStatus = status;
-        this.log(`AI session status: ${status}`);
-        if (status === UltravoxSessionStatus.LISTENING || status === UltravoxSessionStatus.IDLE) {
-          try {
-            // Text-only output: the AI must not speak over the salesperson.
-            session.setOutputMedium(Medium.TEXT);
-            session.muteSpeaker();
-          } catch {
-            // Ignore unsupported output-medium transitions.
+        if (status === UltravoxSessionStatus.DISCONNECTED) {
+          this.failAiSession(
+            generation,
+            'closed',
+            this.aiEverConnected
+              ? 'The AI session ended (the provider closed the session).'
+              : 'The AI session closed before it connected.'
+          );
+          return;
+        }
+        if (status === UltravoxSessionStatus.DISCONNECTING) {
+          this.setAi({
+            state: 'disconnected',
+            status,
+            connected: false,
+            audioReachingAi: false,
+            reconnecting: false,
+            lastEventAt: Date.now(),
+          });
+          return;
+        }
+
+        const connected = isLiveAiStatus(status);
+        if (connected) {
+          this.aiEverConnected = true;
+          if (this.aiConnectedSince === null) this.aiConnectedSince = Date.now();
+          this.clearAiConnectTimer();
+          if (status === UltravoxSessionStatus.LISTENING || status === UltravoxSessionStatus.IDLE) {
+            try {
+              // Text-only output: the AI must not speak over the salesperson.
+              session.setOutputMedium(Medium.TEXT);
+              session.muteSpeaker();
+            } catch {
+              // Ignore unsupported output-medium transitions.
+            }
+          }
+          if (this.micMuted) {
+            try {
+              session.muteMic();
+            } catch {
+              // Ignore.
+            }
           }
         }
-        if (this.micMuted) {
-          try {
-            session.muteMic();
-          } catch {
-            // Ignore.
-          }
-        }
-        this.emit();
+
+        this.setAi({
+          state: connected ? 'connected' : 'connecting',
+          status,
+          connected,
+          error: connected ? null : this.ai.error,
+          reconnecting: false,
+          // Only claim the microphone reaches the AI once the SDK actually
+          // captured and published a local track.
+          audioReachingAi: connected && !this.micMuted && Boolean(session.micSourceNode),
+          lastEventAt: Date.now(),
+        });
       });
 
       session.addEventListener('transcripts', () => {
+        if (isStale()) return;
         const timestamp = new Date().toLocaleTimeString();
+        let lastSuggestionAt = this.ai.lastSuggestionAt;
+        let lastResponseAt = this.ai.lastResponseAt;
         for (const transcript of session.transcripts) {
           if (transcript.speaker === Role.AGENT && transcript.text.trim()) {
             this.sendSignal({
@@ -1725,6 +1961,8 @@ export class CallEngine {
               ordinal: transcript.ordinal,
               timestamp,
             });
+            lastResponseAt = Date.now();
+            if (transcript.isFinal) lastSuggestionAt = lastResponseAt;
           } else if (transcript.speaker === Role.USER) {
             this.customerSpeech = transcript.text;
             if (transcript.isFinal && transcript.text.trim()) {
@@ -1736,49 +1974,293 @@ export class CallEngine {
                 timestamp,
               });
             }
-            this.emit();
           }
         }
+        this.setAi(
+          { lastResponseAt, lastSuggestionAt, lastEventAt: Date.now() },
+          { report: false }
+        );
+        this.reportAiStatus();
       });
 
       session.addEventListener('error', (event) => {
+        if (isStale()) return;
         const error = (event as unknown as { error?: Error }).error;
-        this.aiStatus = 'error';
-        this.aiError = error?.message || 'AI session ended unexpectedly.';
-        this.log(`AI session error: ${this.aiError}`);
-        this.emit();
+        const detail = sanitizeAiDetail(error?.message) || 'The AI session ended unexpectedly.';
+        this.log(`AI session error: ${detail}`);
+        this.failAiSession(generation, 'error', detail);
       });
 
+      // The SDK has no public connect timeout: without this an attempt could
+      // stay in "connecting" forever and never recover.
+      this.aiConnectTimer = window.setTimeout(() => {
+        this.aiConnectTimer = null;
+        if (isStale()) return;
+        this.failAiSession(
+          generation,
+          'error',
+          `Timed out after ${Math.round(AI_CONNECT_TIMEOUT_MS / 1000)}s waiting for the AI session to connect.`
+        );
+      }, AI_CONNECT_TIMEOUT_MS);
+
+      this.log(`Joining the new AI call (${String(call.callId).slice(0, 8)}).`);
       session.joinCall(call.joinUrl);
     } catch (err) {
-      this.aiStatus = 'error';
-      this.aiError = (err as Error)?.message || 'AI setup failed.';
-      this.log(`AI setup failed: ${this.aiError}`);
-      this.emit();
+      failure = sanitizeAiDetail((err as Error)?.message) || 'AI setup failed.';
+      this.log(`AI setup failed: ${failure}`);
     } finally {
-      this.aiStarting = false;
+      this.aiOperationInFlight = false;
+    }
+
+    if (failure !== null) {
+      if (generation !== this.aiGeneration) return;
+      this.setAi({
+        state: 'error',
+        status: null,
+        connected: false,
+        error: failure,
+        audioReachingAi: false,
+        reconnecting: false,
+      });
+      this.scheduleAiRecovery(failure);
     }
   }
 
-  /** Retries AI startup without disturbing the human-to-human audio path. */
-  async retryAi(): Promise<void> {
-    await this.stopAi();
-    this.aiStatus = 'off';
-    this.aiError = null;
+
+  private setAi(
+    patch: Partial<AiStatus>,
+    options: { report?: boolean } = {}
+  ): void {
+    this.ai = { ...this.ai, ...patch, source: 'local' };
+    // Compatibility view used by older dashboard code: the raw SDK status while
+    // live, otherwise the lifecycle state. "Connected" therefore cannot be
+    // rendered unless the SDK actually reported a live session.
+    this.aiStatus = isLiveAiStatus(this.ai.status)
+      ? (this.ai.status as UltravoxSessionStatus)
+      : this.ai.state;
+    this.aiError = this.ai.error;
     this.emit();
-    await this.startAi();
+    if (options.report !== false) this.reportAiStatus();
   }
 
-  private async stopAi(): Promise<void> {
+  /** Forwards the customer's real AI state to the server/salesperson. */
+  private reportAiStatus(): void {
+    if (this.options.role !== 'customer' || !this.options.enableAi) return;
+    this.sendSignal({
+      type: 'ai_status',
+      state: this.ai.state,
+      connected: this.ai.connected,
+      error: this.ai.error,
+      callId: this.ai.callId,
+      reconnectAttempt: this.ai.reconnectAttempt,
+      audioReachingAi: this.ai.audioReachingAi,
+      lastResponseAt: this.ai.lastResponseAt,
+      lastSuggestionAt: this.ai.lastSuggestionAt,
+    });
+  }
+
+  /** Mirrors customer-reported AI state into the salesperson's engine. */
+  private applyRemoteAi(patch: Partial<AiStatus> & { state: AiStatus['state'] }): void {
+    if (this.options.role !== 'salesperson') return;
+    this.ai = { ...this.ai, ...patch, source: 'remote' };
+    this.aiStatus = this.ai.state;
+    this.aiError = this.ai.error;
+    if (this.ai.reconnecting || this.ai.connected) this.aiReconnectRequestedAt = null;
+    this.emit();
+  }
+
+  /** Hydrates the salesperson view from an HTTP/WS session snapshot. */
+  private hydrateRemoteAi(value: unknown): void {
+    if (this.options.role !== 'salesperson' || !value || typeof value !== 'object') return;
+    const runtime = value as Record<string, unknown>;
+    const rawState = typeof runtime.state === 'string' ? runtime.state : '';
+    if (!rawState) return;
+    const state = rawState as AiStatus['state'];
+    this.applyRemoteAi({
+      state,
+      connected: runtime.connected === true && state === 'connected',
+      status: null,
+      error: sanitizeAiDetail(runtime.error),
+      callId: typeof runtime.callId === 'string' ? runtime.callId.slice(0, 100) : null,
+      reconnectAttempt:
+        typeof runtime.reconnectAttempt === 'number'
+          ? Math.max(0, Math.round(runtime.reconnectAttempt))
+          : 0,
+      reconnecting: state === 'reconnecting' || state === 'creating' || state === 'connecting',
+      audioReachingAi: runtime.audioReachingAi === true && state === 'connected',
+      lastResponseAt: typeof runtime.lastResponseAt === 'number' ? runtime.lastResponseAt : null,
+      lastSuggestionAt: typeof runtime.lastSuggestionAt === 'number' ? runtime.lastSuggestionAt : null,
+    });
+  }
+
+
+  /**
+   * Tears down one SDK session without letting a broken transport delay the
+   * human call. The session's callbacks are already invalidated by the caller.
+   */
+  private leaveAiSession(session: UltravoxSession): void {
+    void Promise.race([
+      Promise.resolve()
+        .then(() => session.leaveCall())
+        .catch(() => undefined),
+      new Promise<void>((resolve) => window.setTimeout(resolve, AI_LEAVE_TIMEOUT_MS)),
+    ]);
+  }
+
+  private async teardownAiSession(reason: string): Promise<void> {
+    this.clearAiConnectTimer();
     const session = this.ultravox;
     this.ultravox = null;
     if (!session) return;
-    // leaveCall() can wait on a transport that never connected, which must never
-    // delay leaving the human call.
-    void Promise.resolve()
-      .then(() => session.leaveCall())
-      .catch(() => undefined);
-    this.aiStatus = 'off';
+    this.log(`Closing the previous AI session (${reason}).`);
+    await Promise.race([
+      Promise.resolve()
+        .then(() => session.leaveCall())
+        .catch(() => undefined),
+      new Promise<void>((resolve) => window.setTimeout(resolve, AI_LEAVE_TIMEOUT_MS)),
+    ]);
+  }
+
+  /** Marks the current session dead, then performs a bounded recovery. */
+  private failAiSession(generation: number, state: 'error' | 'closed', message: string): void {
+    if (generation !== this.aiGeneration) return;
+    const session = this.ultravox;
+    // Invalidate first: DISCONNECTED always follows an error event, and it must
+    // not start a second recovery for the same failure.
+    this.aiGeneration += 1;
+    this.ultravox = null;
+    this.clearAiConnectTimer();
+    this.aiConnectedSince = null;
+    if (session) this.leaveAiSession(session);
+    this.setAi({
+      state,
+      status: null,
+      connected: false,
+      error: sanitizeAiDetail(message) || 'The AI session ended unexpectedly.',
+      audioReachingAi: false,
+      reconnecting: false,
+    });
+    this.scheduleAiRecovery(this.ai.error || 'AI session ended unexpectedly.');
+  }
+
+  private clearAiRecoveryTimer(): void {
+    if (this.aiRecoveryTimer !== null) window.clearTimeout(this.aiRecoveryTimer);
+    this.aiRecoveryTimer = null;
+  }
+
+  private clearAiConnectTimer(): void {
+    if (this.aiConnectTimer !== null) window.clearTimeout(this.aiConnectTimer);
+    this.aiConnectTimer = null;
+  }
+
+
+
+  private scheduleAiRecovery(reason: string): void {
+    if (this.options.role !== 'customer' || !this.options.enableAi) return;
+    if (this.stopped || this.intentionalLeave) return;
+    if (this.aiRecoveryTimer !== null || this.aiOperationInFlight) return;
+
+    // A session that stayed live for a while earns a fresh retry budget, so a
+    // long call that drops once is not penalised, while instant flapping stops
+    // after the bound.
+    if (this.aiConnectedSince !== null && Date.now() - this.aiConnectedSince > 60_000) {
+      this.aiRecoveryAttempt = 0;
+    }
+
+    if (this.aiRecoveryAttempt >= AI_RECONNECT_MAX_ATTEMPTS) {
+      const detail = `${reason} Automatic recovery stopped after ${AI_RECONNECT_MAX_ATTEMPTS} attempts; the human call is unaffected. Use "Restart AI" to try again.`;
+      this.setAi({
+        state: 'error',
+        status: null,
+        connected: false,
+        error: sanitizeAiDetail(detail, 400),
+        reconnecting: false,
+        audioReachingAi: false,
+      });
+      this.log('AI recovery stopped after the bounded retry limit.');
+      return;
+    }
+
+    this.aiRecoveryAttempt += 1;
+    const delays = this.options.aiRetryDelaysMs ?? AI_RECONNECT_DELAYS_MS;
+    const delay = delays[Math.min(this.aiRecoveryAttempt - 1, delays.length - 1)] ?? 4000;
+    this.setAi({
+      state: 'reconnecting',
+      status: null,
+      connected: false,
+      error: sanitizeAiDetail(reason),
+      reconnectAttempt: this.aiRecoveryAttempt,
+      reconnecting: true,
+      audioReachingAi: false,
+    });
+    this.log(
+      `AI recovery scheduled in ${delay}ms (attempt ${this.aiRecoveryAttempt}/${AI_RECONNECT_MAX_ATTEMPTS}).`
+    );
+
+    this.aiRecoveryTimer = window.setTimeout(() => {
+      this.aiRecoveryTimer = null;
+      if (this.stopped || this.intentionalLeave) return;
+      void this.startAi({ replace: true, recovery: true });
+    }, delay);
+  }
+
+  /**
+   * Public recovery entry point. The customer restarts locally; the
+   * salesperson asks the customer device over signaling because only that
+   * device holds the AI session and the microphone.
+   */
+  async retryAi(): Promise<void> {
+    if (this.options.role !== 'customer') {
+      this.requestAiReconnect();
+      return;
+    }
+    this.aiRecoveryAttempt = 0;
+    this.clearAiRecoveryTimer();
+    this.log('Manual AI restart requested; a brand new Ultravox call will be created.');
+    await this.startAi({ replace: true });
+  }
+
+  /** Salesperson control: never touches the salesperson<->customer WebRTC path. */
+  requestAiReconnect(): void {
+    if (this.options.role === 'customer') {
+      void this.retryAi();
+      return;
+    }
+    const sent = this.sendSignal({ type: 'ai_reconnect', reason: 'salesperson requested' });
+    if (!sent) {
+      this.lastError = 'Could not ask the customer device to restart the AI: signaling is not connected.';
+      this.log(this.lastError);
+      this.emit();
+      return;
+    }
+    this.aiReconnectRequestedAt = Date.now();
+    this.log('Asked the customer device to create a fresh AI session.');
+    this.emit();
+  }
+
+  private async stopAi(): Promise<void> {
+    // Invalidate every callback from the session being stopped before waiting.
+    this.aiGeneration += 1;
+    this.clearAiRecoveryTimer();
+    this.clearAiConnectTimer();
+    this.aiRecoveryAttempt = 0;
+    this.aiConnectedSince = null;
+    const session = this.ultravox;
+    this.ultravox = null;
+    if (session) this.leaveAiSession(session);
+    this.setAi(
+      {
+        state: 'off',
+        status: null,
+        connected: false,
+        error: null,
+        callId: null,
+        reconnectAttempt: 0,
+        reconnecting: false,
+        audioReachingAi: false,
+      },
+      { report: false }
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -1915,6 +2397,11 @@ export class CallEngine {
         selectedRemoteType: this.diagnostics.selectedRemoteType,
         relayPath: this.diagnostics.relayPath,
         aiStatus: this.aiStatus,
+        aiConnected: this.ai.connected,
+        aiState: this.ai.state,
+        aiAudioReaching: this.ai.audioReachingAi,
+        aiLastResponseAt: this.ai.lastResponseAt,
+        aiReconnectAttempt: this.ai.reconnectAttempt,
         reconnectAttempt: this.reconnectAttempt,
         candidates: this.diagnostics.candidates,
         iceConfigLoaded: this.iceConfigLoaded,

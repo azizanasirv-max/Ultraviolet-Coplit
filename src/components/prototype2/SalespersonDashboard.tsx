@@ -4,16 +4,17 @@ import {
   PhoneOff, RefreshCw, Sparkles, Volume2, VolumeX, Activity, UserRound,
 } from 'lucide-react';
 import { CallEngine, EngineSnapshot, ParticipantRole } from '../../lib/callEngine';
+import { aiStateLabel, aiTone, AiLifecycleState } from '../../lib/aiStatus';
 import {
   ApiError, CreatedSession, SessionDiagnosticsResponse, SessionPublicState,
-  createSession, getSession, getSessionDiagnostics,
+  createSession, getSession, getSessionDiagnostics, rotateInvitation,
 } from '../../lib/sessionApi';
 import {
   StoredSalespersonSession, clearSalespersonSession, loadDisplayName,
   loadResumeToken, loadSalespersonSession, saveDisplayName, saveResumeToken,
   saveSalespersonSession,
 } from '../../lib/participantStorage';
-import { Banner, DiagGrid, Panel, timeLeft } from './ui';
+import { Banner, DiagGrid, Panel, StatusLine, timeLeft } from './ui';
 
 const ROLE: ParticipantRole = 'salesperson';
 
@@ -265,6 +266,17 @@ export const SalespersonDashboard: React.FC = () => {
     engine.setSpeakerMuted(!snapshot.speakerMuted);
   };
 
+  const reconnectAi = () => {
+    const engine = engineRef.current;
+    if (!engine) {
+      setActionError('Start the call before asking the customer device to restart the AI.');
+      return;
+    }
+    // Salesperson-side recovery is a request: only the customer device holds the
+    // AI session and the microphone. This never touches the WebRTC audio path.
+    engine.requestAiReconnect();
+  };
+
   const copyInvite = async () => {
     if (!inviteUrl) return;
     try {
@@ -296,6 +308,29 @@ export const SalespersonDashboard: React.FC = () => {
       setView('invitation');
     } catch (err) {
       setActionError((err as Error)?.message || 'Could not create an invitation.');
+    }
+  };
+
+  /**
+   * Replaces the invitation link of the invitation screen. When the link belongs
+   * to the current session this is a rotation on that session (the call is not
+   * touched); a link that belongs to another session cannot be rotated from here
+   * without affecting that session, so it is replaced by a fresh invitation.
+   */
+  const regenerateInvite = async () => {
+    setActionError(null);
+    try {
+      if (session && inviteSessionId === session.sessionId) {
+        const result = await rotateInvitation(session.sessionId, session.salespersonKey);
+        if (!mountedRef.current) return;
+        setInviteUrl(result.inviteUrl);
+        setInviteExpiresAt(result.inviteExpiresAt);
+        setSessionState(result.session);
+        return;
+      }
+      await createInvitation();
+    } catch (err) {
+      setActionError((err as Error)?.message || 'Could not regenerate the invitation.');
     }
   };
 
@@ -334,6 +369,43 @@ export const SalespersonDashboard: React.FC = () => {
     () => (snapshot?.suggestions.length ? snapshot.suggestions[snapshot.suggestions.length - 1] : null),
     [snapshot?.suggestions]
   );
+  /**
+   * AI status shown to the salesperson.
+   *
+   * The Ultravox session lives on the customer device. `snapshot.ai` is the
+   * live value relayed over signaling; `sessionState.ai` is the server's
+   * persisted copy (used before the first relay or after a signaling blip).
+   * Both are real reported states, never "the server has an API key".
+   */
+  const aiView = useMemo(() => {
+    const live = snapshot?.ai;
+    const polled = sessionState?.ai;
+    // `off` is the engine's initial value, not a report. Prefer the polled state
+    // in that case so an already-running AI is not briefly shown as "not started".
+    const liveHasReport = Boolean(live && live.state !== 'off');
+    const rawState = ((liveHasReport ? live?.state : null) ?? polled?.state ?? 'off') as AiLifecycleState;
+    const known: AiLifecycleState[] = [
+      'off', 'creating', 'connecting', 'connected', 'reconnecting', 'disconnected', 'closed', 'error',
+    ];
+    const state = known.includes(rawState) ? rawState : 'error';
+    const reported = liveHasReport ? live : null;
+    return {
+      state,
+      label: aiStateLabel(state),
+      tone: aiTone(state),
+      error: (reported ? reported.error : polled?.error) ?? null,
+      connected: Boolean((reported ? reported.connected : polled?.connected) && state === 'connected'),
+      reconnecting: state === 'creating' || state === 'connecting' || state === 'reconnecting',
+      reconnectAttempt: reported?.reconnectAttempt ?? polled?.reconnectAttempt ?? 0,
+      maxReconnectAttempts: reported?.maxReconnectAttempts ?? 3,
+      audioReachingAi: Boolean((reported ? reported.audioReachingAi : polled?.audioReachingAi) && state === 'connected'),
+      lastResponseAt: reported?.lastSuggestionAt ?? polled?.lastSuggestionAt ?? null,
+      callCreated: Boolean(sessionState?.aiCallCreated ?? sessionState?.aiReady),
+      callId: reported?.callId ?? null,
+      source: liveHasReport ? 'live signaling' : polled?.state ? 'server poll' : 'none',
+    };
+  }, [snapshot?.ai, sessionState?.ai, sessionState?.aiCallCreated, sessionState?.aiReady]);
+
   const inviteBelongsToCurrent = Boolean(session && inviteSessionId === session.sessionId);
 
   if (booting) {
@@ -418,12 +490,26 @@ export const SalespersonDashboard: React.FC = () => {
               </button>
             </div>
 
-            <button
-              onClick={() => void backToDashboard()}
-              className="w-full px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold"
-            >
-              Back to Dashboard
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => void backToDashboard()}
+                className="flex-1 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold"
+              >
+                Back to Dashboard
+              </button>
+              <button
+                onClick={() => void regenerateInvite()}
+                data-testid="regenerate-invite"
+                className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-semibold"
+                title={
+                  session && inviteBelongsToCurrent
+                    ? 'Replace this link on the current session (the call is not affected)'
+                    : 'Create a fresh invitation for a new session'
+                }
+              >
+                Regenerate link
+              </button>
+            </div>
           </section>
 
           {actionError ? (
@@ -554,6 +640,12 @@ export const SalespersonDashboard: React.FC = () => {
               {engineStarted ? <Headphones className="w-10 h-10" /> : <PhoneCall className="w-10 h-10" />}
             </div>
             <p className="text-lg font-semibold text-slate-100" data-testid="call-state">{callState.label}</p>
+            <span
+              className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${toneClasses(aiView.tone)}`}
+              data-testid="ai-state-chip"
+            >
+              {aiView.label}
+            </span>
             <p className="text-xs text-slate-400 text-center">
               {sessionState?.customerConnected ? 'Customer connected' : 'Waiting for the customer to open the invitation'}
               {snapshot?.micPermission === 'granted'
@@ -620,6 +712,85 @@ export const SalespersonDashboard: React.FC = () => {
               </p>
             ) : null}
           </section>
+
+          {/* AI copilot status: the real customer-side Ultravox session */}
+          <Panel
+            title="AI copilot status"
+            icon={<Sparkles className="w-3.5 h-3.5" />}
+            action={
+              <button
+                onClick={reconnectAi}
+                data-testid="ai-reconnect"
+                disabled={!engineStarted || !sessionState?.customerConnected}
+                title={
+                  !engineStarted
+                    ? 'Start the call first'
+                    : !sessionState?.customerConnected
+                      ? 'The customer device must be connected to restart the AI'
+                      : 'Ask the customer device to create a fresh AI session'
+                }
+                className="text-[10px] px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold disabled:opacity-40"
+              >
+                Restart AI
+              </button>
+            }
+          >
+            <div className="space-y-1" data-testid="ai-panel">
+              <StatusLine
+                label="AI session"
+                value={aiView.label}
+                tone={aiView.tone}
+                detail={aiView.error ?? undefined}
+                testId="ai-state"
+                detailTestId="ai-error"
+              />
+              <StatusLine
+                label="Customer voice reaches the AI"
+                value={
+                  !engineStarted
+                    ? 'not started'
+                    : aiView.audioReachingAi
+                      ? 'yes'
+                      : aiView.connected
+                        ? 'not yet'
+                        : 'no'
+                }
+                tone={aiView.audioReachingAi ? 'emerald' : 'amber'}
+                testId="ai-audio"
+              />
+              <StatusLine
+                label="Last AI response"
+                value={aiView.lastResponseAt ? new Date(aiView.lastResponseAt).toLocaleTimeString() : 'none yet'}
+                tone={aiView.lastResponseAt ? 'emerald' : 'slate'}
+                testId="ai-last-response"
+              />
+              <StatusLine
+                label="Ultravox call created"
+                value={aiView.callCreated ? 'yes (not proof of connection)' : 'no'}
+                tone={aiView.callCreated ? 'indigo' : 'slate'}
+                detail={`state source: ${aiView.source}${aiView.callId ? ` · call ${aiView.callId.slice(0, 8)}` : ''}`}
+                testId="ai-call-created"
+              />
+              {aiView.reconnecting ? (
+                <p className="text-[11px] text-amber-300" data-testid="ai-reconnecting">
+                  {aiView.state === 'reconnecting'
+                    ? `Reconnecting AI (attempt ${aiView.reconnectAttempt} of ${aiView.maxReconnectAttempts}); the customer call audio is unaffected.`
+                    : 'The customer device is creating/connecting a new AI session…'}
+                </p>
+              ) : null}
+              {snapshot?.aiReconnectRequestedAt && !aiView.reconnecting && !aiView.connected ? (
+                <p className="text-[11px] text-slate-400" data-testid="ai-reconnect-pending">
+                  Restart requested at {new Date(snapshot.aiReconnectRequestedAt).toLocaleTimeString()}; waiting for the
+                  customer device to report the new session.
+                </p>
+              ) : null}
+              {!sessionState?.customerConnected ? (
+                <p className="text-[11px] text-slate-500">
+                  The AI runs on the customer device. It cannot start or recover until the customer is connected.
+                </p>
+              ) : null}
+            </div>
+          </Panel>
 
           <div className="grid gap-4 md:grid-cols-2">
             <Panel title="Customer speech" icon={<UserRound className="w-3.5 h-3.5" />}>

@@ -48,11 +48,17 @@ if (fs.existsSync(fontConfig)) process.env.FONTCONFIG_FILE = fontConfig;
 const { createPrototype2Server } = await import('../server');
 
 // Never contact the real Ultravox API from automated tests.
-const fakeUltravoxFetch = (async () =>
-  new Response(JSON.stringify({ callId: 'call_browser_test', joinUrl: 'wss://ai.invalid/join' }), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json' },
-  })) as unknown as typeof fetch;
+let ultravoxCallRequests = 0;
+const fakeUltravoxFetch = (async () => {
+  ultravoxCallRequests += 1;
+  return new Response(
+    JSON.stringify({
+      callId: `call_browser_${ultravoxCallRequests}`,
+      joinUrl: 'wss://ai.invalid/join',
+    }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } }
+  );
+}) as unknown as typeof fetch;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -320,17 +326,63 @@ test('prototype2 three-path audio with synthetic media', async (t) => {
     await waitFor(() => snapshot(salespersonPage), (value) => value.micMuted === false, 5000);
   });
 
-  await t.test('AI session failure is isolated from the human audio path', async () => {
+  await t.test('AI session failure is isolated from the human audio path and visible to the salesperson', async () => {
     // No reachable Ultravox in this environment: the customer AI request must
     // fail visibly, while peer audio keeps flowing.
     const customer = await snapshot(customerPage);
     assert.ok(
-      ['off', 'error', 'connecting', 'disconnected', 'idle'].includes(String(customer.aiStatus)),
+      ['off', 'creating', 'reconnecting', 'error', 'connecting', 'disconnected', 'closed', 'idle'].includes(
+        String(customer.aiStatus)
+      ),
       `unexpected AI status ${customer.aiStatus}`
     );
+    assert.equal(customer.ai.connected, false, 'the dashboard must not claim a live AI session');
     const salesperson = await snapshot(salespersonPage);
     assert.equal(salesperson.callState, 'connected');
     assert.ok(salesperson.diagnostics.bytesSent > 0);
+    assert.equal(salesperson.ai.connected, false, 'salesperson also sees a non-connected AI');
+    assert.ok(
+      ['creating', 'connecting', 'reconnecting', 'error', 'disconnected', 'closed', 'off'].includes(
+        String(salesperson.ai.state)
+      )
+    );
+
+    // The salesperson dashboard surfaces the AI state and failure explanation.
+    await salespersonPage.waitForSelector('[data-testid="ai-state"]', { timeout: 10000 });
+    const chip = (await salespersonPage.textContent('[data-testid="ai-state-chip"]')) || '';
+    assert.doesNotMatch(chip, /AI connected/);
+    const panel = (await salespersonPage.textContent('[data-testid="ai-panel"]')) || '';
+    assert.match(panel, /AI/);
+    const aiStateText = (await salespersonPage.textContent('[data-testid="ai-state"]')) || '';
+    assert.ok(
+      /Creating AI session|Connecting AI|Reconnecting AI|AI error|AI disconnected|AI session closed|AI not started/.test(
+        aiStateText
+      ),
+      `unexpected salesperson AI label: ${aiStateText}`
+    );
+  });
+
+  await t.test('a salesperson AI restart requests a fresh call without interrupting the audio call', async () => {
+    const before = await snapshot(salespersonPage);
+    assert.equal(before.callState, 'connected');
+    const callsBefore = ultravoxCallRequests;
+
+    await salespersonPage.click('[data-testid="ai-reconnect"]');
+    await waitFor(
+      () => Promise.resolve(ultravoxCallRequests > callsBefore),
+      (advanced) => advanced === true,
+      15000
+    );
+
+    // A genuinely new Ultravox call was requested (replace=true path).
+    assert.ok(ultravoxCallRequests > callsBefore, 'a new AI call was requested');
+
+    // The human call is untouched by the AI restart.
+    const after = await snapshot(salespersonPage);
+    assert.equal(after.callState, 'connected');
+    assert.equal(after.participantId, before.participantId);
+    assert.equal(after.peerParticipantId, before.peerParticipantId);
+    assert.ok(after.diagnostics.bytesReceived > 0);
   });
 
   await t.test('reconnect replaces the connection without duplicating participants or tracks', async () => {
@@ -497,6 +549,94 @@ const applyIceEnv = (values: Partial<Record<(typeof ICE_ENV_KEYS)[number], strin
     }
   };
 };
+
+test('prototype2 a rotated invitation starts a fresh AI call', async (t) => {
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const base = `http://127.0.0.1:${server.port}`;
+  const browser = await launchBrowser();
+  t.after(async () => {
+    await browser.close();
+    await server.close();
+  });
+
+  const salesContext = await openContext(browser);
+  const salesPage = await salesContext.newPage();
+  await salesPage.goto(`${base}/sales`, { waitUntil: 'domcontentloaded' });
+  await salesPage.waitForSelector('[data-testid="salesperson-invitation"]', { timeout: 20000 });
+  const firstInvite = await salesPage.inputValue('[data-testid="salesperson-invite-url"]');
+  await salesPage.click('[data-testid="back-to-dashboard"]');
+  // Join the session on the salesperson device (offerer) before the customer.
+  await salesPage.click('[data-testid="join-call"]');
+  await waitFor(() => snapshot(salesPage), (value) => value.wsStatus === 'connected', 20000);
+
+  // First customer establishes the human call and requests an AI call.
+  const firstContext = await openContext(browser);
+  const firstPage = await firstContext.newPage();
+  await firstPage.goto(firstInvite, { waitUntil: 'domcontentloaded' });
+  await firstPage.waitForSelector('[data-testid="customer-prejoin"]', { timeout: 20000 });
+  await firstPage.click('[data-testid="join-call"]');
+  const firstConnected = await waitFor(
+    () => snapshot(firstPage),
+    (value) =>
+      value.callState === 'connected' && value.diagnostics.bytesSent > 0 && Boolean(value.ai.callId),
+    30000
+  );
+  const firstCallId = firstConnected.ai.callId;
+  assert.ok(firstCallId, 'the first customer requested an AI call');
+
+  // The customer leaves; rotate the invitation for a new device. The invitation
+  // lives on its own screen in the merged UI.
+  await firstContext.close();
+  await waitFor(() => snapshot(salesPage), (value) => value.callState !== 'connected', 15000);
+
+  await salesPage.click('[data-testid="show-invitation"]');
+  await salesPage.waitForSelector('[data-testid="salesperson-invite-url"]', { timeout: 20000 });
+  const previousInvite = await salesPage.inputValue('[data-testid="salesperson-invite-url"]');
+  const callsBeforeRotation = ultravoxCallRequests;
+  await salesPage.click('[data-testid="regenerate-invite"]');
+  await salesPage.waitForFunction(
+    (oldUrl) => {
+      const input = document.querySelector('[data-testid="salesperson-invite-url"]') as HTMLInputElement | null;
+      return Boolean(input && input.value && input.value !== oldUrl);
+    },
+    previousInvite,
+    { timeout: 10000 }
+  );
+  const secondInvite = await salesPage.inputValue('[data-testid="salesperson-invite-url"]');
+  assert.notEqual(secondInvite, previousInvite);
+  await salesPage.click('[data-testid="back-to-dashboard"]');
+
+  // A brand new invitation must produce its own AI session, not reuse the dead one.
+  const secondContext = await openContext(browser);
+  t.after(() => secondContext.close());
+  const secondPage = await secondContext.newPage();
+  await secondPage.goto(secondInvite, { waitUntil: 'domcontentloaded' });
+  await secondPage.waitForSelector('[data-testid="customer-prejoin"]', { timeout: 20000 });
+  await secondPage.click('[data-testid="join-call"]');
+
+  const secondConnected = await waitFor(
+    () => snapshot(secondPage),
+    (value) =>
+      value.callState === 'connected' &&
+      value.diagnostics.bytesSent > 0 &&
+      Boolean(value.ai.callId) &&
+      value.ai.callId !== firstCallId,
+    30000
+  );
+  assert.notEqual(secondConnected.ai.callId, firstCallId, 'a new AI call was created');
+  assert.ok(ultravoxCallRequests > callsBeforeRotation, 'the server created another Ultravox call');
+  assert.equal(secondConnected.ai.connected, false, 'unreachable provider is not reported as connected');
+
+  // The salesperson dashboard reflects the new session and keeps human audio.
+  const salesState = await waitFor(
+    () => snapshot(salesPage),
+    (value) => value.callState === 'connected' && value.diagnostics.bytesReceived > 0,
+    20000
+  );
+  assert.equal(salesState.callState, 'connected');
+  assert.notEqual(salesState.ai.connected, true);
+});
+
 
 test('TURN configuration is fetched with session auth and applied to every peer connection', async asyncTest => {
   const restoreEnv = applyIceEnv({

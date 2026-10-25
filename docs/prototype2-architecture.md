@@ -145,7 +145,7 @@ Salesperson browser                          Customer browser
 * Without TURN, carrier-NAT/mobile-data pairs still cannot connect; diagnostics
   show `relay candidates 0`, `selected pair host→srflx` and the amber TURN banner.
 
-### The three communication paths
+### The communication paths
 
 | Path | Transport | Implementation |
 | --- | --- | --- |
@@ -162,6 +162,56 @@ salesperson pauses recognition.
 AI output is **text-only** in Prototype 2 (`Medium.TEXT` + `muteSpeaker()`), so
 the AI can never talk over the salesperson. The salesperson has no Ultravox
 session at all, so salesperson speech cannot enter the AI pipeline.
+
+### AI session lifecycle and recovery
+
+`ultravox-client@0.6.0` manages one finite Ultravox call per `UltravoxSession`.
+A join URL belongs to that call. When the call's WebSocket closes, the SDK emits
+an `error` event (for code 1006: `Session socket closed abnormally. code=1006
+reason=…`), then `disconnecting` → `disconnected`. It does **not** reconnect,
+and the same join URL cannot revive the ended call. Recovery therefore means
+*create a new Ultravox call and a new SDK session*, never retry the old URL.
+
+The lifecycle is implemented as:
+
+* `POST /api/sessions/:id/ultravox-call { replace: true }` discards the session's
+  cached call record, best-effort `DELETE`s the superseded provider call, and
+  creates a new one. The client always sends `replace: true`; the no-body form
+  remains for idempotent reads. Concurrent creations for one session return
+  `409 ULTRAVOX_CALL_IN_PROGRESS`.
+* Every AI attempt gets a monotonically increasing generation. All SDK callbacks
+  (`status`, `transcripts`, `error`) and the 20 s connect timeout ignore events
+  from an older generation, so a dead session cannot overwrite a new one.
+* Automatic recovery is bounded to 3 attempts with 1.5 s / 4 s / 9 s backoff. A
+  session that stayed live for ≥ 60 s earns a fresh budget. After the bound the
+  dashboard shows the real provider error plus "recovery stopped after 3
+  attempts"; it never shows a false connected state.
+* The customer device reports its real state over `ai_status`; the server stores
+  it (`session.ai`) and relays it to the salesperson. The salesperson's **Restart
+  AI** button sends `ai_reconnect` back over signaling; only the customer device
+  can create the AI session because only it holds the microphone.
+* `ai_status` is observational: if the salesperson is offline it is still stored,
+  and it is hydrated into the salesperson dashboard from `joined` /
+  `session_state` / the 5 s session poll.
+* AI failure never touches the `RTCPeerConnection`; the salesperson <-> customer
+  audio call, TURN configuration and signaling reconnect loops are independent.
+
+### AI status shown to the salesperson
+
+The salesperson dashboard has a dedicated **AI copilot status** panel (and a
+header chip) fed by the customer's reported state:
+
+* Creating AI session / Connecting AI / AI connected / Reconnecting AI /
+  AI disconnected / AI session closed / AI not started / AI error
+* the latest safe failure text (join URLs and token-looking values redacted)
+* whether reconnection is in progress and the attempt number
+* whether the customer microphone is actually published to the AI
+* the last AI response time
+* whether a server-side Ultravox call record exists — explicitly labelled
+  "not proof of connection"
+
+`aiReady`/`GET /api/health.ai.ready` remain *capability/record* flags. They are
+no longer used as evidence of a live session.
 
 ### Duplicate customer capture: trade-off
 
@@ -193,7 +243,9 @@ Both dashboards show a details panel with:
 * microphone permission, track state (including `disabled`), sender count
 * remote track state, RTP bytes sent/received and kbps, `<audio>` paused/muted state
 * autoplay error text
-* AI status and AI error
+* AI lifecycle state, raw SDK status, call id, reconnect attempt, whether the
+  customer mic actually reaches the AI, last AI response time, and the safe
+  provider failure text (never a join URL or token)
 * the engine event log
 
 `window.__prototype2.getSnapshot()` exposes the same data to support tooling and
@@ -215,10 +267,11 @@ rising while `answers` stays 0) without reading the frontend console.
 
 | Command | What it covers | Result |
 | --- | --- | --- |
-| `npm run test:unit` | `SessionStore`: session/credential isolation, role mismatch, single-use invitation, rotation/revocation, expiry, resume identity, duplicate prevention, no plaintext secrets | 11/11 pass |
+| `npm run test:unit` | `SessionStore`: session/credential isolation, role mismatch, single-use invitation, rotation/revocation, expiry, resume identity, duplicate prevention, AI call clearing, AI liveness vs call record, no plaintext secrets | 13/13 pass |
 | `npm run test:turn` | ICE/TURN unit tests (synthetic env + mocked provider HTTP): URL parsing, static/ephemeral/provider credentials, HMAC correctness, relay-only fail-fast, provider caching/failure, no secret leakage | 17/17 pass |
-| `npm run test:signaling` | Real HTTP + WebSocket server: join authentication, role enforcement, offer/answer/ICE relay, AI text relay to the salesperson only, cross-session isolation, reconnect identity, `peer_left`, invalid JSON, diagnostics authorization, customer-only Ultravox call, authenticated ICE endpoint, TURN static/ephemeral/provider delivery, relay misconfiguration, APP_URL, AI readiness without a key, secrecy | 25/25 pass |
-| `npm run test:browser` | Chromium, two isolated browser contexts, synthetic media: role-specific UIs, invitation scoping/replay rejection, legacy URL rejection, bidirectional RTP, `<audio>` playing, mute/unmute on both sides, reconnect without duplicate participants/tracks, AI text on the correct dashboard, AI failure isolated, server-side client diagnostics, TURN applied to every PC (incl. reconnect), relay-only policy applied, relay-only-without-TURN refuses to start, no credential leakage in DOM/snapshot | 19/19 pass |
+| `npm run test:signaling` | Real HTTP + WebSocket server: join authentication, role enforcement, offer/answer/ICE relay, AI text relay to the salesperson only, cross-session isolation, reconnect identity, `peer_left`, invalid JSON, diagnostics authorization, customer-only Ultravox call, **AI call rotation, failed-creation retry, AI status relay/role enforcement/redaction, customer-disconnect AI state**, authenticated ICE endpoint, TURN static/ephemeral/provider delivery, relay misconfiguration, APP_URL, AI readiness without a key, secrecy | 29/29 pass |
+| `npm run test:ai` | **Mocked `UltravoxSession` + mocked `fetch`**: new-call-per-retry, connected only from live SDK status, mic-published reporting, abnormal-close recovery, stale-callback isolation, bounded retries with real error text, duplicate-retry suppression, salesperson restart over signaling, AI failure leaves WebRTC state untouched | 8/8 pass |
+| `npm run test:browser` | Chromium, two isolated browser contexts, synthetic media: role-specific UIs, invitation scoping/replay rejection, legacy URL rejection, bidirectional RTP, `<audio>` playing, mute/unmute on both sides, reconnect without duplicate participants/tracks, AI text on the correct dashboard, AI failure isolated **and visible on the salesperson dashboard**, **salesperson-triggered AI restart without dropping audio**, **rotated invitation creates a new AI call**, server-side client diagnostics, TURN applied to every PC (incl. reconnect), relay-only policy applied, relay-only-without-TURN refuses to start, no credential leakage in DOM/snapshot | 21/21 pass |
 | `npm run build` | Production Vite build | pass |
 | `npm run lint` | `tsc --noEmit` | pass |
 
@@ -228,6 +281,13 @@ Chromium's fake audio device proves that signaling, negotiation, track routing,
 RTP flow and element playback work. It does **not** prove acoustic quality,
 speaker/microphone behaviour, echo, Bluetooth routing, iOS autoplay, or
 connectivity across carrier NATs. Those require the two-device plan below.
+
+The AI lifecycle tests use a **fake `UltravoxSession` and a mocked provider
+HTTP call**. They prove that the app requests a new call instead of reusing a
+dead join URL, isolates stale callbacks, bounds retries and reports state
+truthfully. They do **not** prove a real Ultravox session connects or that a
+real provider 1006 close recovers. That needs `ULTRAVOX_API_KEY` plus network
+access, and is part of the manual verification below.
 
 ## 6. Root cause of the reported failure
 
@@ -251,6 +311,29 @@ connectivity across carrier NATs. Those require the two-device plan below.
 
 Both media bugs (3 and 4) were reproduced and fixed while running the browser
 suite, which is why the reconnect and mute assertions exist.
+
+### Confirmed root cause of the AI session failure (this change)
+
+5. **The server cached one Ultravox call per session forever.** Every
+   `POST /api/sessions/:id/ultravox-call` returned the same `joinUrl` with
+   `isReused: true`. Ultravox calls are finite (`maxDuration: 3600s`, provider
+   close, network loss). Once the call ended, that URL was dead.
+6. **The SDK cannot reconnect, and the client never created a new call.**
+   `ultravox-client@0.6.0` emits `Session socket closed abnormally. code=1006
+   reason=…` and goes to `disconnected`; there is no reconnect API. `retryAi()`
+   asked the server again, received the same dead URL and failed again. Rotating
+   the invitation kept the same session, so it received the same dead URL too —
+   which is why new invitations did not restore the AI.
+7. **No automatic recovery, no status surface.** After the `error` event the
+   customer dashboard showed an error, the salesperson dashboard showed nothing
+   (the AI only exists on the customer device), and `aiReady` kept saying yes
+   because it only meant "a call record exists". Old listeners were never
+   detached, so a late event from the dead session could overwrite a new one.
+
+The precise production close code is not independently confirmed (no provider
+logs were available). The code path is confirmed from the installed SDK source
+and the provider contract; the dashboard now reports the code/reason verbatim
+when it occurs.
 
 ### Deployment causes (separate from the audio bug)
 
@@ -279,6 +362,10 @@ See [deployment.md](./deployment.md) for the exact fix and Render settings.
 | `MAX_SESSIONS` | optional | Cap on in-memory sessions (default 500) |
 | `PORT` | Render-provided | HTTP/WS port |
 
+No new environment variables are required for the AI lifecycle fix. The same
+`ULTRAVOX_API_KEY` is used for call creation and for the best-effort termination
+of superseded calls.
+
 Render: keep the existing web service (`npm start`, build `npm run build`,
 `NODE_ENV=production`). Build/start commands and the dependency strategy are
 documented in [deployment.md](./deployment.md); `/api/health` exposes
@@ -297,6 +384,13 @@ that must be added.
   every authorized browser and cannot be rotated per session.
 * Managed-provider response shapes are covered by mocks; no live vendor API was
   exercised (that requires an account and credentials).
+* No live Ultravox session was exercised in automated tests. The recovery path is
+  verified against a fake SDK session and a mocked provider HTTP call; real
+  provider connectivity and a real 1006 close still need the manual check below.
+* A superseded Ultravox call is ended with a best-effort `DELETE`; if that call
+  fails the orphaned call ends at its provider `maxDuration` (1 h). Stopping the
+  page while a call-create request is in flight can also leave a short-lived
+  orphan for the same reason.
 * Customer credentials live in `sessionStorage`; clearing site data or opening the
   link in another browser requires the salesperson to rotate the invitation.
 * The invitation is single-use by design; this is a deliberate anti-hijack
@@ -339,3 +433,19 @@ Use one desktop/laptop (salesperson) and one phone on mobile data (customer).
    (one customer, one salesperson in the laptop diagnostics, no duplicate audio).
 10. Toggle airplane mode on the phone for ~10 s and back: both sides should
     reconnect (signaling retries with backoff) without a stale "connected" state.
+11. On the laptop, watch **AI copilot status** (and the header chip). It must
+    only say **AI connected** while the phone reports a live session, and the
+    **Customer voice reaches the AI** row must say `yes` while the customer is
+    speaking unmuted.
+12. Force an AI drop (turn Wi-Fi/mobile data off on the phone for ~30 s, or wait
+    for the provider call to end): the laptop must switch to **Reconnecting AI**
+    or **AI error** with a safe explanation, while **Audio flowing** / peer
+    bytes stay healthy. It must never show **AI connected** during the outage.
+13. When connectivity returns, the customer device should create a new Ultravox
+    call automatically (at most 3 attempts). If the panel ends at **AI error**
+    with "recovery stopped", press **Restart AI** on the laptop: the customer
+    device must create a fresh call and the status must move through
+    Creating → Connecting → Connected. Audio must not drop.
+14. Rotate the invitation from the laptop and join from a new browser/device.
+    The new customer must get its own AI session (a new call id in the laptop
+    diagnostics), not the previous dead one.

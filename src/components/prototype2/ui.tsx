@@ -21,11 +21,17 @@ export const StatusLine: React.FC<{
   value: string;
   tone: Tone;
   detail?: string;
-}> = ({ label, value, tone, detail }) => (
-  <div className="flex items-start justify-between gap-3 py-1.5">
+  testId?: string;
+  detailTestId?: string;
+}> = ({ label, value, tone, detail, testId, detailTestId }) => (
+  <div className="flex items-start justify-between gap-3 py-1.5" data-testid={testId}>
     <div className="min-w-0">
       <p className="text-[11px] uppercase tracking-wide text-slate-500 font-semibold">{label}</p>
-      {detail ? <p className="text-[11px] text-slate-500 truncate" title={detail}>{detail}</p> : null}
+      {detail ? (
+        <p className="text-[11px] text-slate-500 truncate" title={detail} data-testid={detailTestId}>
+          {detail}
+        </p>
+      ) : null}
     </div>
     <span className={`flex items-center gap-1.5 text-xs font-semibold shrink-0 ${TONE_TEXT[tone]}`}>
       <span className={`w-2 h-2 rounded-full ${TONE_DOT[tone]}`} />

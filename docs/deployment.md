@@ -157,3 +157,24 @@ confirmed working.
 4. On two real devices, open the diagnostics panel and confirm relay candidates
    and `media flowing: yes (RTP received)` in both directions. Only then is TURN
    verified; the automated tests use mocks and cannot prove relay media.
+
+## 6. AI session lifecycle deployment notes
+
+The AI recovery fix does **not** add or rename environment variables. Keep the
+existing `ULTRAVOX_API_KEY` (server-side only). No TURN change is involved.
+
+A redeploy of this branch is required for the fix to take effect. After the
+deploy:
+
+1. `GET /api/health` should still report `ai.ready: true`. This only means the
+   server can create calls — it is not proof of a live session.
+2. On `/sales`, the **AI copilot status** panel (and header chip) must move
+   through *Creating AI session → Connecting AI → AI connected* only when the
+   customer device actually reports a live Ultravox session.
+3. Server logs contain `[ai] ...` lines for failures and superseded-call cleanup.
+   They never contain the API key, a join URL, or a token.
+4. Ultravox calls are capped at `maxDuration: 3600s`. When a call ends, the
+   customer device creates a new one (bounded to 3 automatic attempts); the
+   salesperson can press **Restart AI** to force another fresh call without
+   interrupting the human audio call.
+

@@ -9,7 +9,20 @@ export interface SessionPublicState {
   customerConnected: boolean;
   invitationStatus: 'active' | 'redeemed' | 'revoked' | 'expired' | 'missing';
   invitationExpiresAt: number | null;
+  /** A server-side Ultravox call record exists (not proof of a live session). */
   aiReady: boolean;
+  aiCallCreated: boolean;
+  /** Live AI state reported by the customer device. */
+  ai: {
+    state: string | null;
+    connected: boolean;
+    error: string | null;
+    reconnectAttempt: number;
+    audioReachingAi: boolean;
+    lastResponseAt: number | null;
+    lastSuggestionAt: number | null;
+    updatedAt: number | null;
+  };
 }
 
 export interface CreatedSession {
@@ -39,6 +52,19 @@ export interface SessionDiagnosticsResponse {
     invitationStatus: string;
     invitationExpiresAt: number | null;
     aiReady: boolean;
+    aiCallCreated: boolean;
+    ai: {
+      state: string | null;
+      connected: boolean;
+      error: string | null;
+      reconnectAttempt: number;
+      audioReachingAi: boolean;
+      lastResponseAt: number | null;
+      lastSuggestionAt: number | null;
+      updatedAt: number | null;
+    };
+    aiCallId: string | null;
+    aiLastError: string | null;
     participants: Array<{
       participantId: string;
       role: 'customer' | 'salesperson';

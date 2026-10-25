@@ -206,3 +206,71 @@ test('invitation tokens are unguessable and never stored in plaintext', () => {
   assert.ok(!JSON.stringify(store.diagnostics(session)).includes(invitation.token));
   assert.ok(!JSON.stringify(store.diagnostics(session)).includes(created.salespersonKey));
 });
+
+test('a session AI call can be cleared so a dead join URL is never handed out again', () => {
+  const store = makeStore();
+  const created = store.createSession('AI lifecycle');
+  store.setUltravoxCall(created.sessionId, {
+    callId: 'call_old',
+    joinUrl: 'wss://ai.invalid/join-old?token=secret',
+    createdAt: Date.now(),
+    createdByParticipantId: 'p1',
+  });
+
+  const session = store.getSession(created.sessionId)!;
+  assert.equal(store.publicState(session).aiCallCreated, true);
+  assert.equal(store.publicState(session).ai.connected, false);
+
+  const cleared = store.clearUltravoxCall(created.sessionId);
+  assert.equal(cleared?.callId, 'call_old');
+  assert.equal(store.getUltravoxCall(created.sessionId), null);
+  const after = store.getSession(created.sessionId)!;
+  assert.equal(store.publicState(after).aiCallCreated, false);
+  assert.equal(store.publicState(after).aiReady, false);
+});
+
+test('AI runtime liveness is reported separately from "a call record exists"', () => {
+  const store = makeStore();
+  const created = store.createSession('AI runtime');
+  store.setUltravoxCall(created.sessionId, {
+    callId: 'call_live',
+    joinUrl: 'wss://ai.invalid/join-live',
+    createdAt: Date.now(),
+    createdByParticipantId: 'p1',
+  });
+
+  const running = store.setAiRuntime(created.sessionId, {
+    state: 'connected',
+    connected: true,
+    audioReachingAi: true,
+    callId: 'call_live',
+    lastSuggestionAt: 1_700_000_000_000,
+  });
+  assert.ok(running);
+  assert.ok(running!.updatedAt > 0);
+
+  const state = store.publicState(store.getSession(created.sessionId)!);
+  assert.equal(state.aiCallCreated, true);
+  assert.equal(state.ai.state, 'connected');
+  assert.equal(state.ai.connected, true);
+  assert.equal(state.ai.audioReachingAi, true);
+  assert.equal(state.ai.lastSuggestionAt, 1_700_000_000_000);
+
+  // A later failure must flip liveness off while the call record still exists.
+  store.setAiRuntime(created.sessionId, {
+    state: 'error',
+    connected: false,
+    error: 'Session socket closed abnormally. code=1006',
+    audioReachingAi: false,
+    lastSuggestionAt: 1_700_000_000_000,
+  });
+  const failed = store.publicState(store.getSession(created.sessionId)!);
+  assert.equal(failed.aiCallCreated, true);
+  assert.equal(failed.ai.connected, false);
+  assert.equal(failed.ai.audioReachingAi, false);
+  assert.match(String(failed.ai.error), /code=1006/);
+
+  assert.match(String(store.diagnostics(store.getSession(created.sessionId)!).aiLastError), /1006/);
+  assert.equal(store.diagnostics(store.getSession(created.sessionId)!).aiCallId, 'call_live');
+});
+
