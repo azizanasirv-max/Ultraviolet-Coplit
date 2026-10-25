@@ -178,3 +178,22 @@ deploy:
    salesperson can press **Restart AI** to force another fresh call without
    interrupting the human audio call.
 
+
+## 7. Dashboard split and salesperson captions
+
+No new environment variable and no new dependency is required for the separated
+dashboards or the customer-facing transcript.
+
+* The transcript of the salesperson's speech uses the browser Speech Recognition
+  API on the **salesperson** device. That API requires a secure context
+  (`https://` or `localhost`) and a Chromium-based browser. Firefox has no
+  implementation; the salesperson dashboard then shows "unavailable in this
+  browser" and the customer is told captions are unavailable. The human call is
+  unaffected.
+* Because captions are produced in the browser, no audio is uploaded anywhere
+  for them. Only text is relayed through the existing authenticated WebSocket.
+* The customer interface no longer renders AI suggestions, AI status or
+  diagnostics. This is enforced by the server (role-scoped hydration and
+  message routing) as well as by the customer view model; check it on a real
+  device by confirming the customer page shows only call controls, connection
+  state and the salesperson transcript.

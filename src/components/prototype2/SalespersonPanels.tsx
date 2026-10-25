@@ -1,8 +1,6 @@
 import React from 'react';
 import { Activity, Brain, MessageSquareText, RefreshCw, Sparkles } from 'lucide-react';
 import type { EngineSnapshot, SuggestionCard, ParticipantRole } from '../../lib/callEngine';
-import type { AiStatus } from '../../lib/aiStatus';
-import { aiStateLabel } from '../../lib/aiStatus';
 import type { SpeechSegment } from '../../lib/transcript';
 import { DiagGrid } from './ui';
 

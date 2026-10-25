@@ -30,7 +30,8 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
   const [snapshot, setSnapshot] = useState<EngineSnapshot | null>(null);
   const [joinedAt, setJoinedAt] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
-  const [engineReady, setEngineReady] = useState(false);
+  /** True once this page has joined (stays true after the call ends). */
+  const [joined, setJoined] = useState(false);
 
   const engineRef = useRef<CallEngine | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -112,7 +113,7 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
     });
     engine.attachAudioElement(audioRef.current);
     engineRef.current = engine;
-    setEngineReady(true);
+    setJoined(true);
     setJoinedAt(Date.now());
     await engine.start();
   }, [redeemed]);
@@ -120,8 +121,6 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
   const leaveCall = useCallback(async () => {
     const engine = engineRef.current;
     engineRef.current = null;
-    setEngineReady(false);
-    setJoinedAt(null);
     if (engine) await engine.stop('customer ended the call');
   }, []);
 
@@ -173,9 +172,9 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
         sessionLabel: redeemed?.session.label ?? null,
         durationSeconds,
         transcriptState,
-        joined: engineReady,
+        joined,
       }),
-    [snapshot, redeemed, durationSeconds, transcriptState, engineReady]
+    [snapshot, redeemed, durationSeconds, transcriptState, joined]
   );
 
   if (status === 'loading') {

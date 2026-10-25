@@ -45,8 +45,6 @@ if (fs.existsSync(fontConfig)) process.env.FONTCONFIG_FILE = fontConfig;
 
 // Chromium's font stack needs a config file when fontconfig is not installed
 // system-wide (this sandbox has no root).
-const fontConfig = path.join(process.cwd(), '.browser-libs', 'fonts.conf');
-if (fs.existsSync(fontConfig)) process.env.FONTCONFIG_FILE = fontConfig;
 
 // Imported after NODE_ENV is set so the server serves the production build.
 const { createPrototype2Server } = await import('../server');
@@ -762,7 +760,10 @@ test('relay-only policy is applied and never reported as working audio without r
   assert.equal(relayState.mediaFlowing, false);
   assert.notEqual(relayState.callState, 'connected');
   assert.equal(relayState.diagnostics.iceTransportPolicy, 'relay');
-  assert.equal(await customerPage.locator('[data-testid="relay-warning"]').count(), 1);
+  // TURN/ICE diagnostics are salesperson-only; the customer must not see the
+  // internal relay configuration, only ordinary call state.
+  assert.equal(await customerPage.locator('[data-testid="relay-warning"]').count(), 0);
+  assert.equal(await salespersonPage.locator('[data-testid="relay-warning"]').count(), 1);
 
   await salespersonContext.close();
   await customerContext.close();

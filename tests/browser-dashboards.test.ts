@@ -110,6 +110,52 @@ const installFakeRecognition = async (context: BrowserContext, phrases: string[]
   await context.addInitScript({ content: source });
 };
 
+
+/**
+ * Records microphone captures and outbound WebSocket URLs per page so the test
+ * can prove which device captures audio and whether it ever opens the AI socket.
+ */
+const installAudioProbe = async (context: BrowserContext) => {
+  await context.addInitScript({
+    content: `
+      (() => {
+        window.__gumCalls = 0;
+        window.__capturedTracks = [];
+        const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+        navigator.mediaDevices.getUserMedia = async function (constraints) {
+          const stream = await original(constraints);
+          window.__gumCalls += 1;
+          window.__capturedTracks.push(stream.getAudioTracks().map(function (track) {
+            return { id: track.id, label: track.label };
+          }));
+          return stream;
+        };
+        window.__pcs = [];
+        const OrigPeerConnection = window.RTCPeerConnection;
+        const WrappedPeerConnection = function () {
+          const pc = new (Function.prototype.bind.apply(OrigPeerConnection, [null].concat([].slice.call(arguments))))();
+          window.__pcs.push(pc);
+          return pc;
+        };
+        WrappedPeerConnection.prototype = OrigPeerConnection.prototype;
+        window.RTCPeerConnection = WrappedPeerConnection;
+        const OrigWebSocket = window.WebSocket;
+        window.__wsUrls = [];
+        const Wrapped = function (url, protocols) {
+          window.__wsUrls.push(String(url));
+          return protocols ? new OrigWebSocket(url, protocols) : new OrigWebSocket(url);
+        };
+        Wrapped.prototype = OrigWebSocket.prototype;
+        Wrapped.CONNECTING = 0;
+        Wrapped.OPEN = 1;
+        Wrapped.CLOSING = 2;
+        Wrapped.CLOSED = 3;
+        window.WebSocket = Wrapped;
+      })();
+    `,
+  });
+};
+
 const snapshot = async (page: Page) =>
   page.evaluate(() => (window as any).__prototype2?.getSnapshot() ?? null);
 
@@ -142,6 +188,7 @@ test('customer and salesperson dashboards stay separated', async (t) => {
   });
 
   const salesContext = await browser.newContext({ permissions: ['microphone'] });
+  await installAudioProbe(salesContext);
   await installFakeRecognition(salesContext, ['Thanks for joining today.', 'Let us look at your renewal.']);
   const salesPage = await salesContext.newPage();
 
@@ -149,6 +196,7 @@ test('customer and salesperson dashboards stay separated', async (t) => {
     permissions: ['microphone'],
     viewport: { width: 390, height: 844 },
   });
+  await installAudioProbe(customerContext);
   const customerPage = await customerContext.newPage();
 
   await salesPage.goto(`${base}/sales`, { waitUntil: 'domcontentloaded' });
@@ -191,6 +239,39 @@ test('customer and salesperson dashboards stay separated', async (t) => {
     // The salesperson's own words are not echoed into their customer-transcript panel.
     const salesTranscript = (await salesPage.textContent('[data-testid="customer-transcript"]')) || '';
     assert.doesNotMatch(salesTranscript, /Thanks for joining today\./);
+  });
+
+  await t.test('the salesperson device never captures or publishes audio to the AI', async () => {
+    const state = await salesPage.evaluate(() => {
+      const pcs = ((window as any).__pcs || []).filter((pc: any) => pc.connectionState !== 'closed');
+      const sockets = (window as any).__wsUrls || [];
+      return {
+        captures: (window as any).__gumCalls,
+        captured: (window as any).__capturedTracks,
+        pcs: pcs.length,
+        senders: pcs
+          .map((pc: any) => pc.getSenders().filter((sender: any) => sender.track).length)
+          .reduce((total: number, count: number) => total + count, 0),
+        aiSockets: sockets.filter((url: string) => !url.includes('/ws')).length,
+      };
+    });
+
+    // Exactly one capture: the salesperson's own microphone for the WebRTC call.
+    assert.equal(state.captures, 1, 'the salesperson captures the microphone once');
+    assert.equal(state.captured.length, 1);
+    assert.equal(state.pcs, 1, 'one peer connection');
+    assert.equal(state.senders, 1, 'one outbound audio track (the human call)');
+
+    // No Ultravox/LiveKit socket is ever opened from this page, so the
+    // salesperson's microphone cannot be published to the AI session.
+    assert.equal(state.aiSockets, 0, 'the salesperson page opens no AI provider socket');
+
+    const customerState = await customerPage.evaluate(() => ({
+      captures: (window as any).__gumCalls,
+      pcs: ((window as any).__pcs || []).filter((pc: any) => pc.connectionState !== 'closed').length,
+    }));
+    assert.ok(customerState.captures >= 1, 'the customer device captures its own microphone');
+    assert.equal(customerState.pcs, 1);
   });
 
   await t.test('AI suggestions reach only the salesperson', async () => {
@@ -240,6 +321,7 @@ test('customer and salesperson dashboards stay separated', async (t) => {
     assert.doesNotMatch(customerBody, /PRIVATE-SUGGESTION-999/);
     socket.close();
   });
+
 
   await t.test('call controls still work for both participants', async () => {
     await customerPage.click('[data-testid="mic-toggle"]');

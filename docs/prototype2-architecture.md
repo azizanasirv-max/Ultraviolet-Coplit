@@ -127,10 +127,69 @@ Salesperson browser                          Customer browser
 | A. Customer → AI → salesperson dashboard | Ultravox/LiveKit + WebSocket text relay | Customer runs the `UltravoxSession`; agent transcripts are sent as `ai_suggestion`; the server relays them only to the salesperson of that session |
 | B. Salesperson → customer | WebRTC audio track | Salesperson mic is `addTrack`ed to the PC; the customer's `<audio>` plays it |
 | C. Customer → salesperson | WebRTC audio track | Customer mic is `addTrack`ed to the PC; the salesperson's `<audio>` plays it |
+| D. Salesperson → customer transcript | WebSocket text relay | The salesperson device captions its **own** microphone with the browser Speech Recognition API and sends `salesperson_transcript` (text only); the server relays it only to the customer of that session |
 
 AI output is **text-only** in Prototype 2 (`Medium.TEXT` + `muteSpeaker()`), so
 the AI can never talk over the salesperson. The salesperson has no Ultravox
 session at all, so salesperson speech cannot enter the AI pipeline.
+
+### Dashboard separation and role-scoped routing
+
+The two roles now have different interfaces over the same call:
+
+| | Customer (`/join?invite=…`) | Salesperson (`/sales`) |
+| --- | --- | --- |
+| Call UI | caller-style screen: participant label, call state, duration, mute / speaker / end | live-call workspace with the same controls plus reconnect |
+| Incoming audio | salesperson WebRTC track | customer WebRTC track |
+| Transcript | salesperson's spoken words (`salesperson_transcript`) | customer's spoken words (`customer_speech_transcript`) |
+| AI | none rendered (the device hosts the SDK, but AI state is not in its view model) | private suggestions, AI status/error, recovery |
+| Diagnostics | none | collapsed "Diagnostics & recovery" section + server diagnostics |
+
+Privacy is enforced at three layers, not in CSS:
+
+1. **Presentation model.** `buildCustomerCallView()` copies an allow-list of
+   call fields from the engine snapshot. AI suggestions, AI provider state,
+   call ids, reconnect counters and logs are not part of `CustomerCallView`, so
+   the customer component has nothing private to render.
+2. **Signaling.** The server decides the recipient of every message. Only the
+   salesperson receives `ai_status`, `ai_suggestion` and
+   `customer_speech_transcript`; only the customer receives
+   `salesperson_transcript` and `salesperson_transcript_status`. A transport
+   guard (`deliver()`) additionally drops private frames and AI fields from any
+   payload addressed to a customer, so a future broadcaster cannot leak them.
+3. **Session hydration.** `GET/POST` responses and `joined` / `session_state`
+   frames use `publicStateFor(session, role)`. The customer shape
+   (`CustomerPublicState`) has no `ai`, `aiReady` or `aiCallCreated` fields at
+   all. `ai_reconnect` is a content-free control message.
+
+The salesperson's microphone is used for the WebRTC call and for its own speech
+recognition. It is never cloned, mixed, re-published or sent to the server as
+audio, and the Ultravox session exists only on the customer device, where the
+SDK captures that device's microphone. The salesperson `CallEngine` refuses to
+create an AI session even if `enableAi` is passed (role guard in `startAi`), and
+`POST /api/sessions/:id/ultravox-call` rejects salesperson credentials with 403.
+
+### Salesperson speech captions
+
+The AI session cannot transcribe the salesperson: Ultravox only ever receives
+the customer device's microphone, and the salesperson's voice reaches the
+customer as an RTP track that the browser does not expose as text. The smallest
+viable implementation is therefore browser Speech Recognition on the
+salesperson device (`src/lib/salespersonSpeech.ts`):
+
+* `continuous` + `interimResults`; partial text is shown italic and replaced in
+  place when the same ordinal becomes final (`src/lib/transcript.ts`), so the
+  panel never duplicates or reorders lines.
+* Only text crosses the network. Recognition starts when the salesperson joins,
+  pauses while they are muted (muted speech is not captioned) and stops when they
+  leave. Availability/failure is reported to the customer
+  (`salesperson_transcript_status`) so the customer is told when captions are
+  unavailable instead of seeing a silent panel.
+* Limitations: Chrome/Edge only (no Firefox implementation, partial Safari),
+  browser/provider-dependent accuracy and punctuation, and a separate microphone
+  capture on the salesperson device. A server-side provider transcription
+  (paid) would be needed for browser-independent, higher-accuracy captions.
+
 
 ### AI session lifecycle and recovery
 
@@ -238,9 +297,10 @@ rising while `answers` stays 0) without reading the frontend console.
 | --- | --- | --- |
 | `npm run test:unit` | `SessionStore`: session/credential isolation, role mismatch, single-use invitation, rotation/revocation, expiry, resume identity, duplicate prevention, AI call clearing, AI liveness vs call record, no plaintext secrets | 13/13 pass |
 | `npm run test:turn` | ICE/TURN unit tests (synthetic env + mocked provider HTTP): URL parsing, static/ephemeral/provider credentials, HMAC correctness, relay-only fail-fast, provider caching/failure, no secret leakage | 17/17 pass |
-| `npm run test:signaling` | Real HTTP + WebSocket server: join authentication, role enforcement, offer/answer/ICE relay, AI text relay to the salesperson only, cross-session isolation, reconnect identity, `peer_left`, invalid JSON, diagnostics authorization, customer-only Ultravox call, **AI call rotation, failed-creation retry, AI status relay/role enforcement/redaction, customer-disconnect AI state**, authenticated ICE endpoint, TURN static/ephemeral/provider delivery, relay misconfiguration, APP_URL, AI readiness without a key, secrecy | 29/29 pass |
+| `npm run test:signaling` | Real HTTP + WebSocket server: join authentication, role enforcement, offer/answer/ICE relay, AI text relay to the salesperson only, cross-session isolation, reconnect identity, `peer_left`, invalid JSON, diagnostics authorization, customer-only Ultravox call, **AI call rotation, failed-creation retry, AI status relay/role enforcement/redaction, customer-disconnect AI state**, authenticated ICE endpoint, TURN static/ephemeral/provider delivery, relay misconfiguration, APP_URL, AI readiness without a key, secrecy, **role-scoped session hydration (no AI fields for customers), `salesperson_transcript` routing in both directions, AI-status/AI-suggestion frames unreachable by the customer, content-free `ai_reconnect`** | 30/30 pass |
 | `npm run test:ai` | **Mocked `UltravoxSession` + mocked `fetch`**: new-call-per-retry, connected only from live SDK status, mic-published reporting, abnormal-close recovery, stale-callback isolation, bounded retries with real error text, duplicate-retry suppression, salesperson restart over signaling, AI failure leaves WebRTC state untouched | 8/8 pass |
-| `npm run test:browser` | Chromium, two isolated browser contexts, synthetic media: role-specific UIs, invitation scoping/replay rejection, legacy URL rejection, bidirectional RTP, `<audio>` playing, mute/unmute on both sides, reconnect without duplicate participants/tracks, AI text on the correct dashboard, AI failure isolated **and visible on the salesperson dashboard**, **salesperson-triggered AI restart without dropping audio**, **rotated invitation creates a new AI call**, server-side client diagnostics, TURN applied to every PC (incl. reconnect), relay-only policy applied, relay-only-without-TURN refuses to start, no credential leakage in DOM/snapshot | 21/21 pass |
+| `npm run test:ui` | **Pure/unit, no browser**: transcript merge rules (partial → final in place, no duplicate/reorder), customer view allow-list contains no AI state, customer screen markup has no AI/copilot/diagnostic text, salesperson panels separate AI suggestions from customer speech, engine accepts only role-appropriate frames, **salesperson engine never creates a Ultravox session**, only the customer requests the AI call, mute pauses captions; plus a **fake SpeechRecognition** for start/stop/pause/error/unsupported | 19/19 pass |
+| `npm run test:browser` | Chromium, two isolated browser contexts, synthetic media: role-specific UIs, invitation scoping/replay rejection, legacy URL rejection, bidirectional RTP, `<audio>` playing, mute/unmute on both sides, reconnect without duplicate participants/tracks, AI text on the correct dashboard, AI failure isolated **and visible on the salesperson dashboard**, **salesperson-triggered AI restart without dropping audio**, **rotated invitation creates a new AI call**, server-side client diagnostics, TURN applied to every PC (incl. reconnect), relay-only policy applied, relay-only-without-TURN refuses to start, no credential leakage in DOM/snapshot; **dashboard suite: phone-viewport customer UI with 44 px controls and no AI text, salesperson captions rendered only on the customer screen, injected AI suggestion visible only on the salesperson page, diagnostics collapsed by default, **one microphone capture and no AI-provider socket on the salesperson device** | 27/27 pass |
 | `npm run build` | Production Vite build | pass |
 | `npm run lint` | `tsc --noEmit` | pass |
 

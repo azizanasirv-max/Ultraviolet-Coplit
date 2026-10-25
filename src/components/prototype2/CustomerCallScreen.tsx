@@ -227,6 +227,17 @@ export const CustomerCallScreen: React.FC<CustomerCallScreenProps> = ({
               >
                 {view.durationSeconds !== null ? formatDuration(view.durationSeconds) : '—'}
               </p>
+              {view.phase === 'ended' ? (
+                <button
+                  type="button"
+                  onClick={onReconnect}
+                  data-testid="reconnect"
+                  className="px-5 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-slate-100 font-semibold text-sm inline-flex items-center justify-center gap-2"
+                >
+                  <RefreshCw className="w-4 h-4" aria-hidden="true" />
+                  Start a new call
+                </button>
+              ) : null}
             </div>
 
             {connected || view.phase === 'reconnecting' ? <Transcript view={view} /> : null}
@@ -305,13 +316,25 @@ export const CustomerCallScreen: React.FC<CustomerCallScreenProps> = ({
               <PhoneOff className="w-6 h-6" />
             </CallButton>
           </div>
-          <p className="mt-2 text-center text-[11px] text-slate-500" data-testid="mic-state">
-            {view.micPermission === 'denied'
-              ? 'Microphone permission is blocked'
-              : view.micMuted
-                ? 'Your microphone is muted'
-                : 'Your microphone is on'}
-          </p>
+          <div className="mt-2 flex flex-col items-center gap-1">
+            <p className="text-[11px] text-slate-500" data-testid="mic-state">
+              {view.micPermission === 'denied'
+                ? 'Microphone permission is blocked'
+                : view.micMuted
+                  ? 'Your microphone is muted'
+                  : 'Your microphone is on'}
+            </p>
+            {view.phase !== 'ended' ? (
+              <button
+                type="button"
+                onClick={onReconnect}
+                data-testid="reconnect"
+                className="text-[11px] font-semibold text-slate-400 hover:text-slate-200 underline underline-offset-2"
+              >
+                Trouble hearing? Reconnect
+              </button>
+            ) : null}
+          </div>
         </footer>
       ) : null}
     </div>
