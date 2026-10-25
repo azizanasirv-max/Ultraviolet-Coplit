@@ -529,6 +529,11 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     });
   });
 
+  // Unknown API routes must not fall through to the SPA HTML handler.
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ error: 'NOT_FOUND', message: 'Unknown API route.' });
+  });
+
   // -------------------------------------------------------------------------
   // WebSocket signaling (session-scoped, role-enforcing)
   // -------------------------------------------------------------------------
