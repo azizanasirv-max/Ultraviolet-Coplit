@@ -11,15 +11,19 @@ interface Harness {
   close: () => Promise<void>;
 }
 
-const startServer = async (options: { turnFetch?: typeof fetch } = {}): Promise<Harness> => {
+const startServer = async (
+  options: { turnFetch?: typeof fetch; ultravoxFetch?: typeof fetch } = {}
+): Promise<Harness> => {
   const instance = await createPrototype2Server({
     serveFrontend: false,
     port: 0,
-    ultravoxFetch: (async () =>
-      new Response(JSON.stringify({ callId: 'call_test', joinUrl: 'wss://ai.invalid/join' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      })) as unknown as typeof fetch,
+    ultravoxFetch:
+      options.ultravoxFetch ??
+      ((async () =>
+        new Response(JSON.stringify({ callId: 'call_test', joinUrl: 'wss://ai.invalid/join' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })) as unknown as typeof fetch),
     turnFetch: options.turnFetch,
   });
   return { base: `http://127.0.0.1:${instance.port}`, close: instance.close };
@@ -794,3 +798,251 @@ test('TURN credential provider is fetched server-side and never exposed', async 
   assert.equal(relayFailure.status, 503);
   assert.equal(relayFailure.body.error, 'TURN_MISCONFIGURED');
 });
+
+// ---------------------------------------------------------------------------
+// Ultravox call lifecycle (server-side; the provider HTTP call is mocked)
+// ---------------------------------------------------------------------------
+
+test('prototype2 AI call rotation and status relay', async (t) => {
+  const calls: Array<{ method: string; url: string; body: any }> = [];
+  let failNext = false;
+  const ultravoxFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method ?? 'GET';
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    calls.push({ method, url: String(input), body });
+    if (method === 'DELETE') return new Response(null, { status: 204 });
+    if (failNext) {
+      failNext = false;
+      return new Response(JSON.stringify({ error: 'provider unavailable' }), { status: 503 });
+    }
+    const created = calls.filter((call) => call.method === 'POST').length;
+    return new Response(
+      JSON.stringify({
+        callId: `call_${created}`,
+        // Deliberately secret-looking: it must never reach the salesperson.
+        joinUrl: `wss://ai.invalid/join-${created}?token=secret-${created}`,
+        model: 'ultravox-v0.7',
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+  }) as unknown as typeof fetch;
+
+  const harness = await startServer({ ultravoxFetch });
+  t.after(async () => {
+    await harness.close();
+  });
+
+  await t.test('replace=true creates a genuinely new call and ends the old one', async () => {
+    const fixture = await createFixture(harness.base, 'rotate');
+    const first = await post(
+      harness.base,
+      `/api/sessions/${fixture.sessionId}/ultravox-call`,
+      {},
+      fixture.customerKey
+    );
+    assert.equal(first.status, 200);
+    assert.equal(first.body.callId, 'call_1');
+    assert.equal(first.body.isReused, false);
+
+    const reused = await post(
+      harness.base,
+      `/api/sessions/${fixture.sessionId}/ultravox-call`,
+      {},
+      fixture.customerKey
+    );
+    assert.equal(reused.body.isReused, true);
+    assert.equal(reused.body.callId, 'call_1');
+
+    // This is what the client sends for every recovery attempt.
+    const rotated = await post(
+      harness.base,
+      `/api/sessions/${fixture.sessionId}/ultravox-call`,
+      { replace: true },
+      fixture.customerKey
+    );
+    assert.equal(rotated.status, 200);
+    assert.equal(rotated.body.isReused, false);
+    assert.equal(rotated.body.callId, 'call_2');
+    assert.match(rotated.body.joinUrl, /join-2/);
+
+    // Best-effort provider cleanup for the superseded call.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.ok(
+      calls.some((call) => call.method === 'DELETE' && call.url.endsWith('/call_1')),
+      'the superseded call is terminated'
+    );
+  });
+
+  await t.test('a failed creation clears the cached record so retry cannot reuse a dead URL', async () => {
+    const fixture = await createFixture(harness.base, 'retry-after-failure');
+    failNext = true;
+    const failed = await post(
+      harness.base,
+      `/api/sessions/${fixture.sessionId}/ultravox-call`,
+      {},
+      fixture.customerKey
+    );
+    assert.equal(failed.status, 503);
+    assert.equal(failed.body.error, 'ULTRAVOX_API_ERROR');
+
+    const retried = await post(
+      harness.base,
+      `/api/sessions/${fixture.sessionId}/ultravox-call`,
+      { replace: true },
+      fixture.customerKey
+    );
+    assert.equal(retried.status, 200);
+    assert.equal(retried.body.isReused, false);
+    assert.notEqual(retried.body.callId, failed.body.callId);
+  });
+});
+
+
+test('prototype2 AI status reaches the salesperson and never leaks connection secrets', async (t) => {
+  const harness = await startServer();
+  t.after(async () => {
+    await harness.close();
+  });
+
+  const fixture = await createFixture(harness.base, 'ai-status');
+  const salesperson = await openSocket(harness.base);
+  const customer = await openSocket(harness.base);
+  t.after(() => {
+    salesperson.close();
+    customer.close();
+  });
+
+  const salesJoin = await join(salesperson, {
+    sessionId: fixture.sessionId,
+    role: 'salesperson',
+    credential: fixture.salespersonKey,
+  });
+  assert.equal(salesJoin.type, 'joined');
+  assert.equal(salesJoin.ai?.state ?? null, null, 'no AI state before the customer reports one');
+
+  const customerJoin = await join(customer, {
+    sessionId: fixture.sessionId,
+    role: 'customer',
+    credential: fixture.customerKey,
+  });
+  assert.equal(customerJoin.type, 'joined');
+  await salesperson.next((message) => message.type === 'peer_joined');
+
+  // A connected report with a message that embeds a join URL and a token.
+  const now = Date.now();
+  customer.send({
+    type: 'ai_status',
+    sessionId: fixture.sessionId,
+    state: 'connected',
+    connected: true,
+    audioReachingAi: true,
+    reconnectAttempt: 0,
+    lastSuggestionAt: now,
+    lastResponseAt: now,
+    error:
+      'Session socket closed abnormally. code=1006 reason=see wss://api.ultravox.ai/join?token=super-secret',
+  });
+
+  const relayed = await salesperson.next((message) => message.type === 'ai_status');
+  assert.equal(relayed.state, 'connected');
+  assert.equal(relayed.connected, true);
+  assert.equal(relayed.audioReachingAi, true);
+  assert.equal(relayed.lastSuggestionAt, now);
+  assert.doesNotMatch(JSON.stringify(relayed), /super-secret/);
+  assert.doesNotMatch(JSON.stringify(relayed), /wss:\/\//);
+  assert.match(relayed.error, /code=1006/);
+  assert.match(relayed.error, /\[url redacted\]/);
+
+  // Server-persisted copy is available to the salesperson without the relay.
+  const sessionResponse = await get(
+    harness.base,
+    `/api/sessions/${fixture.sessionId}`,
+    fixture.salespersonKey
+  );
+  assert.equal(sessionResponse.body.session.ai.state, 'connected');
+  assert.equal(sessionResponse.body.session.ai.connected, true);
+  assert.equal(sessionResponse.body.session.ai.audioReachingAi, true);
+  assert.equal(sessionResponse.body.session.aiCallCreated, false, 'no Ultravox call exists in this test');
+  assert.equal(sessionResponse.body.session.aiReady, false);
+
+  const diagnostics = await get(
+    harness.base,
+    `/api/sessions/${fixture.sessionId}/diagnostics`,
+    fixture.salespersonKey
+  );
+  assert.equal(diagnostics.body.diagnostics.ai.connected, true);
+  assert.equal(diagnostics.body.diagnostics.ai.state, 'connected');
+  assert.equal(diagnostics.body.diagnostics.aiCallId, null);
+  assert.ok(!JSON.stringify(diagnostics.body).includes('super-secret'));
+
+  // A "connected" claim whose state is not connected is refused.
+  customer.send({
+    type: 'ai_status',
+    sessionId: fixture.sessionId,
+    state: 'closed',
+    connected: true,
+  });
+  const closed = await salesperson.next(
+    (message) => message.type === 'ai_status' && message.state === 'closed'
+  );
+  assert.equal(closed.connected, false, 'connected must match the reported state');
+
+  // Unknown states are rejected with a machine-readable code.
+  customer.send({ type: 'ai_status', sessionId: fixture.sessionId, state: 'teleported' });
+  const invalid = await customer.next(
+    (message) => message.type === 'error' && message.code === 'INVALID_SIGNALING_PAYLOAD'
+  );
+  assert.match(invalid.message, /AI state/);
+
+  // Role enforcement: only the customer reports, only the salesperson requests.
+  salesperson.send({ type: 'ai_status', sessionId: fixture.sessionId, state: 'connected', connected: true });
+  const wrongReporter = await salesperson.next(
+    (message) => message.type === 'error' && message.code === 'INVALID_SIGNALING_ROLE'
+  );
+  assert.match(wrongReporter.message, /Only the customer/);
+
+  customer.send({ type: 'ai_reconnect', sessionId: fixture.sessionId });
+  const wrongRequester = await customer.next(
+    (message) => message.type === 'error' && message.code === 'INVALID_SIGNALING_ROLE'
+  );
+  assert.match(wrongRequester.message, /Only the salesperson/);
+
+  salesperson.send({ type: 'ai_reconnect', sessionId: fixture.sessionId, reason: 'dashboard button' });
+  const request = await customer.next((message) => message.type === 'ai_reconnect');
+  assert.equal(request.reason, 'dashboard button');
+
+  // A reconnecting salesperson dashboard receives the last known state on join.
+  salesperson.close();
+  const salesperson2 = await openSocket(harness.base);
+  t.after(() => salesperson2.close());
+  const rejoin = await join(salesperson2, {
+    sessionId: fixture.sessionId,
+    role: 'salesperson',
+    credential: fixture.salespersonKey,
+  });
+  assert.equal(rejoin.type, 'joined');
+  assert.equal(rejoin.ai.state, 'closed');
+  assert.equal(rejoin.ai.connected, false);
+
+  // When the customer device disconnects, persisted AI state must stop
+  // claiming a live session (it existed only on that device).
+  customer.close();
+  const started = Date.now();
+  let lastAi: any = null;
+  while (Date.now() - started < 2000) {
+    const response = await get(harness.base, `/api/sessions/${fixture.sessionId}`, fixture.salespersonKey);
+    lastAi = response.body.session.ai;
+    if (lastAi.connected === false && lastAi.state === 'disconnected') break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(lastAi.connected, false);
+  assert.equal(lastAi.state, 'disconnected');
+  assert.match(String(lastAi.error), /customer device disconnected/i);
+
+  // A brand new invitation/session starts with no AI state carried over.
+  const freshFixture = await createFixture(harness.base, 'fresh');
+  const fresh = await get(harness.base, `/api/sessions/${freshFixture.sessionId}`, freshFixture.salespersonKey);
+  assert.equal(fresh.body.session.ai.state, null);
+  assert.equal(fresh.body.session.ai.connected, false);
+});
+
