@@ -522,3 +522,172 @@ test('prototype2 HTTP authorization and invitations', async (t) => {
     assert.ok(!serialized.toLowerCase().includes('apikey":'));
   });
 });
+
+test('prototype2 ICE/TURN delivery is session-authenticated and secret-safe', async (t) => {
+  const restore: Record<string, string | undefined> = {
+    TURN_URLS: process.env.TURN_URLS,
+    TURN_USERNAME: process.env.TURN_USERNAME,
+    TURN_CREDENTIAL: process.env.TURN_CREDENTIAL,
+    TURN_SECRET: process.env.TURN_SECRET,
+    TURN_TTL_SECONDS: process.env.TURN_TTL_SECONDS,
+    ICE_TRANSPORT_POLICY: process.env.ICE_TRANSPORT_POLICY,
+    STUN_URLS: process.env.STUN_URLS,
+    APP_URL: process.env.APP_URL,
+    ULTRAVOX_API_KEY: process.env.ULTRAVOX_API_KEY,
+  };
+
+  process.env.TURN_URLS =
+    'turn:turn.invalid:3478?transport=udp,turns:turn.invalid:5349?transport=tcp';
+  process.env.TURN_USERNAME = 'turn-user';
+  process.env.TURN_CREDENTIAL = 'turn-pass';
+  delete process.env.TURN_SECRET;
+  process.env.ICE_TRANSPORT_POLICY = 'all';
+
+  const harness = await startServer();
+  t.after(async () => {
+    await harness.close();
+    for (const [key, value] of Object.entries(restore)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const fixture = await createFixture(harness.base, 'ICE');
+  const icePath = `/api/sessions/${fixture.sessionId}/ice-config`;
+
+  await t.test('rejects anonymous and cross-session callers', async () => {
+    assert.equal((await get(harness.base, icePath)).status, 401);
+
+    const other = await createFixture(harness.base, 'Other');
+    assert.equal((await get(harness.base, icePath, other.salespersonKey)).status, 401);
+    assert.equal((await get(harness.base, icePath, other.customerKey)).status, 401);
+    assert.equal((await get(harness.base, icePath, 'invented')).status, 401);
+    assert.equal(
+      (await get(harness.base, '/api/sessions/missing/ice-config', fixture.salespersonKey)).status,
+      404
+    );
+  });
+
+  await t.test('returns TURN URLs and static credentials to both session participants', async () => {
+    for (const key of [fixture.salespersonKey, fixture.customerKey]) {
+      const response = await get(harness.base, icePath, key);
+      assert.equal(response.status, 200);
+      assert.equal(response.body.hasTurn, true);
+      assert.equal(response.body.turn.configured, true);
+      assert.equal(response.body.turn.credentialMode, 'static');
+      assert.equal(response.body.turn.urlCount, 2);
+      assert.equal(response.body.iceTransportPolicy, 'all');
+
+      const turnEntry = response.body.iceServers.find((entry: any) =>
+        (Array.isArray(entry.urls) ? entry.urls : [entry.urls]).some((url: string) => url.startsWith('turn'))
+      );
+      assert.ok(turnEntry);
+      assert.deepEqual(turnEntry.urls, [
+        'turn:turn.invalid:3478?transport=udp',
+        'turns:turn.invalid:5349?transport=tcp',
+      ]);
+      assert.equal(turnEntry.username, 'turn-user');
+      assert.equal(turnEntry.credential, 'turn-pass');
+    }
+  });
+
+  await t.test('never exposes TURN credentials in health or diagnostics', async () => {
+    const health = await get(harness.base, '/api/health');
+    assert.equal(health.status, 200);
+    assert.equal(health.body.ice.configured, true);
+    assert.equal(health.body.hasTurn, true);
+    const healthJson = JSON.stringify(health.body);
+    assert.ok(!healthJson.includes('turn-pass'));
+    assert.ok(!healthJson.includes('turn-user'));
+    assert.ok(!healthJson.includes('turn.invalid'));
+
+    const diagnostics = await get(
+      harness.base,
+      `/api/sessions/${fixture.sessionId}/diagnostics`,
+      fixture.salespersonKey
+    );
+    assert.equal(diagnostics.status, 200);
+    const diagnosticsJson = JSON.stringify(diagnostics.body);
+    assert.ok(!diagnosticsJson.includes('turn-pass'));
+    assert.ok(!diagnosticsJson.includes('turn-user'));
+    assert.ok(!diagnosticsJson.includes('turn.invalid'));
+  });
+
+  await t.test('serves short-lived coturn credentials when TURN_SECRET is set', async () => {
+    const secret = 'signaling-test-secret';
+    process.env.TURN_SECRET = secret;
+    delete process.env.TURN_USERNAME;
+    delete process.env.TURN_CREDENTIAL;
+
+    const response = await get(harness.base, icePath, fixture.customerKey);
+    assert.equal(response.status, 200);
+    assert.equal(response.body.turn.credentialMode, 'ephemeral');
+    assert.ok(response.body.turn.expiresAt > Date.now());
+
+    const turnEntry = response.body.iceServers.find((entry: any) =>
+      (Array.isArray(entry.urls) ? entry.urls : [entry.urls]).some((url: string) => url.startsWith('turn'))
+    );
+    assert.ok(turnEntry.username.endsWith(`:${fixture.sessionId}`));
+    assert.ok(turnEntry.credential.length > 10);
+
+    const json = JSON.stringify(response.body);
+    assert.ok(!json.includes(secret));
+    delete process.env.TURN_SECRET;
+    process.env.TURN_USERNAME = 'turn-user';
+    process.env.TURN_CREDENTIAL = 'turn-pass';
+  });
+
+  await t.test('relay-only mode without TURN fails instead of falling back to STUN', async () => {
+    delete process.env.TURN_URLS;
+    process.env.ICE_TRANSPORT_POLICY = 'relay';
+
+    const response = await get(harness.base, icePath, fixture.customerKey);
+    assert.equal(response.status, 503);
+    assert.equal(response.body.error, 'TURN_MISCONFIGURED');
+    assert.match(response.body.message, /relay requires a usable TURN relay/i);
+    assert.equal(response.body.iceTransportPolicy, 'relay');
+
+    const health = await get(harness.base, '/api/health');
+    assert.equal(health.body.ice.hasErrors, true);
+    assert.equal(health.body.ice.iceTransportPolicy, 'relay');
+
+    process.env.TURN_URLS =
+      'turn:turn.invalid:3478?transport=udp,turns:turn.invalid:5349?transport=tcp';
+    process.env.ICE_TRANSPORT_POLICY = 'all';
+  });
+
+  await t.test('uses APP_URL for invitation links when configured', async () => {
+    process.env.APP_URL = 'https://ultraviolet-copilot.onrender.com';
+    const created = await post(harness.base, '/api/sessions', { label: 'APP_URL' });
+    assert.equal(created.status, 201);
+    assert.match(
+      created.body.inviteUrl,
+      /^https:\/\/ultraviolet-copilot\.onrender\.com\/join\?invite=/
+    );
+    const health = await get(harness.base, '/api/health');
+    assert.equal(health.body.publicAppUrl, 'https://ultraviolet-copilot.onrender.com');
+    assert.deepEqual(health.body.appUrlWarnings, []);
+    delete process.env.APP_URL;
+  });
+
+  await t.test('starts and serves health without an AI key, with a clear AI error', async () => {
+    delete process.env.ULTRAVOX_API_KEY;
+
+    const health = await get(harness.base, '/api/health');
+    assert.equal(health.status, 200);
+    assert.equal(health.body.ai.ready, false);
+    assert.deepEqual(health.body.ai.missing, ['ULTRAVOX_API_KEY']);
+    assert.match(health.body.ai.message, /Human-to-human audio is unaffected/i);
+
+    const aiCall = await post(
+      harness.base,
+      `/api/sessions/${fixture.sessionId}/ultravox-call`,
+      {},
+      fixture.customerKey
+    );
+    assert.equal(aiCall.status, 503);
+    assert.equal(aiCall.body.error, 'MISSING_API_KEY');
+
+    process.env.ULTRAVOX_API_KEY = 'test-ultravox-key';
+  });
+});

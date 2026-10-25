@@ -58,7 +58,8 @@ export const Banner: React.FC<{
   title: string;
   children?: React.ReactNode;
   action?: React.ReactNode;
-}> = ({ tone, title, children, action }) => {
+  testId?: string;
+}> = ({ tone, title, children, action, testId }) => {
   const styles = {
     amber: 'border-amber-500/40 bg-amber-500/10 text-amber-200',
     red: 'border-rose-500/40 bg-rose-500/10 text-rose-200',
@@ -66,7 +67,7 @@ export const Banner: React.FC<{
     indigo: 'border-indigo-500/40 bg-indigo-500/10 text-indigo-200',
   }[tone];
   return (
-    <div className={`border rounded-xl px-3 py-2 text-xs flex flex-wrap items-center gap-x-3 gap-y-1 ${styles}`}>
+    <div data-testid={testId} className={`border rounded-xl px-3 py-2 text-xs flex flex-wrap items-center gap-x-3 gap-y-1 ${styles}`}>
       <strong className="font-semibold">{title}</strong>
       <span className="text-current/80 flex-1 min-w-[12rem]">{children}</span>
       {action}

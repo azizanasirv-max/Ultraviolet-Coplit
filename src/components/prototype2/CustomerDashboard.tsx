@@ -12,9 +12,13 @@ import { Banner, DiagGrid, Panel, StatusLine } from './ui';
 
 const ROLE = 'customer' as const;
 
-const callStateLabel = (callState: EngineSnapshot['callState']) => {
+const callStateLabel = (snapshot: EngineSnapshot | null) => {
+  const callState = snapshot?.callState ?? 'idle';
   switch (callState) {
-    case 'connected': return { label: 'Connected', tone: 'emerald' as const };
+    case 'connected':
+      return snapshot?.mediaFlowing
+        ? { label: 'Audio flowing', tone: 'emerald' as const }
+        : { label: 'Connected — waiting for media', tone: 'amber' as const };
     case 'connecting': return { label: 'Connecting', tone: 'amber' as const };
     case 'waiting': return { label: 'Waiting for salesperson', tone: 'amber' as const };
     case 'requesting_mic': return { label: 'Microphone permission', tone: 'amber' as const };
@@ -183,14 +187,9 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
     );
   }
 
-  const callState = snapshot ? callStateLabel(snapshot.callState) : { label: 'Not joined', tone: 'slate' as const };
+  const callState = callStateLabel(snapshot);
   const salespersonConnected = Boolean(snapshot?.peerParticipantId);
-  const incomingLive = Boolean(
-    snapshot &&
-      snapshot.remoteTrackState === 'live' &&
-      (snapshot.diagnostics.bytesReceived ?? 0) > 0 &&
-      !snapshot.speakerMuted
-  );
+  const incomingLive = Boolean(snapshot && snapshot.mediaFlowing && !snapshot.speakerMuted);
   const latestAi = [...(snapshot?.suggestions ?? [])].reverse().find((item) => item.text) ?? null;
 
   return (
@@ -222,6 +221,26 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
             {callState.label}
           </span>
         </header>
+
+        {snapshot?.iceConfigError ? (
+          <Banner tone="red" title="ICE / TURN configuration problem" testId="ice-error">
+            {snapshot.iceConfigError}
+          </Banner>
+        ) : null}
+        {snapshot && !snapshot.turnConfigured && !snapshot.iceConfigError ? (
+          <Banner tone="amber" title="TURN relay not configured" testId="turn-warning">
+            The call may stay silent on mobile data or strict NATs. The operator must configure TURN on the server.
+          </Banner>
+        ) : null}
+        {snapshot?.diagnostics.iceTransportPolicy === 'relay' && snapshot.relayCandidates === 0 ? (
+          <Banner tone="red" title="No relay path available" testId="relay-warning">
+            Relay-only mode is enabled but this network could not reach the TURN server. Check your connection or ask
+            the salesperson to verify the TURN configuration.
+          </Banner>
+        ) : null}
+        {snapshot?.iceConfigWarnings.length && !snapshot.iceConfigError ? (
+          <Banner tone="amber" title="ICE warning">{snapshot.iceConfigWarnings[0]}</Banner>
+        ) : null}
 
         {snapshot?.playbackBlocked ? (
           <Banner
@@ -472,6 +491,13 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
                     ['rtp in', `${snapshot?.diagnostics.bytesReceived ?? 0} B`],
                     ['playback', snapshot?.diagnostics.audioElementPaused ? 'paused' : 'playing'],
                     ['autoplay error', snapshot?.diagnostics.playbackError ?? 'none'],
+                    ['ice config', snapshot?.iceConfigLoaded ? 'loaded (session auth)' : snapshot?.iceConfigError ? 'error' : 'not loaded'],
+                    ['ice policy', snapshot?.diagnostics.iceTransportPolicy ?? 'unknown'],
+                    ['turn', snapshot ? `${snapshot.turnConfigured ? 'configured' : 'none'} / ${snapshot.turnCredentialMode}` : 'unknown'],
+                    ['relay candidates', String(snapshot?.relayCandidates ?? 0)],
+                    ['selected pair', snapshot?.selectedPair ?? 'none'],
+                    ['dtls', snapshot?.diagnostics.dtlsState ?? 'none'],
+                    ['media flowing', snapshot?.mediaFlowing ? 'yes (RTP received)' : 'no RTP yet'],
                     ['ai', snapshot?.aiStatus ?? 'not started'],
                     ['reconnects', String(snapshot?.reconnectAttempt ?? 0)],
                   ]}

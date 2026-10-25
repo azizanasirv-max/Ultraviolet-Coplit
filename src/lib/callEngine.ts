@@ -12,7 +12,7 @@
  * always the answerer. This removes glare by construction.
  */
 import { UltravoxSession, UltravoxSessionStatus, Role, Medium } from 'ultravox-client';
-import { getIceConfig } from './sessionApi';
+import { ApiError, getIceConfig, IceConfigResponse } from './sessionApi';
 
 export type ParticipantRole = 'customer' | 'salesperson';
 export type WsStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
@@ -42,6 +42,7 @@ export interface CallDiagnostics {
   pcState: RTCPeerConnectionState | 'none';
   iceState: RTCIceConnectionState | 'none';
   iceGatheringState: RTCIceGatheringState | 'none';
+  dtlsState: string;
   selectedLocalType: string;
   selectedRemoteType: string;
   relayPath: boolean;
@@ -88,15 +89,19 @@ export interface EngineSnapshot {
   reconnectAttempt: number;
   lastError: string | null;
   lastServerError: string | null;
+  /** True once the session-authenticated ICE payload was applied. */
+  iceConfigLoaded: boolean;
+  iceConfigError: string | null;
+  iceConfigWarnings: string[];
+  turnConfigured: boolean;
+  turnCredentialMode: 'ephemeral' | 'static' | 'none';
+  turnExpiresAt: number | null;
+  relayCandidates: number;
+  selectedPair: string;
+  /** RTP actually arriving within the last few seconds (not just "connected"). */
+  mediaFlowing: boolean;
   diagnostics: CallDiagnostics;
   logs: string[];
-}
-
-export interface IceConfigResponse {
-  iceServers: RTCIceServer[];
-  hasTurn: boolean;
-  hasStun: boolean;
-  iceTransportPolicy: 'all' | 'relay';
 }
 
 export interface CallEngineOptions {
@@ -118,14 +123,17 @@ const MAX_RECONNECT_ATTEMPTS = 8;
 const JOIN_ACK_TIMEOUT_MS = 10000;
 const MAX_LOGS = 140;
 
+// Used only before the authenticated payload arrives; start() aborts if the
+// real configuration cannot be fetched, so this never silently goes live.
 const DEFAULT_ICE: IceConfigResponse = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-  ],
+  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
   hasTurn: false,
   hasStun: true,
   iceTransportPolicy: 'all',
+  turn: { configured: false, credentialMode: 'none', urlCount: 0, expiresAt: null },
+  warnings: [],
+  errors: [],
+  generatedAt: new Date(0).toISOString(),
 };
 
 const hasLiveAudioTrack = (stream: MediaStream | null): boolean =>
@@ -208,6 +216,11 @@ export class CallEngine {
   private pendingIce: Array<{ candidate: RTCIceCandidateInit; from: string | null }> = [];
   private lastRemoteOfferSdp: string | null = null;
   private iceConfig: IceConfigResponse = DEFAULT_ICE;
+  private iceConfigLoaded = false;
+  private iceConfigError: string | null = null;
+  private iceConfigWarnings: string[] = [];
+  private lastMediaAt = 0;
+  private dtlsState = 'none';
 
   // Observed state
   private wsStatus: WsStatus = 'disconnected';
@@ -232,6 +245,7 @@ export class CallEngine {
     pcState: 'none',
     iceState: 'none',
     iceGatheringState: 'none',
+    dtlsState: 'none',
     selectedLocalType: 'none',
     selectedRemoteType: 'none',
     relayPath: false,
@@ -291,6 +305,18 @@ export class CallEngine {
       reconnectAttempt: this.reconnectAttempt,
       lastError: this.lastError,
       lastServerError: this.lastServerError,
+      iceConfigLoaded: this.iceConfigLoaded,
+      iceConfigError: this.iceConfigError,
+      iceConfigWarnings: this.iceConfigWarnings,
+      turnConfigured: this.iceConfig.turn.configured,
+      turnCredentialMode: this.iceConfig.turn.credentialMode,
+      turnExpiresAt: this.iceConfig.turn.expiresAt,
+      relayCandidates: this.candidateTypes.relay,
+      selectedPair:
+        this.diagnostics.selectedLocalType === 'none'
+          ? 'none'
+          : `${this.diagnostics.selectedLocalType} → ${this.diagnostics.selectedRemoteType}`,
+      mediaFlowing: this.lastMediaAt > 0 && Date.now() - this.lastMediaAt < 5000,
       diagnostics: { ...this.diagnostics, wsStatus: this.wsStatus },
       logs: this.logs,
     };
@@ -455,7 +481,16 @@ export class CallEngine {
     this.setState({ callState: 'requesting_mic', lastError: null });
     void this.unlockAudio();
 
-    await this.loadIceConfig();
+    const iceReady = await this.loadIceConfig();
+    if (!iceReady) {
+      // Never silently fall back to STUN-only when the deployment requires a
+      // relay or the configuration could not be verified.
+      this.started = false;
+      this.releaseLocalMedia('ICE configuration failed');
+      this.callState = 'failed';
+      this.emit();
+      return;
+    }
 
     const stream = await this.ensureLocalStream();
     if (!stream) {
@@ -503,31 +538,66 @@ export class CallEngine {
   }
 
   /**
-   * Loads the deployment's STUN/TURN configuration. Without this the browser
-   * would only use STUN and every mobile-data / symmetric-NAT pair would be
-   * silent in both directions.
+   * Loads and applies the session's STUN/TURN configuration before any peer
+   * connection exists. Returns false when the deployment configuration cannot
+   * be applied (for example relay-only mode without a usable TURN relay).
    */
-  private async loadIceConfig(): Promise<void> {
+  private async loadIceConfig(): Promise<boolean> {
     try {
-      const config = await getIceConfig();
+      const config = await getIceConfig(this.options.sessionId, this.options.credential);
       this.iceConfig = {
-        iceServers: Array.isArray(config.iceServers) && config.iceServers.length
-          ? config.iceServers
-          : DEFAULT_ICE.iceServers,
+        iceServers:
+          Array.isArray(config.iceServers) && config.iceServers.length
+            ? config.iceServers
+            : DEFAULT_ICE.iceServers,
         hasTurn: Boolean(config.hasTurn),
         hasStun: Boolean(config.hasStun),
         iceTransportPolicy: config.iceTransportPolicy === 'relay' ? 'relay' : 'all',
+        turn: config.turn ?? DEFAULT_ICE.turn,
+        warnings: Array.isArray(config.warnings) ? config.warnings : [],
+        errors: Array.isArray(config.errors) ? config.errors : [],
+        generatedAt: config.generatedAt || new Date().toISOString(),
       };
+      this.iceConfigLoaded = true;
+      this.iceConfigError = this.iceConfig.errors[0] ?? null;
+      this.iceConfigWarnings = this.iceConfig.warnings;
       this.diagnostics = {
         ...this.diagnostics,
         hasTurn: this.iceConfig.hasTurn,
         iceTransportPolicy: this.iceConfig.iceTransportPolicy,
       };
+
+      const turnServers = this.iceConfig.iceServers.filter((server) => {
+        const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+        return urls.some((url) => /^turns?:/i.test(url));
+      });
+      // Never log usernames/credentials, only shape.
       this.log(
-        `ICE configuration loaded (TURN ${this.iceConfig.hasTurn ? 'configured' : 'not configured'}, policy ${this.iceConfig.iceTransportPolicy}).`
+        `ICE configuration loaded: ${this.iceConfig.iceServers.length} server entr(ies), ` +
+          `TURN ${this.iceConfig.turn.configured ? `configured (${this.iceConfig.turn.credentialMode}, ${turnServers.length} entry)` : 'not configured'}, ` +
+          `policy ${this.iceConfig.iceTransportPolicy}.`
       );
+      for (const warning of this.iceConfig.warnings) this.log(`ICE warning: ${warning}`);
+      for (const error of this.iceConfig.errors) this.log(`ICE error: ${error}`);
+
+      if (this.iceConfig.errors.length > 0 && this.iceConfig.iceTransportPolicy === 'relay') {
+        this.lastError =
+          this.iceConfig.errors[0] ||
+          'Relay-only ICE was requested but no usable TURN relay is configured.';
+        return false;
+      }
+      return true;
     } catch (err) {
-      this.log(`ICE configuration unavailable, using STUN defaults: ${(err as Error)?.message || err}`);
+      const apiError = err as ApiError;
+      const detail =
+        apiError?.code === 'TURN_MISCONFIGURED'
+          ? apiError.message
+          : `ICE configuration request failed: ${(err as Error)?.message || err}`;
+      this.iceConfigLoaded = false;
+      this.iceConfigError = detail;
+      this.lastError = detail;
+      this.log(`ICE configuration unavailable; refusing to start with unverified ICE settings. ${detail}`);
+      return false;
     }
   }
 
@@ -896,10 +966,13 @@ export class CallEngine {
     this.pendingIce = [];
     this.lastRemoteOfferSdp = null;
     this.remoteTrackState = 'none';
+    this.lastMediaAt = 0;
+    this.dtlsState = 'none';
     this.diagnostics = {
       ...this.diagnostics,
       pcState: 'none',
       iceState: 'none',
+      dtlsState: 'none',
       localSenderCount: 0,
       bytesSent: 0,
       bytesReceived: 0,
@@ -914,7 +987,10 @@ export class CallEngine {
 
     const generation = this.pcGeneration + 1;
     this.pcGeneration = generation;
+    this.candidateTypes = { host: 0, srflx: 0, prflx: 0, relay: 0 };
 
+    // The fetched (session-authenticated) ICE configuration is applied to every
+    // peer connection, including reconnects and ICE restarts.
     const configuration: RTCConfiguration = {
       iceServers: this.iceConfig.iceServers,
       iceTransportPolicy: this.iceConfig.iceTransportPolicy,
@@ -924,7 +1000,9 @@ export class CallEngine {
     const pc = new RTCPeerConnection(configuration);
     this.pc = pc;
     this.log(
-      `Created RTCPeerConnection (peer ${peer.role}, TURN ${this.iceConfig.hasTurn ? 'configured' : 'absent'}, policy ${this.iceConfig.iceTransportPolicy}).`
+      `Created RTCPeerConnection (peer ${peer.role}, ${this.iceConfig.iceServers.length} ICE entr(ies), ` +
+        `TURN ${this.iceConfig.turn.configured ? this.iceConfig.turn.credentialMode : 'absent'}, ` +
+        `policy ${this.iceConfig.iceTransportPolicy}).`
     );
 
     const stream = this.localStream;
@@ -1604,6 +1682,9 @@ export class CallEngine {
           if (report.type === 'outbound-rtp' && report.kind === 'audio') {
             next.bytesSent = report.bytesSent ?? 0;
           }
+          if (report.type === 'transport') {
+            next.dtlsState = report.dtlsState ?? 'unknown';
+          }
         });
 
         if (pair) {
@@ -1616,6 +1697,10 @@ export class CallEngine {
 
         const now = Date.now();
         const previous = this.lastStats;
+        if (next.bytesReceived > (previous?.bytesReceived ?? 0)) {
+          // RTP is actually arriving: this is the only proof of working media.
+          this.lastMediaAt = now;
+        }
         if (previous) {
           const seconds = Math.max((now - previous.at) / 1000, 0.001);
           next.sendBitrateKbps = Math.round(((next.bytesSent - previous.bytesSent) * 8) / seconds / 1000);
@@ -1632,6 +1717,7 @@ export class CallEngine {
     }
 
     this.diagnostics = next;
+    this.dtlsState = next.dtlsState;
     this.emit();
   }
 
@@ -1663,6 +1749,12 @@ export class CallEngine {
         aiStatus: this.aiStatus,
         reconnectAttempt: this.reconnectAttempt,
         candidates: this.diagnostics.candidates,
+        iceConfigLoaded: this.iceConfigLoaded,
+        turnConfigured: this.iceConfig.turn.configured,
+        turnCredentialMode: this.iceConfig.turn.credentialMode,
+        relayCandidates: this.candidateTypes.relay,
+        mediaFlowing: this.lastMediaAt > 0 && Date.now() - this.lastMediaAt < 5000,
+        dtlsState: this.dtlsState,
       },
     });
   }

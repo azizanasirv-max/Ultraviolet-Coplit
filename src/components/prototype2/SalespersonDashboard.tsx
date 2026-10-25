@@ -17,9 +17,21 @@ import { Banner, DiagGrid, Panel, StatusLine, timeLeft } from './ui';
 
 const ROLE: ParticipantRole = 'salesperson';
 
-const callStateLabel = (state: EngineSnapshot['callState']): { label: string; tone: 'emerald' | 'amber' | 'red' | 'slate' } => {
+type StatusTone = 'emerald' | 'amber' | 'red' | 'slate' | 'indigo';
+
+/**
+ * "Connected" alone is not proof of audio: ICE/DTLS can connect while no RTP
+ * arrives (blocked relay, rejected TURN credentials, muted remote track). The
+ * label only claims working audio once RTP has actually been received.
+ */
+const callStateLabel = (snapshot: EngineSnapshot | null): { label: string; tone: StatusTone } => {
+  const state = snapshot?.callState ?? 'idle';
   switch (state) {
-    case 'connected': return { label: 'Audio connected', tone: 'emerald' };
+    case 'connected':
+      return snapshot?.mediaFlowing
+        ? { label: 'Audio flowing', tone: 'emerald' }
+        : { label: 'Connected — waiting for media', tone: 'amber' };
+    case 'disconnected': return { label: 'Peer disconnected', tone: 'red' };
     case 'connecting': return { label: 'Connecting audio', tone: 'amber' };
     case 'waiting': return { label: 'Waiting for customer', tone: 'amber' };
     case 'requesting_mic': return { label: 'Requesting microphone', tone: 'amber' };
@@ -27,7 +39,6 @@ const callStateLabel = (state: EngineSnapshot['callState']): { label: string; to
     case 'failed': return { label: 'Connection failed', tone: 'red' };
     case 'mic_denied': return { label: 'Microphone blocked', tone: 'red' };
     case 'rejected': return { label: 'Join rejected', tone: 'red' };
-    case 'disconnected': return { label: 'Peer disconnected', tone: 'red' };
     case 'ended': return { label: 'Call ended', tone: 'slate' };
     default: return { label: 'Not connected', tone: 'slate' };
   }
@@ -265,14 +276,9 @@ export const SalespersonDashboard: React.FC = () => {
     await createFreshSession();
   };
 
-  const callState = snapshot ? callStateLabel(snapshot.callState) : { label: 'Not started', tone: 'slate' as const };
+  const callState = callStateLabel(snapshot);
   const micLive = snapshot?.micPermission === 'granted' && snapshot.localTrackState === 'live';
-  const incomingAudioLive = Boolean(
-    snapshot &&
-      snapshot.remoteTrackState === 'live' &&
-      (snapshot.diagnostics.bytesReceived ?? 0) > 0 &&
-      !snapshot.speakerMuted
-  );
+  const incomingAudioLive = Boolean(snapshot && snapshot.mediaFlowing && !snapshot.speakerMuted);
 
   const latestSuggestion = useMemo(
     () => (snapshot?.suggestions.length ? snapshot.suggestions[snapshot.suggestions.length - 1] : null),
@@ -356,6 +362,29 @@ export const SalespersonDashboard: React.FC = () => {
         </header>
 
         {bootError ? <Banner tone="red" title="Session error">{bootError}</Banner> : null}
+        {snapshot?.iceConfigError ? (
+          <Banner tone="red" title="ICE / TURN configuration problem" testId="ice-error" action={
+            <button onClick={() => void restartCall()} className="underline">retry</button>
+          }>
+            {snapshot.iceConfigError}
+          </Banner>
+        ) : null}
+        {snapshot && !snapshot.turnConfigured && !snapshot.iceConfigError ? (
+          <Banner tone="amber" title="TURN relay not configured" testId="turn-warning">
+            Call audio works only when both devices can reach each other directly. Mobile data or strict NATs need
+            TURN_URLS with TURN_SECRET (preferred) or TURN_USERNAME/TURN_CREDENTIAL on the server.
+          </Banner>
+        ) : null}
+        {snapshot?.diagnostics.iceTransportPolicy === 'relay' && snapshot.relayCandidates === 0 ? (
+          <Banner tone="red" title="Relay-only mode: no relay candidates gathered" testId="relay-warning">
+            TURN is unreachable or rejected the credentials, so no media path can be established. Check TURN_URLS,
+            TURN_SECRET/TURN_USERNAME/TURN_CREDENTIAL and UDP/TCP reachability from this network.
+          </Banner>
+        ) : null}
+        {snapshot?.iceConfigWarnings.length && !snapshot.iceConfigError ? (
+          <Banner tone="amber" title="ICE warning">{snapshot.iceConfigWarnings[0]}</Banner>
+        ) : null}
+
         {actionError ? (
           <Banner tone="red" title="Action failed" action={<button onClick={() => setActionError(null)} className="underline">dismiss</button>}>
             {actionError}
@@ -667,6 +696,14 @@ export const SalespersonDashboard: React.FC = () => {
                     ['rtp in', `${snapshot?.diagnostics.bytesReceived ?? 0} B`],
                     ['playback', snapshot?.diagnostics.audioElementPaused ? 'paused' : 'playing'],
                     ['autoplay error', snapshot?.diagnostics.playbackError ?? 'none'],
+                    ['ice config', snapshot?.iceConfigLoaded ? 'loaded (session auth)' : snapshot?.iceConfigError ? 'error' : 'not loaded'],
+                    ['ice policy', snapshot?.diagnostics.iceTransportPolicy ?? 'unknown'],
+                    ['turn', snapshot ? `${snapshot.turnConfigured ? 'configured' : 'none'} / ${snapshot.turnCredentialMode}` : 'unknown'],
+                    ['turn cred expiry', snapshot?.turnExpiresAt ? new Date(snapshot.turnExpiresAt).toLocaleTimeString() : 'n/a'],
+                    ['relay candidates', String(snapshot?.relayCandidates ?? 0)],
+                    ['selected pair', snapshot?.selectedPair ?? 'none'],
+                    ['dtls', snapshot?.diagnostics.dtlsState ?? 'none'],
+                    ['media flowing', snapshot?.mediaFlowing ? 'yes (RTP received)' : 'no RTP yet'],
                     ['reconnects', String(snapshot?.reconnectAttempt ?? 0)],
                   ]}
                 />
@@ -688,9 +725,11 @@ export const SalespersonDashboard: React.FC = () => {
                       ['relay failures', String(serverDiagnostics.diagnostics.signals.relayFailures)],
                       ['rejected msgs', String(serverDiagnostics.diagnostics.signals.rejectedMessages)],
                       ['last server error', serverDiagnostics.diagnostics.signals.lastError ?? 'none'],
-                      ['TURN configured', String(serverDiagnostics.ice.hasTurn)],
+                      ['TURN configured', String(serverDiagnostics.ice.configured)],
+                      ['TURN credentials', serverDiagnostics.ice.credentialMode],
                       ['ICE policy', serverDiagnostics.ice.iceTransportPolicy],
-                      ['Ultravox key', serverDiagnostics.hasUltravoxKey ? 'present' : 'missing'],
+                      ['ICE warnings', String(serverDiagnostics.ice.warnings.length)],
+                      ['AI ready', serverDiagnostics.ai.ready ? 'yes' : `no (${serverDiagnostics.ai.missing.join(', ')})`],
                       ['storage', serverDiagnostics.diagnostics.storage],
                     ]}
                   />

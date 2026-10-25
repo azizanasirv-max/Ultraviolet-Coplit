@@ -12,7 +12,6 @@
  *     same session; unknown peers get a machine-readable `signal_error`.
  */
 import express, { Request, Response } from 'express';
-import { createServer as createViteServer } from 'vite';
 import http from 'http';
 import { pathToFileURL } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -21,68 +20,25 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { ParticipantRole, SessionRecord, SessionStore } from './server/sessionStore';
+import {
+  buildIceConfig,
+  describeIceSettingsForLog,
+  resolveIceTransportPolicy,
+  turnSummary,
+} from './server/turn';
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const DEFAULT_STUN_URLS = [
-  'stun:stun.l.google.com:19302',
-  'stun:stun1.l.google.com:19302',
-  'stun:stun2.l.google.com:19302',
-];
-
 const MAX_SESSIONS = Number(process.env.MAX_SESSIONS || 500);
 const JOIN_DEADLINE_MS = 10000;
 const REDEEM_RATE_LIMIT = 30;
 const REDEEM_RATE_WINDOW_MS = 60_000;
 
-const parseUrlList = (value: unknown): string[] =>
-  typeof value === 'string'
-    ? value
-        .split(',')
-        .map((entry) => entry.trim())
-        .filter(Boolean)
-    : [];
-
-interface RTCIceServerLike {
-  urls: string | string[];
-  username?: string;
-  credential?: string;
-}
-
-/**
- * ICE server list for the peer-to-peer (human to human) audio call.
- *
- * STUN alone only works when both devices can reach each other directly. When
- * either side is behind a symmetric / carrier-grade NAT (a phone on mobile data
- * for example) no direct path exists and media never flows, even though
- * signaling and the AI pipeline keep working. TURN is the only fix, so it must
- * be configurable per deployment.
- */
-const buildIceServers = (): RTCIceServerLike[] => {
-  const stunUrls = parseUrlList(process.env.STUN_URLS);
-  const turnUrls = parseUrlList(process.env.TURN_URLS);
-
-  const iceServers: RTCIceServerLike[] = [
-    { urls: stunUrls.length > 0 ? stunUrls : DEFAULT_STUN_URLS },
-  ];
-
-  if (turnUrls.length > 0) {
-    iceServers.push({
-      urls: turnUrls,
-      username: process.env.TURN_USERNAME || '',
-      credential: process.env.TURN_CREDENTIAL || '',
-    });
-  }
-
-  return iceServers;
-};
-
-/** Optional relay-only mode for deployments whose networks block direct media. */
-const resolveIceTransportPolicy = (): 'all' | 'relay' =>
-  process.env.ICE_TRANSPORT_POLICY === 'relay' ? 'relay' : 'all';
+/** True when the server has a usable Ultravox key (never the key itself). */
+const ultravoxReady = (): boolean => Boolean(ultravoxApiKey());
 
 const configuredPublicUrl = (): string | null => {
   const value = process.env.APP_URL?.trim();
@@ -95,6 +51,41 @@ const ultravoxApiKey = (): string | null => {
   const key = process.env.ULTRAVOX_API_KEY?.trim();
   if (!key || key === 'MY_ULTRAVOX_API_KEY') return null;
   return key;
+};
+
+/** AI readiness: the app serves human audio even when the AI key is absent. */
+const aiReadiness = () => {
+  const ready = Boolean(ultravoxApiKey());
+  return {
+    ready,
+    provider: 'ultravox',
+    model: 'ultravox-v0.7',
+    missing: ready ? [] : ['ULTRAVOX_API_KEY'],
+    message: ready
+      ? 'AI conversation can be started for a session.'
+      : 'AI suggestions are unavailable until ULTRAVOX_API_KEY is set on the server. Human-to-human audio is unaffected.',
+  };
+};
+
+/** APP_URL sanity checks: invitation links and WSS depend on it. */
+const appUrlDiagnostics = () => {
+  const configured = configuredPublicUrl();
+  const warnings: string[] = [];
+  if (!configured) {
+    warnings.push(
+      'APP_URL is not set: invitation links fall back to the request host. Set APP_URL to the public https Render URL.'
+    );
+  } else {
+    if (process.env.NODE_ENV === 'production' && !configured.startsWith('https://')) {
+      warnings.push(
+        'APP_URL must use https in production, otherwise microphone access and WSS fail for the customer.'
+      );
+    }
+    if (/localhost|127\.0\.0\.1/i.test(configured) && process.env.NODE_ENV === 'production') {
+      warnings.push('APP_URL points at localhost in production; customers cannot open that link.');
+    }
+  }
+  return { configured, warnings };
 };
 
 const roleOf = (value: unknown): ParticipantRole | null =>
@@ -291,14 +282,10 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     const diagnostics = store.diagnostics(session);
     res.json({
       diagnostics,
-      ice: {
-        hasTurn: buildIceServers().some((serverConfig) => {
-          const urls = Array.isArray(serverConfig.urls) ? serverConfig.urls : [serverConfig.urls];
-          return urls.some((url) => /^turns?:/i.test(url));
-        }),
-        iceTransportPolicy: resolveIceTransportPolicy(),
-      },
+      // Summary only: never include TURN credentials here.
+      ice: turnSummary(),
       hasUltravoxKey: Boolean(ultravoxApiKey()),
+      ai: aiReadiness(),
     });
   });
 
@@ -494,37 +481,68 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     }
   });
 
-  // ICE configuration for the peer-to-peer human-to-human audio call. The
-  // browser cannot read deployment secrets directly, so STUN/TURN servers are
-  // resolved here, and only here, from the server environment.
-  app.get('/api/ice-config', (_req, res) => {
-    const iceServers = buildIceServers();
-    const urlsOf = (serverConfig: RTCIceServerLike) =>
-      Array.isArray(serverConfig.urls) ? serverConfig.urls : [serverConfig.urls];
+  /**
+   * ICE/TURN configuration for one authenticated participant.
+   *
+   * This replaced the previous public `/api/ice-config`: TURN credentials must
+   * never be handed to an unauthenticated visitor. Both the salesperson and the
+   * customer of a session may read it; nobody else can.
+   */
+  app.get('/api/sessions/:sessionId/ice-config', (req, res) => {
+    const session = store.getSession(req.params.sessionId);
+    if (!session || store.isExpiredSession(session.sessionId)) {
+      res.status(404).json({ error: 'SESSION_NOT_FOUND', message: 'Unknown or expired session.' });
+      return;
+    }
 
-    res.json({
-      iceServers,
-      hasTurn: iceServers.some((serverConfig) =>
-        urlsOf(serverConfig).some((url) => /^turns?:/i.test(url))
-      ),
-      hasStun: iceServers.some((serverConfig) =>
-        urlsOf(serverConfig).some((url) => /^stuns?:/i.test(url))
-      ),
-      iceTransportPolicy: resolveIceTransportPolicy(),
-      timestamp: new Date().toISOString(),
-    });
+    const credential = bearer(req);
+    const authorized =
+      Boolean(store.authorizeSalesperson(session.sessionId, credential)) ||
+      Boolean(store.authorizeCustomer(session.sessionId, credential));
+    if (!authorized) {
+      store.countSignal(session.sessionId, 'rejectedMessages');
+      res.status(401).json({
+        error: 'UNAUTHORIZED',
+        message: 'A valid participant credential is required for ICE configuration.',
+      });
+      return;
+    }
+
+    const config = buildIceConfig({ sessionId: session.sessionId });
+    res.setHeader('Cache-Control', 'no-store');
+
+    // Relay-only mode without a usable relay is a deployment error. Returning
+    // STUN-only servers here would silently produce a connected-but-silent call.
+    if (config.errors.length > 0 && config.iceTransportPolicy === 'relay') {
+      res.status(503).json({
+        error: 'TURN_MISCONFIGURED',
+        message: config.errors[0],
+        ...config,
+      });
+      return;
+    }
+
+    res.json(config);
   });
 
   app.get('/api/health', (_req, res) => {
+    // Public: capability flags only. No keys, no TURN usernames/credentials.
+    const appUrl = appUrlDiagnostics();
+    const ice = turnSummary();
+    const ai = aiReadiness();
     res.json({
       status: 'ok',
       model: 'ultravox-v0.7',
-      hasUltravoxKey: Boolean(ultravoxApiKey()),
-      hasTurn: Boolean(parseUrlList(process.env.TURN_URLS).length),
-      iceTransportPolicy: resolveIceTransportPolicy(),
-      publicAppUrl: configuredPublicUrl(),
+      ai,
+      hasUltravoxKey: ai.ready,
+      ice,
+      hasTurn: ice.configured,
+      iceTransportPolicy: ice.iceTransportPolicy,
+      publicAppUrl: appUrl.configured,
+      appUrlWarnings: appUrl.warnings,
       sessions: store.stats(),
       uptimeSeconds: Math.round(process.uptime()),
+      nodeVersion: process.version,
       timestamp: new Date().toISOString(),
     });
   });
@@ -544,7 +562,8 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       'wsStatus', 'callState', 'micPermission', 'muted', 'localTrackState', 'localSenderCount',
       'remoteTrackState', 'playbackBlocked', 'bytesSent', 'bytesReceived', 'pcState', 'iceState',
       'iceGatheringState', 'selectedLocalType', 'selectedRemoteType', 'relayPath', 'aiStatus',
-      'reconnectAttempt', 'candidates',
+      'reconnectAttempt', 'candidates', 'iceConfigLoaded', 'turnConfigured',
+      'turnCredentialMode', 'relayCandidates', 'mediaFlowing', 'dtlsState',
     ]);
     const out: Record<string, unknown> = {};
     for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
@@ -873,9 +892,11 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     }
   });
 
-  // Vite middleware in dev vs static files in prod
+  // Vite is a build/dev-time dependency only: production serves the built
+  // assets and never loads vite, so a production install can omit devDeps.
   if (options.serveFrontend !== false) {
     if (process.env.NODE_ENV !== 'production') {
+      const { createServer: createViteServer } = await import('vite');
       const vite = await createViteServer({
         server: { middlewareMode: true, host: '0.0.0.0', port: 3000 },
         appType: 'spa',
@@ -883,17 +904,39 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       app.use(vite.middlewares);
     } else {
       const distDir = path.join(__dirname, 'dist');
+      const indexPath = path.join(distDir, 'index.html');
+      if (!fs.existsSync(indexPath)) {
+        console.error(
+          `[startup] NODE_ENV=production but ${indexPath} is missing. Run "npm run build" during the build step.`
+        );
+      }
       app.use(express.static(distDir));
       app.get('*', (_req, res) => {
-        const indexPath = path.join(distDir, 'index.html');
         if (fs.existsSync(indexPath)) {
           res.sendFile(indexPath);
         } else {
-          res.status(404).send('Build output dist/index.html not found. Please run npm run build.');
+          res
+            .status(503)
+            .send('Build output dist/index.html not found. The build step (npm run build) did not run or failed.');
         }
       });
     }
   }
+
+  // Startup ICE/TURN diagnostics: actionable, and free of credentials/URLs.
+  console.log(`[ice] ${describeIceSettingsForLog()}`);
+  const iceStartup = turnSummary();
+  if (iceStartup.hasErrors) {
+    console.error(`[ice] CONFIGURATION ERROR: ${iceStartup.warnings.join(' ')}`);
+  } else if (!iceStartup.configured) {
+    console.warn(`[ice] ${iceStartup.warnings.join(' ')}`);
+  } else if (iceStartup.credentialMode === 'static') {
+    console.warn('[ice] TURN uses static credentials. Set TURN_SECRET for short-lived credentials.');
+  }
+
+  const aiStartup = aiReadiness();
+  if (!aiStartup.ready) console.warn(`[ai] ${aiStartup.message}`);
+  for (const warning of appUrlDiagnostics().warnings) console.warn(`[app-url] ${warning}`);
 
   // Periodically release expired sessions / stale participants.
   const sweeper = setInterval(() => store.sweep(), 60_000);

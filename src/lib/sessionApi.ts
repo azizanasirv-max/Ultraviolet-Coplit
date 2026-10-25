@@ -61,31 +61,77 @@ export interface SessionDiagnosticsResponse {
     serverTime: number;
     storage: string;
   };
-  ice: { hasTurn: boolean; iceTransportPolicy: 'all' | 'relay' };
+  ice: {
+    configured: boolean;
+    credentialMode: 'ephemeral' | 'static' | 'none';
+    iceTransportPolicy: 'all' | 'relay';
+    hasErrors: boolean;
+    warnings: string[];
+  };
+  ai: {
+    ready: boolean;
+    provider: string;
+    model: string;
+    missing: string[];
+    message: string;
+  };
   hasUltravoxKey: boolean;
 }
 
 export interface HealthResponse {
   status: string;
   model: string;
+  ai: {
+    ready: boolean;
+    provider: string;
+    model: string;
+    missing: string[];
+    message: string;
+  };
   hasUltravoxKey: boolean;
+  ice: {
+    configured: boolean;
+    credentialMode: 'ephemeral' | 'static' | 'none';
+    iceTransportPolicy: 'all' | 'relay';
+    hasErrors: boolean;
+    warnings: string[];
+  };
   hasTurn: boolean;
   iceTransportPolicy: 'all' | 'relay';
   publicAppUrl: string | null;
+  appUrlWarnings: string[];
   sessions: { sessions: number; invitations: number; participants: number };
-  serverTime?: string;
 }
 
 export class ApiError extends Error {
   readonly code: string;
   readonly status: number;
+  /** Parsed error body (may carry TURN warnings/errors). Never contains secrets. */
+  readonly details: Record<string, unknown>;
 
-  constructor(code: string, message: string, status: number) {
+  constructor(code: string, message: string, status: number, details: Record<string, unknown> = {}) {
     super(message);
     this.name = 'ApiError';
     this.code = code;
     this.status = status;
+    this.details = details;
   }
+}
+
+export interface IceConfigResponse {
+  iceServers: RTCIceServer[];
+  hasTurn: boolean;
+  hasStun: boolean;
+  iceTransportPolicy: 'all' | 'relay';
+  turn: {
+    configured: boolean;
+    credentialMode: 'ephemeral' | 'static' | 'none';
+    urlCount: number;
+    expiresAt: number | null;
+  };
+  warnings: string[];
+  errors: string[];
+  generatedAt: string;
 }
 
 const request = async <T>(path: string, init: RequestInit = {}): Promise<T> => {
@@ -102,7 +148,8 @@ const request = async <T>(path: string, init: RequestInit = {}): Promise<T> => {
     throw new ApiError(
       typeof body?.error === 'string' ? body.error : 'REQUEST_FAILED',
       typeof body?.message === 'string' ? body.message : `Request failed (HTTP ${response.status}).`,
-      response.status
+      response.status,
+      body && typeof body === 'object' ? (body as Record<string, unknown>) : {}
     );
   }
   return body as T;
@@ -152,11 +199,13 @@ export const redeemInvitation = (
     body: JSON.stringify({ inviteToken, customerKey: customerKey || undefined }),
   });
 
-export const getIceConfig = (): Promise<{
-  iceServers: RTCIceServer[];
-  hasTurn: boolean;
-  hasStun: boolean;
-  iceTransportPolicy: 'all' | 'relay';
-}> => request('/api/ice-config');
+/**
+ * ICE/TURN configuration for one participant. Session-authenticated: TURN
+ * credentials are never served to anonymous visitors.
+ */
+export const getIceConfig = (sessionId: string, credential: string): Promise<IceConfigResponse> =>
+  request(`/api/sessions/${encodeURIComponent(sessionId)}/ice-config`, {
+    headers: auth(credential),
+  });
 
 export const getHealth = (): Promise<HealthResponse> => request('/api/health');

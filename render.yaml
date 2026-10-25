@@ -1,0 +1,47 @@
+# Render Blueprint for Prototype 2.
+#
+# Build/runtime strategy (single, reproducible): npm + committed package-lock.json.
+#   - `npm ci --include=dev` installs the exact locked tree, including build tools.
+#   - `npm run build` produces dist/ (Vite) served by the Node server.
+#   - `npm start` runs the TypeScript server through tsx (a runtime dependency),
+#     never the Vite dev server.
+#
+# Secrets are marked `sync: false`: Render prompts for them in the dashboard and
+# they are not stored in this repository.
+services:
+  - type: web
+    name: ultraviolet-copilot
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 22.14.0
+      - key: NODE_ENV
+        value: production
+      - key: APP_URL
+        sync: false
+      - key: ULTRAVOX_API_KEY
+        sync: false
+      # TURN relay. TURN_SECRET (coturn REST style, short-lived credentials) is
+      # preferred; TURN_USERNAME + TURN_CREDENTIAL are the static fallback.
+      - key: TURN_URLS
+        sync: false
+      - key: TURN_SECRET
+        sync: false
+      - key: TURN_USERNAME
+        sync: false
+      - key: TURN_CREDENTIAL
+        sync: false
+      - key: STUN_URLS
+        sync: false
+      - key: ICE_TRANSPORT_POLICY
+        value: all
+      - key: TURN_TTL_SECONDS
+        value: '3600'
+      - key: MAX_SESSIONS
+        value: '500'

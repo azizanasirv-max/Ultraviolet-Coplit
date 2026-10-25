@@ -436,3 +436,233 @@ test('prototype2 three-path audio with synthetic media', async (t) => {
   await salespersonContext.close();
   await customerContext.close();
 });
+
+// ---------------------------------------------------------------------------
+// TURN configuration path (Chromium + a mock TURN endpoint; no real relay)
+//
+// The TURN URLs below intentionally point at .invalid. These tests prove the
+// client fetches the session-authenticated config, applies it to the peer
+// connection, applies relay-only policy, and refuses to start when relay-only
+// mode is misconfigured. They do NOT prove a real relay carries media.
+// ---------------------------------------------------------------------------
+
+const ICE_ENV_KEYS = [
+  'TURN_URLS',
+  'TURN_USERNAME',
+  'TURN_CREDENTIAL',
+  'TURN_SECRET',
+  'ICE_TRANSPORT_POLICY',
+  'STUN_URLS',
+] as const;
+
+const applyIceEnv = (values: Partial<Record<(typeof ICE_ENV_KEYS)[number], string | null>>) => {
+  const saved: Record<string, string | undefined> = {};
+  for (const key of ICE_ENV_KEYS) saved[key] = process.env[key];
+  for (const [key, value] of Object.entries(values)) {
+    if (value === null || value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  return () => {
+    for (const key of ICE_ENV_KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  };
+};
+
+test('TURN configuration is fetched with session auth and applied to every peer connection', async asyncTest => {
+  const restoreEnv = applyIceEnv({
+    TURN_URLS: 'turn:turn.invalid:3478?transport=udp,turns:turn.invalid:5349?transport=tcp',
+    TURN_USERNAME: 'mock-turn-user',
+    TURN_CREDENTIAL: 'mock-turn-pass',
+    TURN_SECRET: null,
+    ICE_TRANSPORT_POLICY: 'all',
+    STUN_URLS: null,
+  });
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const base = `http://127.0.0.1:${server.port}`;
+  const browser = await launchBrowser();
+  asyncTest.after(async () => {
+    await browser.close();
+    await server.close();
+    restoreEnv();
+  });
+
+  const salespersonContext = await openContext(browser);
+  const customerContext = await openContext(browser);
+  const salespersonPage = await salespersonContext.newPage();
+  const customerPage = await customerContext.newPage();
+
+  await salespersonPage.goto(`${base}/sales`, { waitUntil: 'domcontentloaded' });
+  await salespersonPage.waitForSelector('[data-testid="salesperson-invite-url"]', { timeout: 20000 });
+  const inviteUrl = await salespersonPage.inputValue('[data-testid="salesperson-invite-url"]');
+  await customerPage.goto(inviteUrl, { waitUntil: 'domcontentloaded' });
+  await customerPage.waitForSelector('[data-testid="customer-prejoin"]', { timeout: 20000 });
+
+  await salespersonPage.click('[data-testid="join-call"]');
+  await customerPage.click('[data-testid="join-call"]');
+  await waitFor(() => snapshot(salespersonPage), (value) => value.callState === 'connected', 30000);
+
+  const readConfig = (page: Page) =>
+    page.evaluate(() => {
+      const pc = (window as any).__pcs.find((item: any) => item.connectionState !== 'closed');
+      const configuration = pc.getConfiguration();
+      return {
+        iceTransportPolicy: configuration.iceTransportPolicy,
+        iceServers: configuration.iceServers.map((entry: any) => ({
+          urls: Array.isArray(entry.urls) ? entry.urls : [entry.urls],
+          username: entry.username,
+          credential: entry.credential,
+        })),
+      };
+    });
+
+  for (const page of [salespersonPage, customerPage]) {
+    const configuration = await readConfig(page);
+    assert.equal(configuration.iceTransportPolicy, 'all');
+    const turn = configuration.iceServers.find((entry: any) =>
+      entry.urls.some((url: string) => url.startsWith('turn'))
+    );
+    assert.ok(turn, 'peer connection must include the TURN server from the server payload');
+    assert.deepEqual(turn.urls, [
+      'turn:turn.invalid:3478?transport=udp',
+      'turns:turn.invalid:5349?transport=tcp',
+    ]);
+    assert.equal(turn.username, 'mock-turn-user');
+    assert.equal(turn.credential, 'mock-turn-pass');
+  }
+
+  // Diagnostics must not leak the credentials even though the PC holds them.
+  for (const page of [salespersonPage, customerPage]) {
+    const state = await snapshot(page);
+    const rendered = await page.evaluate(() => document.body.innerText);
+    for (const secret of ['mock-turn-pass', 'mock-turn-user']) {
+      assert.ok(!JSON.stringify(state).includes(secret), `snapshot leaked ${secret}`);
+      assert.ok(!rendered.includes(secret), `DOM leaked ${secret}`);
+    }
+    assert.equal(state.iceConfigLoaded, true);
+    assert.equal(state.turnConfigured, true);
+    assert.equal(state.turnCredentialMode, 'static');
+  }
+
+  // A reconnected peer connection must still receive the same ICE config.
+  await customerPage.click('[data-testid="reconnect"]');
+  await waitFor(() => snapshot(customerPage), (value) => value.callState !== 'connected', 10000);
+  await waitFor(
+    () => snapshot(customerPage),
+    (value) => value.callState === 'connected' && value.mediaFlowing,
+    30000
+  );
+  const reconnected = await readConfig(customerPage);
+  const reconnectedTurn = reconnected.iceServers.find((entry: any) =>
+    entry.urls.some((url: string) => url.startsWith('turn'))
+  );
+  assert.ok(reconnectedTurn, 'reconnect must keep the TURN server configuration');
+  assert.equal(reconnectedTurn.username, 'mock-turn-user');
+
+  await salespersonContext.close();
+  await customerContext.close();
+});
+
+test('relay-only policy is applied and never reported as working audio without relay candidates', async asyncTest => {
+  const restoreEnv = applyIceEnv({
+    TURN_URLS: 'turn:turn.invalid:3478?transport=udp',
+    TURN_USERNAME: 'mock-turn-user',
+    TURN_CREDENTIAL: 'mock-turn-pass',
+    TURN_SECRET: null,
+    ICE_TRANSPORT_POLICY: 'relay',
+    STUN_URLS: null,
+  });
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const base = `http://127.0.0.1:${server.port}`;
+  const browser = await launchBrowser();
+  asyncTest.after(async () => {
+    await browser.close();
+    await server.close();
+    restoreEnv();
+  });
+
+  const salespersonContext = await openContext(browser);
+  const customerContext = await openContext(browser);
+  const salespersonPage = await salespersonContext.newPage();
+  const customerPage = await customerContext.newPage();
+
+  await salespersonPage.goto(`${base}/sales`, { waitUntil: 'domcontentloaded' });
+  await salespersonPage.waitForSelector('[data-testid="salesperson-invite-url"]', { timeout: 20000 });
+  const inviteUrl = await salespersonPage.inputValue('[data-testid="salesperson-invite-url"]');
+  await customerPage.goto(inviteUrl, { waitUntil: 'domcontentloaded' });
+  await customerPage.waitForSelector('[data-testid="customer-prejoin"]', { timeout: 20000 });
+
+  await salespersonPage.click('[data-testid="join-call"]');
+  await customerPage.click('[data-testid="join-call"]');
+
+  const state = await waitFor(
+    () => snapshot(salespersonPage),
+    (value) => value.iceConfigLoaded === true,
+    15000
+  );
+  assert.equal(state.diagnostics.iceTransportPolicy, 'relay');
+
+  // Wait until the peer connection exists (it is created after the peer joins).
+  await waitFor(
+    async () => ({ count: await salespersonPage.evaluate(() => ((window as any).__pcs || []).length) }),
+    (value) => value.count > 0,
+    15000
+  );
+  const policy = await salespersonPage.evaluate(() => {
+    const pc = (window as any).__pcs[0];
+    return pc?.getConfiguration().iceTransportPolicy ?? 'no-pc';
+  });
+  assert.equal(policy, 'relay', 'relay-only policy must reach RTCPeerConnection');
+
+  // The mock TURN host does not exist: no relay candidates can be gathered, so
+  // the UI must not claim audio is flowing.
+  await sleep(4000);
+  const relayState = await snapshot(customerPage);
+  assert.equal(relayState.relayCandidates, 0);
+  assert.equal(relayState.mediaFlowing, false);
+  assert.notEqual(relayState.callState, 'connected');
+  assert.equal(relayState.diagnostics.iceTransportPolicy, 'relay');
+  assert.equal(await customerPage.locator('[data-testid="relay-warning"]').count(), 1);
+
+  await salespersonContext.close();
+  await customerContext.close();
+});
+
+test('relay-only mode without TURN refuses to start instead of silently using STUN', async asyncTest => {
+  const restoreEnv = applyIceEnv({
+    TURN_URLS: null,
+    TURN_USERNAME: null,
+    TURN_CREDENTIAL: null,
+    TURN_SECRET: null,
+    ICE_TRANSPORT_POLICY: 'relay',
+    STUN_URLS: null,
+  });
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const base = `http://127.0.0.1:${server.port}`;
+  const browser = await launchBrowser();
+  asyncTest.after(async () => {
+    await browser.close();
+    await server.close();
+    restoreEnv();
+  });
+
+  const context = await openContext(browser);
+  const page = await context.newPage();
+  await page.goto(`${base}/sales`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('[data-testid="salesperson-invite-url"]', { timeout: 20000 });
+  await page.click('[data-testid="join-call"]');
+
+  const state = await waitFor(() => snapshot(page), (value) => value.callState === 'failed', 15000);
+  assert.match(String(state.iceConfigError), /relay requires a usable TURN relay/i);
+  assert.equal(state.iceConfigLoaded, false);
+  assert.equal(state.wsStatus, 'disconnected', 'no signaling socket may be opened');
+  assert.equal(state.micPermission, 'unknown', 'microphone must not be captured for a call that cannot work');
+
+  const pcs = await page.evaluate(() => ((window as any).__pcs || []).length);
+  assert.equal(pcs, 0, 'no peer connection may be created with unverified ICE settings');
+  assert.equal(await pcs, 0);
+  assert.equal(await page.locator('[data-testid="ice-error"]').count(), 1);
+
+  await context.close();
+});
