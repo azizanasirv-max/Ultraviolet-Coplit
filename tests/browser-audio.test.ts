@@ -845,18 +845,18 @@ test('relay-only mode without TURN refuses to start instead of silently using ST
 });
 
 /**
- * Real-Chromium negotiation regression for defect D1.
+ * Real-Chromium presence-refresh smoke test (NOT the D1 regression proof).
  *
- * While the call is still connecting, the server's presence broadcasts
- * (`session_state`, emitted on AI call/status changes) used to trigger another
- * `makeOffer`. The answerer dropped the duplicate and the offerer stayed in
- * `have-local-offer`. This test floods presence updates during negotiation and
- * asserts the real peer connection remains in a single, stable negotiation.
+ * The deterministic suite in `tests/negotiation.test.ts` is the regression test
+ * for the duplicate-offer defect: it fails against the unfixed base engine.
+ * Loopback Chromium negotiates too quickly to reproduce the original
+ * `stable`/`connecting` presence-refresh window reliably; this browser test also
+ * passes against the unfixed base. It is retained only as a real-browser smoke
+ * test that a presence flood leaves one healthy, stable peer connection.
  *
- * Loopback Chromium proves the signaling state machine only; it is not proof of
- * NAT traversal.
+ * Loopback Chromium is not proof of NAT traversal.
  */
-test('presence refreshes during real Chromium negotiation do not duplicate offers', async (t) => {
+test('presence refresh flood during real Chromium negotiation leaves one healthy connection (smoke)', async (t) => {
   const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
   const base = `http://127.0.0.1:${server.port}`;
   const browser = await launchBrowser();

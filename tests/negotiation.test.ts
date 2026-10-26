@@ -105,6 +105,9 @@ class FakePeerConnection {
   oniceconnectionstatechange: (() => void) | null = null;
   ontrack: ((event: any) => void) | null = null;
   createOfferCalls: Array<{ iceRestart: boolean }> = [];
+  setRemoteDescriptionCalls: any[] = [];
+  failCreateOffer = false;
+  failSetLocalDescription = false;
   senders: Array<{ track: FakeTrack; replaceTrack: (track: FakeTrack) => Promise<void> }> = [];
   closed = false;
 
@@ -130,6 +133,7 @@ class FakePeerConnection {
 
   createOffer(options?: { iceRestart?: boolean }) {
     this.createOfferCalls.push({ iceRestart: Boolean(options?.iceRestart) });
+    if (this.failCreateOffer) return Promise.reject(new Error('createOffer rejected'));
     offerSequence += 1;
     return Promise.resolve({
       type: 'offer',
@@ -146,6 +150,9 @@ class FakePeerConnection {
   }
 
   setLocalDescription(description: any) {
+    if (description?.type !== 'rollback' && this.failSetLocalDescription) {
+      return Promise.reject(new Error('setLocalDescription rejected'));
+    }
     if (description?.type === 'rollback') {
       this.signalingState = 'stable';
       this.localDescription = null;
@@ -157,6 +164,7 @@ class FakePeerConnection {
   }
 
   setRemoteDescription(description: any) {
+    this.setRemoteDescriptionCalls.push(description);
     this.remoteDescription = description;
     this.signalingState = 'stable';
     return Promise.resolve();
@@ -200,6 +208,7 @@ class FakeWebSocket {
   url: string;
   readyState = FakeWebSocket.CONNECTING;
   sent: any[] = [];
+  failSend = false;
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   onclose: ((event: { code: number; reason: string }) => void) | null = null;
@@ -218,6 +227,7 @@ class FakeWebSocket {
   }
 
   send(raw: string) {
+    if (this.failSend) throw new Error('simulated signaling send failure');
     this.sent.push(JSON.parse(raw));
   }
 
@@ -313,7 +323,13 @@ const otherRole = (role: 'customer' | 'salesperson') =>
  */
 const setupPeer = async (
   role: 'customer' | 'salesperson',
-  options: { enableAi?: boolean } = {}
+  options: {
+    enableAi?: boolean;
+    offerAnswerTimeoutMs?: number;
+    iceRestartDelaysMs?: readonly number[];
+    iceRestartVerifyMs?: number;
+    disconnectGraceMs?: number;
+  } = {}
 ): Promise<Harness> => {
   FakePeerConnection.instances = [];
   FakeWebSocket.instances = [];
@@ -327,10 +343,10 @@ const setupPeer = async (
     credential: 'credential-test',
     apiBase: '',
     enableAi: Boolean(options.enableAi),
-    offerAnswerTimeoutMs: 60,
-    iceRestartDelaysMs: [1, 1, 1],
-    iceRestartVerifyMs: 30,
-    disconnectGraceMs: 20,
+    offerAnswerTimeoutMs: options.offerAnswerTimeoutMs ?? 60,
+    iceRestartDelaysMs: options.iceRestartDelaysMs ?? [1, 1, 1],
+    iceRestartVerifyMs: options.iceRestartVerifyMs ?? 30,
+    disconnectGraceMs: options.disconnectGraceMs ?? 20,
     createAiSession: () => {
       const session = new FakeUltravoxSession();
       sessions.push(session);
@@ -662,4 +678,272 @@ test('an unanswered offer is rolled back and retried, then bounded', async (t) =
   assert.equal(pc.createOfferCalls.length, 3, 'negotiation attempts are bounded to three');
   assert.equal(engine.getSnapshot().callState, 'failed');
   assert.match(String(engine.getSnapshot().lastError), /Reconnect/i);
+});
+
+test('a persistent signaling-send failure consumes the budget and reaches terminal without looping', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson', {
+    iceRestartDelaysMs: [5, 5, 5],
+    iceRestartVerifyMs: 200,
+    offerAnswerTimeoutMs: 500,
+  });
+  t.after(async () => engine.stop('test finished'));
+
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+  assert.equal(engine.getSnapshot().callState, 'connected');
+
+  ws.failSend = true;
+  pc.__setConnectionState('failed');
+
+  const deadline = Date.now() + 1000;
+  while (Date.now() < deadline && engine.getSnapshot().callState !== 'failed') {
+    await sleep(5);
+  }
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.callState, 'failed');
+  assert.match(String(snapshot.lastError), /Reconnect/i);
+  const restartCalls = pc.createOfferCalls.filter((call) => call.iceRestart).length;
+  assert.equal(restartCalls, 3, 'each failed attempt consumes exactly one budget slot');
+
+  // The terminal state must not spin or leave a retry timer/in-flight flag.
+  await sleep(60);
+  assert.equal(pc.createOfferCalls.filter((call) => call.iceRestart).length, 3, 'no busy retry loop');
+  assert.equal((engine as any).iceRestartTimer, null);
+  assert.equal((engine as any).iceRestartInFlight, false);
+  assert.equal((engine as any).answerInFlight, false);
+});
+
+test('repeated createOffer rejection reaches terminal within the budget', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson', {
+    iceRestartDelaysMs: [5, 5, 5],
+    iceRestartVerifyMs: 200,
+    offerAnswerTimeoutMs: 500,
+  });
+  t.after(async () => engine.stop('test finished'));
+
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+  pc.failCreateOffer = true;
+  pc.__setConnectionState('failed');
+
+  const deadline = Date.now() + 1000;
+  while (Date.now() < deadline && engine.getSnapshot().callState !== 'failed') {
+    await sleep(5);
+  }
+
+  assert.equal(engine.getSnapshot().callState, 'failed');
+  assert.match(String(engine.getSnapshot().lastError), /Reconnect/i);
+  assert.equal(
+    pc.createOfferCalls.filter((call) => call.iceRestart).length,
+    3,
+    'createOffer failures consume the bounded budget'
+  );
+  await sleep(60);
+  assert.equal(pc.createOfferCalls.filter((call) => call.iceRestart).length, 3);
+  assert.equal((engine as any).iceRestartTimer, null);
+});
+
+
+test('repeated setLocalDescription rejection reaches terminal within the budget', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson', {
+    iceRestartDelaysMs: [5, 5, 5],
+    iceRestartVerifyMs: 200,
+    offerAnswerTimeoutMs: 500,
+  });
+  t.after(async () => engine.stop('test finished'));
+
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+  pc.failSetLocalDescription = true;
+  pc.__setConnectionState('failed');
+
+  const deadline = Date.now() + 1000;
+  while (Date.now() < deadline && engine.getSnapshot().callState !== 'failed') {
+    await sleep(5);
+  }
+
+  assert.equal(engine.getSnapshot().callState, 'failed');
+  assert.match(String(engine.getSnapshot().lastError), /Reconnect/i);
+  assert.equal(
+    pc.createOfferCalls.filter((call) => call.iceRestart).length,
+    3,
+    'setLocalDescription failures consume the bounded budget'
+  );
+  await sleep(60);
+  assert.equal(pc.createOfferCalls.filter((call) => call.iceRestart).length, 3);
+  assert.equal((engine as any).iceRestartTimer, null);
+});
+
+test('a later ICE-restart attempt within the budget can still recover', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson', {
+    iceRestartDelaysMs: [30, 30, 30],
+    iceRestartVerifyMs: 200,
+    offerAnswerTimeoutMs: 500,
+  });
+  t.after(async () => engine.stop('test finished'));
+
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+
+  ws.failSend = true;
+  pc.__setConnectionState('failed');
+  await sleep(10);
+  assert.equal(
+    pc.createOfferCalls.filter((call) => call.iceRestart).length,
+    1,
+    'the first attempt fails and consumes one slot'
+  );
+
+  ws.failSend = false;
+  await sleep(80);
+  assert.equal(
+    pc.createOfferCalls.filter((call) => call.iceRestart).length,
+    2,
+    'the second bounded attempt succeeds'
+  );
+
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+  await sleep(10);
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.callState, 'connected');
+  assert.equal((engine as any).iceRestartAttempts, 0, 'only a genuine connection resets the budget');
+  assert.equal((engine as any).iceRestartInFlight, false);
+  assert.equal((engine as any).iceRestartTimer, null);
+});
+
+
+test('an answer in flight past the watchdog deadline is never rolled back', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson', {
+    offerAnswerTimeoutMs: 40,
+    iceRestartDelaysMs: [5, 5, 5],
+    iceRestartVerifyMs: 200,
+  });
+  t.after(async () => engine.stop('test finished'));
+
+  const originalSetRemote = pc.setRemoteDescription.bind(pc);
+  const controlled: { release: (() => void) | null } = { release: null };
+  let controlledCalls = 0;
+  pc.setRemoteDescription = (description: any) => {
+    controlledCalls += 1;
+    return new Promise<void>((resolve, reject) => {
+      controlled.release = () => {
+        Promise.resolve(originalSetRemote(description)).then(resolve, reject);
+      };
+    });
+  };
+
+  const answer = { type: 'answer', sdp: 'v=0\r\na=ice-ufrag:a\r\na=ice-pwd:b\r\n' };
+  ws.receive({ type: 'answer', from: 'customer-1', answer });
+  await sleep(5);
+  assert.equal((engine as any).answerInFlight, true);
+  // A duplicate answer while the first is being applied must be ignored.
+  ws.receive({ type: 'answer', from: 'customer-1', answer });
+  await sleep(5);
+
+  // The watchdog deadline passes while setRemoteDescription is still pending.
+  await sleep(70);
+  assert.equal(pc.createOfferCalls.length, 1, 'the watchdog must not create a retry offer');
+  assert.equal(controlledCalls, 1, 'the duplicate answer is ignored');
+  assert.equal((engine as any).answerInFlight, true);
+
+  assert.ok(controlled.release, 'the controlled answer promise must be pending');
+  controlled.release!();
+  await sleep(10);
+
+  assert.equal(pc.createOfferCalls.length, 1);
+  assert.equal(pc.signalingState, 'stable');
+  assert.equal((engine as any).answerInFlight, false);
+  assert.equal((engine as any).offerInFlight, false);
+  assert.equal(
+    engine.getSnapshot().logs.some((line) => /Rolled back the outstanding offer/.test(line)),
+    false,
+    'a valid negotiation must never be rolled back'
+  );
+});
+
+test('a failed answer re-arms the watchdog and keeps bounded recovery alive', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson', {
+    offerAnswerTimeoutMs: 60,
+    iceRestartDelaysMs: [5, 5, 5],
+    iceRestartVerifyMs: 200,
+  });
+  t.after(async () => engine.stop('test finished'));
+
+  pc.setRemoteDescription = () => Promise.reject(new Error('answer rejected by the browser'));
+  ws.receive({
+    type: 'answer',
+    from: 'customer-1',
+    answer: { type: 'answer', sdp: 'v=0\r\na=ice-ufrag:a\r\na=ice-pwd:b\r\n' },
+  });
+  await sleep(10);
+  assert.equal((engine as any).answerInFlight, false);
+
+  // The re-armed watchdog fires, rolls back and retries within the budget.
+  await sleep(80);
+  assert.ok(
+    pc.createOfferCalls.length >= 2 && pc.createOfferCalls.length <= 3,
+    'the watchdog is still alive after a failed answer and stays bounded'
+  );
+  assert.equal(pc.signalingState, 'have-local-offer');
+});
+
+test('a stale answer from a previous peer cannot cancel the new watchdog', async (t) => {
+  const { engine, ws } = await setupPeer('salesperson', {
+    offerAnswerTimeoutMs: 50,
+    iceRestartDelaysMs: [5, 5, 5],
+    iceRestartVerifyMs: 200,
+  });
+  t.after(async () => engine.stop('test finished'));
+
+  ws.receive({
+    type: 'peer_joined',
+    sessionId: 'session-test',
+    peer: { participantId: 'customer-2', role: 'customer' },
+    participants: [],
+  });
+  await sleep(10);
+  const fresh = FakePeerConnection.instances[FakePeerConnection.instances.length - 1];
+  assert.equal(fresh.signalingState, 'have-local-offer');
+
+  // This answer belongs to the replaced peer identity and must be ignored.
+  ws.receive({
+    type: 'answer',
+    from: 'customer-1',
+    answer: { type: 'answer', sdp: 'v=0\r\na=ice-ufrag:stale\r\na=ice-pwd:stale\r\n' },
+  });
+  await sleep(90);
+
+  assert.equal(fresh.setRemoteDescriptionCalls.length, 0, 'the stale answer is ignored');
+  assert.ok(fresh.createOfferCalls.length >= 2, 'the new watchdog still retried its own offer');
+});
+
+test('signaling rejoin after terminal failure starts a fresh negotiation and leaves the failed state', async (t) => {
+  const { engine, ws } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+
+  (engine as any).enterTerminalPeerFailure('test terminal');
+  assert.equal(engine.getSnapshot().callState, 'failed');
+
+  ws.receive({
+    type: 'joined',
+    sessionId: 'session-test',
+    participantId: 'salesperson-1',
+    role: 'salesperson',
+    peers: [{ participantId: 'customer-1', role: 'customer' }],
+    participants: [],
+  });
+  await sleep(10);
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.callState, 'connecting', 'a fresh negotiation must leave the failed state');
+  const fresh = FakePeerConnection.instances[FakePeerConnection.instances.length - 1];
+  assert.equal(fresh.createOfferCalls.length, 1);
+
+  fresh.__setConnectionState('connected');
+  await sleep(5);
+  assert.equal(engine.getSnapshot().callState, 'connected');
+  assert.equal(engine.getSnapshot().lastError, null);
 });

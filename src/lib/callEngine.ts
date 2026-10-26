@@ -267,6 +267,8 @@ export class CallEngine {
   private makingOffer = false;
   /** An offer was sent and has not been answered yet (per peer connection). */
   private offerInFlight = false;
+  /** A matching answer is currently being applied to this peer connection. */
+  private answerInFlight = false;
   private audioUnlocked = false;
   private pcGeneration = 0;
   private recoveryInFlight = false;
@@ -1248,6 +1250,7 @@ export class CallEngine {
   private resetPeerRecoveryState(reason: string): void {
     this.clearPeerTimers();
     this.offerInFlight = false;
+    this.answerInFlight = false;
     this.makingOffer = false;
     this.peerFailureConfirmed = false;
     this.negotiationAttempts = 0;
@@ -1262,6 +1265,7 @@ export class CallEngine {
     this.pcGeneration += 1;
     this.clearPeerTimers();
     this.offerInFlight = false;
+    this.answerInFlight = false;
     this.makingOffer = false;
     this.iceRestartInFlight = false;
     this.pendingIceRestartReason = null;
@@ -1426,6 +1430,10 @@ export class CallEngine {
         this.emit();
       };
     };
+
+    // A fresh peer connection means a fresh negotiation is starting. This is
+    // deliberately not "connected" until ICE and DTLS report connected.
+    this.callState = 'connecting';
   }
 
   // -------------------------------------------------------------------------
@@ -1530,6 +1538,10 @@ export class CallEngine {
     if (!pc || !this.peerParticipantId) return;
     if (!force && pc.connectionState === 'connected') {
       this.handlePeerConnected();
+      return;
+    }
+    if (this.iceRestartAttempts >= MAX_ICE_RESTART_ATTEMPTS) {
+      this.enterTerminalPeerFailure(reason);
       return;
     }
 
@@ -1696,8 +1708,10 @@ export class CallEngine {
         // Abandoned offer: roll back so a later retry can negotiate safely.
         await this.rollbackLocalOffer(pc, 'offer could not be sent');
         if (options.iceRestart) {
+          // The attempt already consumed its budget slot in runRecoveryAttempt.
+          // Never refund it here: a persistent failure must still reach the
+          // bounded terminal state instead of retrying forever.
           this.iceRestartInFlight = false;
-          this.iceRestartAttempts = Math.max(0, this.iceRestartAttempts - 1);
           this.requestIceRecovery('signaling unavailable for ICE restart');
         } else {
           this.scheduleNegotiationRetry('signaling unavailable');
@@ -1715,7 +1729,6 @@ export class CallEngine {
       if (this.pc === pc) await this.rollbackLocalOffer(pc, 'offer creation failed');
       if (options.iceRestart) {
         this.iceRestartInFlight = false;
-        this.iceRestartAttempts = Math.max(0, this.iceRestartAttempts - 1);
         this.requestIceRecovery('ICE-restart offer failed');
       } else if (this.negotiationAttempts >= MAX_NEGOTIATION_ATTEMPTS) {
         this.enterTerminalPeerFailure('offer creation failed');
@@ -1785,6 +1798,14 @@ export class CallEngine {
       this.offerWatchdog = null;
       if (this.pc !== pc || this.pcGeneration !== generation) return;
       if (this.stopped || this.intentionalLeave || this.peerFailureConfirmed) return;
+      if (this.answerInFlight) {
+        // The matching answer is being applied. Suspending here is what keeps
+        // a valid negotiation from being rolled back; re-arm in case applying
+        // that answer never settles, so the watchdog is not permanently lost.
+        this.log('Offer watchdog suspended while an answer is being applied.');
+        this.armOfferWatchdog(pc, kind);
+        return;
+      }
       if (this.isPeerConnected()) {
         this.offerInFlight = false;
         this.iceRestartInFlight = false;
@@ -2139,21 +2160,48 @@ export class CallEngine {
       }
       const pc = this.pc;
       if (!pc) return;
+      if (data.from && this.peerParticipantId && data.from !== this.peerParticipantId) {
+        this.log('Ignoring answer from a stale peer.');
+        return;
+      }
+      if (this.answerInFlight) {
+        this.log('Ignoring duplicate answer: another answer is being applied.');
+        return;
+      }
       if (pc.signalingState !== 'have-local-offer') {
         this.log(`Ignoring answer in signalingState="${pc.signalingState}" (duplicate or stale).`);
         return;
       }
+
+      const generation = this.pcGeneration;
+      const offerKind: 'negotiation' | 'iceRestart' = this.iceRestartInFlight
+        ? 'iceRestart'
+        : 'negotiation';
+      // Mark the answer in flight and stop the watchdog *before* awaiting, so a
+      // valid answer near the deadline can never be rolled back underneath us.
+      this.answerInFlight = true;
+      this.clearOfferWatchdog();
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
-        if (this.pc !== pc) return;
+        if (this.pc !== pc || this.pcGeneration !== generation) return;
+        this.answerInFlight = false;
         this.offerInFlight = false;
-        this.clearOfferWatchdog();
+        this.iceRestartInFlight = false;
         await this.flushPendingIceCandidates();
+        if (this.pc !== pc || this.pcGeneration !== generation) return;
         this.log('Answer applied.');
         // A restart requested while signaling was not stable is now runnable.
         this.tryPendingIceRestart();
       } catch (err) {
+        if (this.pc !== pc || this.pcGeneration !== generation) return;
+        this.answerInFlight = false;
         this.log(`Failed to apply answer: ${(err as Error)?.message || err}`);
+        // A failed answer must not permanently disable recovery. Re-arm only
+        // for the still-current offer and only if signaling still permits it.
+        if (pc.signalingState === 'have-local-offer') {
+          this.log('Re-arming the offer watchdog after the failed answer.');
+          this.armOfferWatchdog(pc, offerKind);
+        }
       }
       return;
     }
