@@ -228,6 +228,12 @@ are configured, the API flow wins and these static values act as its fallback.
 > `RSTREAM_TURN_USERNAME` / `RSTREAM_TURN_CREDENTIAL` / `RSTREAM_TURN_URLS` in
 > Render, and redeploy (or restart) so the new values are loaded. A new value
 > starts a new window; the same value is never extended.
+>
+> The window is tracked per process because rstream does not expose the original
+> issuance time to us: a restart (including a Render spin-down/wake-up) re-anchors
+> it. That does not make an older credential valid — if rstream already expired
+> it, allocations fail immediately. Always paste fresh values before testing and
+> replace them manually as they age.
 
 Static values are shown to authorized browsers by design (they are the ICE
 credential). They are never written to logs or `/api/health`, and no API token is
