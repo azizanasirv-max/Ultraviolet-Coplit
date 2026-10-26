@@ -85,7 +85,6 @@ starts the Vite dev server when `NODE_ENV=production`; the server then serves
 | `RSTREAM_TURN_CREDENTIAL` | optional (static mode) | Static rstream TURN credential/password from your JSON credential. |
 | `RSTREAM_TURN_URLS` | optional (static mode) | Comma-separated `turn:`/`turns:` URLs from the same rstream JSON. |
 | `RSTREAM_TURN_TTL_SECONDS` | optional | Validity window for the static credential (default 600, clamped 1-3600). **Expiry is not extended automatically.** |
-| `ADMIN_PASSWORD` | admin page | Password for `/admin/turn`. When unset, the admin page and its API are disabled (503). It is never logged or returned. |
 | `STUN_URLS` | optional | Defaults to Google STUN. |
 | `ICE_TRANSPORT_POLICY` | optional | `all` (default) or `relay` for verification. Relay-only fails with 503 if no usable TURN exists. |
 | `MAX_SESSIONS` | optional | In-memory cap, default 500. |
@@ -260,14 +259,20 @@ credentials therefore use the standard TURN long-term credential mechanism
 Do not invent or derive credentials: this implementation has no HMAC path. The
 three values you enter are placed into the ICE configuration unchanged.
 
-Setup:
+Setup (browser only; no environment variable):
 
 1. Deploy the service (no persistent disk, database, Render Shell or ExpressTURN
    Secret Key involved).
-2. Set **one** environment variable in the hosting dashboard:
-   `ADMIN_PASSWORD=<a long password you choose>`. Without it, `/admin/turn`
-   returns 503 and the admin API is disabled.
-3. Open `https://<service>/admin/turn`, sign in, and enter:
+2. Open `https://<service>/admin/turn`. The first visit shows **First-time
+   setup**. Create a setup password:
+   * at least 12 characters, using at least three of lowercase, uppercase,
+     numbers and symbols;
+   * the server stores only a salted **scrypt** hash (N=16384, r=8, p=1) in
+     process memory — the plaintext is never stored, logged or rendered;
+   * completing this claims setup. From then on the page requires that
+     password and `/api/admin/setup` returns `409 SETUP_ALREADY_CLAIMED`, so an
+     anonymous visitor cannot reset or take over the setup.
+3. You are signed in. Enter:
    * **TURN server URL / address** — e.g. `turn:free.expressturn.com:3478`
      (a bare `free.expressturn.com:3478` is accepted and normalized to `turn:`).
      Multiple URLs can be comma-separated, e.g. add
@@ -277,19 +282,37 @@ Setup:
 4. Make a call. `GET /api/health` reports `ice.configured: true`,
    `ice.credentialMode: "static"` and `ice.provider: "expressturn"`.
 
-The credentials are held **only in this server process's memory**. A restart or
-redeploy clears them and you re-enter them in `/admin/turn`; nothing is written
-to disk, a database, Git or environment variables.
+No `ADMIN_PASSWORD` (or any other environment variable) is required. If an
+older deployment still defines `ADMIN_PASSWORD`, it is ignored and can be
+removed.
+
+**Restart / redeploy — safely reclaiming setup.** The setup-password hash and
+the ExpressTURN credentials live only in this server process's memory. A restart
+or redeploy clears both, and old admin session cookies stop working (the
+signing key is regenerated per process). The page returns to first-time setup;
+reclaim it by creating a new setup password and re-entering the ExpressTURN
+values. No old credential is exposed during this: it no longer exists on the
+server. Because a fresh process has no stored setup password, the **first
+visitor** can claim first-time setup — complete the claim immediately after
+every deploy/restart. Closing that window completely would require persistence
+(a database/disk) or an environment variable, both explicitly out of scope for
+this flow.
 
 Security properties:
 
-* `/admin/turn` and `/api/admin/turn-settings` require a 2-hour `HttpOnly`,
-  `SameSite=Strict` signed session cookie obtained with `ADMIN_PASSWORD`.
-  Login is rate-limited and writes are same-origin only.
-* The admin page never renders the TURN username or password back to the
-  browser, and the status API returns only `configured`, `urlCount`,
-  `updatedAt` and `storage: "memory"`. Neither value appears in page source,
-  frontend JavaScript, `/api/health`, logs or errors.
+* Setup and login attempts are rate-limited per client IP (8 attempts per 10
+  minutes). Passwords are compared against the scrypt hash in constant time.
+* Sessions are 2-hour `HttpOnly`, `SameSite=Strict` cookies signed with a random
+  per-process key; they cannot outlive a restart.
+* Every state-changing admin request must be same-origin (the Origin/Referer
+  host must match the request host, `X-Forwarded-Host` or `APP_URL`), sent as
+  `application/json`, and carry the per-session `X-CSRF-Token` value. A stolen
+  session cookie alone is not accepted.
+* The admin page and status API never render or return the TURN username, TURN
+  password, setup password or password hash after saving. Status is limited to
+  `configured`, `urlCount`, `updatedAt`, `storage: "memory"`, the safe setup
+  claim flag and the session's CSRF token. The TURN password is never returned
+  by any API, log or error message.
 * Authorized session participants receive the credentials only through the
   existing authenticated ICE endpoint (`GET /api/sessions/:id/ice-config`);
   anonymous and cross-session callers get 401. WebRTC signaling, call recovery

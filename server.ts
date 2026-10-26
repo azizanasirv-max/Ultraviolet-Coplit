@@ -36,15 +36,21 @@ import {
 import {
   ADMIN_COOKIE_NAME,
   ADMIN_SESSION_TTL_MS,
-  createAdminSessionToken,
-  isAdminPasswordConfigured,
-  isAdminRequestAuthorized,
-  verifyAdminPassword,
+  AdminSetupPasswordError,
+  claimAdminSetupPassword,
+  createAdminSession,
+  getAdminSetupStatus,
+  isAdminSetupClaimed,
+  readAdminSessionFromCookie,
+  verifyAdminCsrfToken,
+  verifyAdminSetupPassword,
 } from './server/admin';
+import type { AdminSession } from './server/admin';
 import { renderAdminPage } from './server/adminPage';
 import type { AdminPageMode } from './server/adminPage';
 import {
   ExpressTurnValidationError,
+  clearExpressTurnCredentials,
   getExpressTurnCredentials,
   getExpressTurnStatus,
   setExpressTurnCredentials,
@@ -787,20 +793,46 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
 
   // -------------------------------------------------------------------------
   // ExpressTURN admin page (operator-only; credentials held in memory)
+  //
+  // First-run setup creates a setup password in the browser, so no hosting
+  // environment variable is required. Only a scrypt hash is kept. Sessions are
+  // signed per-process cookies carrying a per-session CSRF token; every
+  // mutation must be same-origin, JSON and present that token.
   // -------------------------------------------------------------------------
 
-  const ADMIN_LOGIN_LIMIT = 8;
-  const ADMIN_LOGIN_WINDOW_MS = 10 * 60_000;
-  const adminLoginBuckets = new Map<string, { count: number; resetAt: number }>();
-  const allowAdminLogin = (key: string): boolean => {
+  const ADMIN_ATTEMPT_LIMIT = 8;
+  const ADMIN_ATTEMPT_WINDOW_MS = 10 * 60_000;
+  const ADMIN_ATTEMPT_MAX_KEYS = 2048;
+  const adminAttemptBuckets = new Map<string, { count: number; resetAt: number }>();
+
+  app.use('/api/admin', (_req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    next();
+  });
+
+  const adminClientKey = (req: Request, scope: 'setup' | 'login'): string =>
+    `${scope}:${req.ip || req.socket.remoteAddress || 'unknown'}`;
+
+  /** Fixed-window attempt limiter for first-run setup and login. */
+  const consumeAdminAttempt = (key: string): boolean => {
     const now = Date.now();
-    const bucket = adminLoginBuckets.get(key);
+    if (adminAttemptBuckets.size > ADMIN_ATTEMPT_MAX_KEYS) {
+      for (const [bucketKey, bucket] of adminAttemptBuckets) {
+        if (now > bucket.resetAt) adminAttemptBuckets.delete(bucketKey);
+      }
+    }
+    const bucket = adminAttemptBuckets.get(key);
     if (!bucket || now > bucket.resetAt) {
-      adminLoginBuckets.set(key, { count: 1, resetAt: now + ADMIN_LOGIN_WINDOW_MS });
+      adminAttemptBuckets.set(key, { count: 1, resetAt: now + ADMIN_ATTEMPT_WINDOW_MS });
       return true;
     }
     bucket.count += 1;
-    return bucket.count <= ADMIN_LOGIN_LIMIT;
+    return bucket.count <= ADMIN_ATTEMPT_LIMIT;
+  };
+
+  const resetAdminAttempts = (key: string): void => {
+    adminAttemptBuckets.delete(key);
   };
 
   const adminCookieOptions = (secure: boolean) => ({
@@ -811,33 +843,86 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     maxAge: ADMIN_SESSION_TTL_MS,
   });
 
-  /** CSRF defence: state-changing admin calls must be same-origin. */
+  /**
+   * CSRF / cross-origin guard: browser mutations must carry an Origin (or a
+   * Referer fallback) whose host matches the request Host. A request with
+   * neither header is rejected; a script client must opt in explicitly and
+   * still needs the session cookie plus the per-session CSRF token.
+   */
   const adminMutationOriginOk = (req: Request): boolean => {
-    const origin = req.headers.origin;
-    if (!origin) return true; // non-browser clients still need the session cookie
+    const source = req.headers.origin ?? req.headers.referer;
+    if (!source) return false;
+
+    const hosts = new Set<string>();
+    const addHost = (value: string | string[] | undefined): void => {
+      if (!value) return;
+      const first = String(value).split(',')[0].trim();
+      if (first) hosts.add(first);
+    };
+    addHost(req.headers.host);
+    addHost(req.headers['x-forwarded-host']);
+    const publicUrl = configuredPublicUrl();
+    if (publicUrl) {
+      try {
+        hosts.add(new URL(publicUrl).host);
+      } catch {
+        // APP_URL is validated elsewhere; ignore an unparseable value here.
+      }
+    }
+
     try {
-      return new URL(origin).host === req.headers.host;
+      const url = new URL(source);
+      return (url.protocol === 'http:' || url.protocol === 'https:') && hosts.has(url.host);
     } catch {
       return false;
     }
   };
 
-  const requireAdmin = (req: Request, res: Response, next: () => void): void => {
-    if (!isAdminPasswordConfigured()) {
-      res.status(503).json({
-        error: 'ADMIN_DISABLED',
-        message: 'ADMIN_PASSWORD is not set on the server, so /admin/turn is disabled.',
+  const adminJsonContentTypeOk = (req: Request): boolean => {
+    if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'DELETE') return true;
+    const value = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+    return value === 'application/json';
+  };
+
+  const requireAdminSession = (req: Request, res: Response, next: () => void): void => {
+    const session = readAdminSessionFromCookie(req.headers.cookie);
+    if (!session) {
+      res.status(401).json({ error: 'ADMIN_UNAUTHORIZED', message: 'Sign in to the admin page first.' });
+      return;
+    }
+    res.locals.adminSession = session;
+    next();
+  };
+
+  /** Same-origin + JSON content type + per-session CSRF token. */
+  const requireAdminMutation = (req: Request, res: Response, next: () => void): void => {
+    if (!adminMutationOriginOk(req)) {
+      res.status(403).json({ error: 'BAD_ORIGIN', message: 'Cross-origin admin requests are not allowed.' });
+      return;
+    }
+    if (!adminJsonContentTypeOk(req)) {
+      res.status(415).json({
+        error: 'UNSUPPORTED_MEDIA_TYPE',
+        message: 'Admin changes must be sent as application/json.',
       });
       return;
     }
-    if (!isAdminRequestAuthorized(req.headers.cookie)) {
-      res.status(401).json({ error: 'ADMIN_UNAUTHORIZED', message: 'Sign in to the admin page first.' });
+    const session = res.locals.adminSession as AdminSession | undefined;
+    if (!session || !verifyAdminCsrfToken(session, req.get('x-csrf-token'))) {
+      res.status(403).json({ error: 'CSRF_TOKEN_INVALID', message: 'A valid CSRF token is required.' });
       return;
     }
     next();
   };
 
   const secureCookie = (req: Request): boolean => req.secure || process.env.NODE_ENV === 'production';
+
+  /** Safe status only: no TURN URL, username, password or password hash. */
+  const adminSettingsPayload = (session: AdminSession) => ({
+    ...getExpressTurnStatus(),
+    setup: getAdminSetupStatus(),
+    csrfToken: session.csrfToken,
+  });
 
   app.get(['/admin', '/admin/turn'], (req, res) => {
     res.setHeader(
@@ -849,63 +934,138 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     res.setHeader('Cache-Control', 'no-store');
     res.type('html');
 
-    if (!isAdminPasswordConfigured()) {
-      res
-        .status(503)
-        .send(renderAdminPage({ mode: 'disabled', status: getExpressTurnStatus() }));
-      return;
-    }
-
-    const mode: AdminPageMode = isAdminRequestAuthorized(req.headers.cookie) ? 'settings' : 'login';
-    res.send(renderAdminPage({ mode, status: getExpressTurnStatus() }));
+    const session = readAdminSessionFromCookie(req.headers.cookie);
+    const setup = getAdminSetupStatus();
+    const mode: AdminPageMode = session ? 'settings' : setup.claimed ? 'login' : 'setup';
+    res.send(
+      renderAdminPage({
+        mode,
+        status: getExpressTurnStatus(),
+        setup,
+        csrfToken: session?.csrfToken ?? null,
+      })
+    );
   });
 
-  app.post('/api/admin/login', (req, res) => {
+  /**
+   * First-run claim. Allowed only while no setup password exists AND no TURN
+   * credentials have been configured, so a configured deployment cannot be
+   * taken over by resetting the setup password.
+   */
+  app.post('/api/admin/setup', async (req, res) => {
     if (!adminMutationOriginOk(req)) {
       res.status(403).json({ error: 'BAD_ORIGIN', message: 'Cross-origin admin requests are not allowed.' });
       return;
     }
-    const remote = req.ip || req.socket.remoteAddress || 'unknown';
-    if (!allowAdminLogin(remote)) {
-      res.status(429).json({ error: 'TOO_MANY_ATTEMPTS', message: 'Too many attempts. Try again later.' });
+    if (!adminJsonContentTypeOk(req)) {
+      res.status(415).json({
+        error: 'UNSUPPORTED_MEDIA_TYPE',
+        message: 'Admin changes must be sent as application/json.',
+      });
       return;
     }
 
-    if (!isAdminPasswordConfigured()) {
-      res.status(503).json({
-        error: 'ADMIN_DISABLED',
-        message: 'ADMIN_PASSWORD is not set on the server, so the admin page is disabled.',
+    const bucketKey = adminClientKey(req, 'setup');
+    if (!consumeAdminAttempt(bucketKey)) {
+      res.status(429).json({ error: 'TOO_MANY_ATTEMPTS', message: 'Too many setup attempts. Try again later.' });
+      return;
+    }
+
+    if (isAdminSetupClaimed() || getExpressTurnCredentials() !== null) {
+      res.status(409).json({
+        error: 'SETUP_ALREADY_CLAIMED',
+        message: 'Setup has already been claimed. Sign in with the existing setup password instead.',
       });
       return;
     }
 
     const password = (req.body as { password?: unknown } | undefined)?.password;
-    if (!verifyAdminPassword(password)) {
-      res.status(401).json({ error: 'INVALID_ADMIN_PASSWORD', message: 'Invalid admin password.' });
+    try {
+      const claimed = await claimAdminSetupPassword(password);
+      if (!claimed) {
+        res.status(409).json({
+          error: 'SETUP_ALREADY_CLAIMED',
+          message: 'Setup has already been claimed. Sign in with the existing setup password instead.',
+        });
+        return;
+      }
+    } catch (err) {
+      if (err instanceof AdminSetupPasswordError) {
+        res.status(400).json({ error: err.code, message: err.message });
+        return;
+      }
+      console.error('[admin] first-time setup failed; no setup password was stored.');
+      res.status(500).json({ error: 'SETUP_FAILED', message: 'Setup could not be completed. Try again.' });
       return;
     }
 
-    res.cookie(ADMIN_COOKIE_NAME, createAdminSessionToken(), adminCookieOptions(secureCookie(req)));
-    res.json({ ok: true, expiresInSeconds: Math.round(ADMIN_SESSION_TTL_MS / 1000) });
+    resetAdminAttempts(bucketKey);
+    const session = createAdminSession();
+    res.cookie(ADMIN_COOKIE_NAME, session.token, adminCookieOptions(secureCookie(req)));
+    console.log('[admin] first-time setup password claimed (scrypt hash, memory-only).');
+    res.status(201).json({
+      ok: true,
+      expiresInSeconds: Math.round(ADMIN_SESSION_TTL_MS / 1000),
+      ...adminSettingsPayload(session),
+    });
   });
 
-  app.post('/api/admin/logout', (req, res) => {
-    res.clearCookie(ADMIN_COOKIE_NAME, { ...adminCookieOptions(secureCookie(req)), maxAge: undefined });
-    res.json({ ok: true });
-  });
-
-  /** Safe status only: never the URL, username or password. */
-  app.get('/api/admin/turn-settings', requireAdmin, (_req, res) => {
-    res.setHeader('Cache-Control', 'no-store');
-    res.json(getExpressTurnStatus());
-  });
-
-  app.put('/api/admin/turn-settings', requireAdmin, (req, res) => {
+  app.post('/api/admin/login', async (req, res) => {
     if (!adminMutationOriginOk(req)) {
       res.status(403).json({ error: 'BAD_ORIGIN', message: 'Cross-origin admin requests are not allowed.' });
       return;
     }
+    if (!adminJsonContentTypeOk(req)) {
+      res.status(415).json({
+        error: 'UNSUPPORTED_MEDIA_TYPE',
+        message: 'Admin changes must be sent as application/json.',
+      });
+      return;
+    }
 
+    const bucketKey = adminClientKey(req, 'login');
+    if (!consumeAdminAttempt(bucketKey)) {
+      res.status(429).json({ error: 'TOO_MANY_ATTEMPTS', message: 'Too many sign-in attempts. Try again later.' });
+      return;
+    }
+
+    if (!isAdminSetupClaimed()) {
+      res.status(409).json({
+        error: 'SETUP_REQUIRED',
+        message: 'No setup password exists yet. Complete first-time setup at /admin/turn.',
+      });
+      return;
+    }
+
+    const password = (req.body as { password?: unknown } | undefined)?.password;
+    if (!(await verifyAdminSetupPassword(password))) {
+      res.status(401).json({ error: 'INVALID_SETUP_PASSWORD', message: 'Invalid setup password.' });
+      return;
+    }
+
+    resetAdminAttempts(bucketKey);
+    const session = createAdminSession();
+    res.cookie(ADMIN_COOKIE_NAME, session.token, adminCookieOptions(secureCookie(req)));
+    res.json({
+      ok: true,
+      expiresInSeconds: Math.round(ADMIN_SESSION_TTL_MS / 1000),
+      ...adminSettingsPayload(session),
+    });
+  });
+
+  app.post('/api/admin/logout', requireAdminSession, requireAdminMutation, (req, res) => {
+    res.clearCookie(ADMIN_COOKIE_NAME, { ...adminCookieOptions(secureCookie(req)), maxAge: undefined });
+    res.json({ ok: true });
+  });
+
+  /** Safe status only: never the URL, username, password or password hash. */
+  app.get('/api/admin/turn-settings', requireAdminSession, (_req, res) => {
+    const session = res.locals.adminSession as AdminSession;
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(adminSettingsPayload(session));
+  });
+
+  app.put('/api/admin/turn-settings', requireAdminSession, requireAdminMutation, (req, res) => {
     const body = (req.body ?? {}) as {
       serverAddress?: unknown;
       username?: unknown;
@@ -930,6 +1090,13 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
 
     res.json({ ok: true, settings: getExpressTurnStatus() });
   });
+
+  app.delete('/api/admin/turn-settings', requireAdminSession, requireAdminMutation, (_req, res) => {
+    clearExpressTurnCredentials();
+    console.log('[expressturn] credentials cleared (memory-only).');
+    res.json({ ok: true, settings: getExpressTurnStatus() });
+  });
+
 
   // Unknown API routes must not fall through to the SPA HTML handler.
   app.use('/api', (_req, res) => {
@@ -1458,6 +1625,9 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     console.error(`[ice] CONFIGURATION ERROR: ${iceStartup.warnings.join(' ')}`);
   } else if (!iceStartup.configured) {
     console.warn(`[ice] ${iceStartup.warnings.join(' ')}`);
+    console.log(
+      '[ice] ExpressTURN can be configured at /admin/turn; the first visit creates its own setup password (no environment variable).'
+    );
   } else if (iceStartup.provider === 'expressturn') {
     console.log('[ice] ExpressTURN static credentials configured at /admin/turn (memory-only).');
   } else if (iceStartup.credentialMode === 'static') {

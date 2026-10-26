@@ -153,7 +153,13 @@ Salesperson browser                          Customer browser
   (`RSTREAM_TURN_USERNAME`/`RSTREAM_TURN_CREDENTIAL`/`RSTREAM_TURN_URLS`, which
   expire and must be replaced manually), or ExpressTURN static credentials
   entered by the operator at `/admin/turn` and held only in server memory.
-  Credentials are never logged and never appear in `/api/health`.
+  The operator creates the `/admin/turn` setup password in the browser on first
+  use (stored as a salted scrypt hash, never as plaintext and never in an
+  environment variable); later changes require that password, a signed
+  `HttpOnly`/`SameSite=Strict` session cookie and a per-session CSRF token.
+  Credentials and the setup hash disappear together on restart, returning the
+  page to first-time setup. Credentials are never logged and never appear in
+  `/api/health`.
 * `ICE_TRANSPORT_POLICY=relay` without a usable relay is a hard failure: the ICE
   endpoint returns 503 `TURN_MISCONFIGURED`, the engine refuses to create a peer
   connection or capture the microphone, and the dashboard shows the reason.
