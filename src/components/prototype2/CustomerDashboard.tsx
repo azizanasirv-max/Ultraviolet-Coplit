@@ -6,30 +6,24 @@ import {
 import { CallEngine, EngineSnapshot } from '../../lib/callEngine';
 import { ApiError, RedeemedInvitation, SessionPublicState, redeemInvitation } from '../../lib/sessionApi';
 import {
+  customerCallLabel,
+  customerCallNotice,
+  customerInvitationMessage,
+} from '../../lib/customerMessages';
+import {
   loadCustomerSession, loadResumeToken, saveCustomerSession, saveResumeToken,
 } from '../../lib/participantStorage';
 import { Banner } from './ui';
 
 const ROLE = 'customer' as const;
 
-const callStateLabel = (snapshot: EngineSnapshot | null) => {
+/** Tone of the customer status badge, derived from the call state only. */
+const callStateTone = (snapshot: EngineSnapshot | null) => {
   const callState = snapshot?.callState ?? 'idle';
-  switch (callState) {
-    case 'connected':
-      return snapshot?.mediaFlowing
-        ? { label: 'Audio flowing', tone: 'emerald' as const }
-        : { label: 'Connected — waiting for media', tone: 'amber' as const };
-    case 'connecting': return { label: 'Connecting', tone: 'amber' as const };
-    case 'waiting': return { label: 'Waiting for salesperson', tone: 'amber' as const };
-    case 'requesting_mic': return { label: 'Microphone permission', tone: 'amber' as const };
-    case 'reconnecting': return { label: 'Reconnecting', tone: 'amber' as const };
-    case 'failed': return { label: 'Connection failed', tone: 'red' as const };
-    case 'mic_denied': return { label: 'Microphone blocked', tone: 'red' as const };
-    case 'rejected': return { label: 'Invitation rejected', tone: 'red' as const };
-    case 'disconnected': return { label: 'Salesperson disconnected', tone: 'red' as const };
-    case 'ended': return { label: 'Call ended', tone: 'slate' as const };
-    default: return { label: 'Not joined', tone: 'slate' as const };
-  }
+  if (callState === 'connected') return snapshot?.mediaFlowing ? ('emerald' as const) : ('amber' as const);
+  if (callState === 'failed' || callState === 'mic_denied' || callState === 'rejected') return 'red' as const;
+  if (callState === 'ended') return 'slate' as const;
+  return 'amber' as const;
 };
 
 export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation?: boolean }> = ({
@@ -38,7 +32,6 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
 }) => {
   const [status, setStatus] = useState<'loading' | 'invalid' | 'ready'>('loading');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [errorCode, setErrorCode] = useState<string | null>(null);
   const [redeemed, setRedeemed] = useState<RedeemedInvitation | null>(null);
   const [sessionState, setSessionState] = useState<SessionPublicState | null>(null);
   const [snapshot, setSnapshot] = useState<EngineSnapshot | null>(null);
@@ -73,16 +66,12 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
   const redeem = useCallback(async () => {
     if (legacyInvitation) {
       setStatus('invalid');
-      setErrorCode('LEGACY_LINK');
-      setErrorMessage(
-        'This link is not a valid invitation. Ask the salesperson to send the invitation link from their dashboard.'
-      );
+      setErrorMessage(customerInvitationMessage('LEGACY_LINK'));
       return;
     }
     if (!inviteToken) {
       setStatus('invalid');
-      setErrorCode('MISSING_INVITATION');
-      setErrorMessage('No invitation token was provided. Open the link the salesperson sent you.');
+      setErrorMessage('No invitation was found. Open the link the salesperson sent you.');
       return;
     }
 
@@ -96,8 +85,9 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
       // as success: rendering with a partial payload would crash the tree.
       if (!result || typeof result.sessionId !== 'string' || typeof result.customerKey !== 'string') {
         setStatus('invalid');
-        setErrorCode('UNEXPECTED_RESPONSE');
-        setErrorMessage('The server returned an unexpected response. Please try again or ask for a new invitation.');
+        setErrorMessage(
+          'We could not open this invitation. Please try again or ask the salesperson for a new link.'
+        );
         return;
       }
       saveCustomerSession(inviteToken, { sessionId: result.sessionId, customerKey: result.customerKey });
@@ -106,10 +96,11 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
       setStatus('ready');
     } catch (err) {
       if (!mountedRef.current) return;
+      // Only a mapped, customer-safe sentence is stored. The API code/message is
+      // never rendered, so a raw server response cannot reach this screen.
       const apiError = err as ApiError;
       setStatus('invalid');
-      setErrorCode(apiError?.code || 'INVITE_INVALID');
-      setErrorMessage(apiError?.message || 'This invitation could not be used.');
+      setErrorMessage(customerInvitationMessage(apiError?.code));
     }
   }, [inviteToken, legacyInvitation]);
 
@@ -202,7 +193,6 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
           <AlertCircle className="w-8 h-8 text-rose-400 mx-auto" />
           <h1 className="text-lg font-semibold text-slate-100">This invitation cannot be used</h1>
           <p className="text-sm text-slate-400">{errorMessage}</p>
-          {errorCode ? <p className="text-[11px] font-mono text-slate-600">code: {errorCode}</p> : null}
           <button
             onClick={() => void redeem()}
             className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 text-sm font-semibold"
@@ -214,7 +204,8 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
     );
   }
 
-  const callState = callStateLabel(snapshot);
+  const callState = { label: customerCallLabel(snapshot?.callState), tone: callStateTone(snapshot) };
+  const customerNotice = customerCallNotice(snapshot?.callState);
   const salespersonConnected = Boolean(snapshot?.peerParticipantId);
   const captionText = snapshot?.salespersonCaption ?? '';
 
@@ -249,14 +240,9 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
           </span>
         </header>
 
-        {snapshot?.iceConfigError ? (
-          <Banner tone="red" title="Connection setup problem" testId="ice-error">
-            The call could not start on this network. Ask the salesperson to check the call setup.
-          </Banner>
-        ) : null}
         {snapshot?.diagnostics.iceTransportPolicy === 'relay' && snapshot.relayCandidates === 0 ? (
-          <Banner tone="red" title="No audio path available" testId="relay-warning">
-            This network could not reach the call relay. Check your connection and try reconnect.
+          <Banner tone="red" title="Audio could not start" testId="relay-warning">
+            We could not establish audio on this network. Check your connection and try Reconnect.
           </Banner>
         ) : null}
         {snapshot?.playbackBlocked ? (
@@ -275,7 +261,15 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
             Tap Enable audio to allow the call to play through this device.
           </Banner>
         ) : null}
-        {snapshot?.lastError ? <Banner tone="red" title="Connection problem">{snapshot.lastError}</Banner> : null}
+        {joined && customerNotice ? (
+          <Banner
+            tone={snapshot?.callState === 'failed' ? 'red' : 'amber'}
+            title={snapshot?.callState === 'failed' ? 'Unable to connect' : 'Call status'}
+            testId={snapshot?.callState === 'failed' ? 'ice-error' : 'customer-notice'}
+          >
+            {customerNotice}
+          </Banner>
+        ) : null}
 
 
         {!joined ? (
@@ -376,8 +370,15 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
                 </button>
               </div>
 
-              <p className="text-[11px] text-slate-500">
-                Microphone: {snapshot?.micPermission === 'granted' ? (snapshot?.micMuted ? 'muted' : 'live') : snapshot?.micPermission ?? 'unknown'}
+              <p className="text-[11px] text-slate-500" data-testid="customer-mic-status">
+                Microphone:{' '}
+                {snapshot?.micMuted
+                  ? 'muted'
+                  : snapshot?.micPermission === 'granted'
+                    ? 'on'
+                    : snapshot?.micPermission === 'denied'
+                      ? 'blocked'
+                      : 'not available yet'}
               </p>
             </section>
 

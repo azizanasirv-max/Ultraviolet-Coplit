@@ -461,10 +461,15 @@ export const buildIceConfig = (options: BuildIceConfigOptions = {}): IceConfigPa
     expressTurn?.urls ?? (rstreamStaticReady ? settings.rstreamStaticUrls : settings.turnUrls);
   const iceServers: IceServerConfig[] = [{ urls: settings.stunUrls }];
   const hasExpressTurn = Boolean(expressTurn);
+  // Never hand the browser a relay entry that this process classified as
+  // unusable: credentials for a malformed/expired relay would only produce
+  // failed TURN allocations (and needlessly expose the credential).
+  const staticTurnUsable = hasExpressTurn || rstreamStaticReady || staticUsable;
   if (
     credentialMode !== 'none' &&
     activeTurnUrls.length > 0 &&
-    (hasExpressTurn || !providerReady)
+    (hasExpressTurn || !providerReady) &&
+    staticTurnUsable
   ) {
     iceServers.push({
       urls: activeTurnUrls,

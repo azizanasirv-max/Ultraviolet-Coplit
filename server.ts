@@ -699,74 +699,93 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       return;
     }
 
-    let config = buildIceConfig({ sessionId: session.sessionId, ...expressTurnOptions() });
     res.setHeader('Cache-Control', 'no-store');
 
-    if (config.turn.provider === 'rstream' && config.turn.providerConfigured) {
-      // rstream managed TURN: the access token is read here and never logged or
-      // returned. If rstream is unavailable, any static/ephemeral TURN config is
-      // preserved instead of degrading to STUN-only.
-      const settings = resolveTurnSettings();
-      const fallback = buildIceConfig({ sessionId: session.sessionId, ignoreProviders: true });
-      try {
-        const provider = await fetchRstreamTurnCredentials({
-          token: settings.rstreamToken ?? '',
-          projectId: settings.rstreamProjectId,
-          projectEndpoint: settings.rstreamProjectEndpoint,
-          baseUrl: settings.rstreamBaseUrl,
-          ttlSeconds: Math.min(settings.ttlSeconds, 3600),
-          fetchImpl: turnFetch,
-          cache: rstreamCache,
-        });
-        config = mergeRstreamIceServers(config, provider, null, fallback).config;
-        const remainingSeconds = Math.max(0, Math.round((provider.expiresAt - Date.now()) / 1000));
-        console.log(
-          `[ice] rstream TURN credentials ready (${provider.urls.length} URL(s), ${remainingSeconds}s remaining) for session ${session.sessionId.slice(0, 8)}`
-        );
-      } catch (err) {
-        const error = err as Error;
-        // Error messages are provider-status based and contain no token/header.
-        console.error(`[ice] rstream TURN credential request failed: ${error.message}`);
-        config = mergeRstreamIceServers(config, null, error, fallback).config;
-        store.recordError(session.sessionId, 'rstream TURN credential request failed');
+    try {
+      let config = buildIceConfig({ sessionId: session.sessionId, ...expressTurnOptions() });
+
+      if (config.turn.provider === 'rstream' && config.turn.providerConfigured) {
+        // rstream managed TURN: the access token is read here and never logged or
+        // returned. If rstream is unavailable, any static/ephemeral TURN config is
+        // preserved instead of degrading to STUN-only.
+        const settings = resolveTurnSettings();
+        const fallback = buildIceConfig({ sessionId: session.sessionId, ignoreProviders: true });
+        try {
+          const provider = await fetchRstreamTurnCredentials({
+            token: settings.rstreamToken ?? '',
+            projectId: settings.rstreamProjectId,
+            projectEndpoint: settings.rstreamProjectEndpoint,
+            baseUrl: settings.rstreamBaseUrl,
+            ttlSeconds: Math.min(settings.ttlSeconds, 3600),
+            fetchImpl: turnFetch,
+            cache: rstreamCache,
+          });
+          config = mergeRstreamIceServers(config, provider, null, fallback).config;
+          const remainingSeconds = Math.max(0, Math.round((provider.expiresAt - Date.now()) / 1000));
+          console.log(
+            `[ice] rstream TURN credentials ready (${provider.urls.length} URL(s), ${remainingSeconds}s remaining) for session ${session.sessionId.slice(0, 8)}`
+          );
+        } catch (err) {
+          const error = err as Error;
+          // Error messages are provider-status based and contain no token/header.
+          console.error(`[ice] rstream TURN credential request failed: ${error.message}`);
+          config = mergeRstreamIceServers(config, null, error, fallback).config;
+          store.recordError(session.sessionId, 'rstream TURN credential request failed');
+        }
+      } else if (config.turn.provider === 'generic' && config.turn.providerConfigured) {
+        const credentialsUrl = process.env.TURN_CREDENTIALS_URL?.trim();
+        try {
+          if (!credentialsUrl) throw new Error('TURN_CREDENTIALS_URL is not configured.');
+          const provider = await fetchProviderIceServers({
+            credentialsUrl,
+            authorization: process.env.TURN_CREDENTIALS_AUTH?.trim() || null,
+            method: process.env.TURN_CREDENTIALS_METHOD === 'POST' ? 'POST' : 'GET',
+            ttlSeconds: Number(process.env.TURN_TTL_SECONDS) || 3600,
+            fetchImpl: turnFetch,
+            cache: turnCache,
+          });
+          config = mergeProviderIceServers(config, provider, null).config;
+          console.log(
+            `[ice] provider issued ${provider.iceServers.length} short-lived TURN entr(ies) for session ${session.sessionId.slice(0, 8)}`
+          );
+        } catch (err) {
+          const error = err as Error;
+          // Never log the provider URL or authorization header.
+          console.error(`[ice] TURN credential provider failed: ${error.message}`);
+          config = mergeProviderIceServers(config, null, error).config;
+          store.recordError(session.sessionId, 'TURN credential provider failed');
+        }
       }
-    } else if (config.turn.provider === 'generic' && config.turn.providerConfigured) {
-      const credentialsUrl = process.env.TURN_CREDENTIALS_URL?.trim();
-      try {
-        if (!credentialsUrl) throw new Error('TURN_CREDENTIALS_URL is not configured.');
-        const provider = await fetchProviderIceServers({
-          credentialsUrl,
-          authorization: process.env.TURN_CREDENTIALS_AUTH?.trim() || null,
-          method: process.env.TURN_CREDENTIALS_METHOD === 'POST' ? 'POST' : 'GET',
-          ttlSeconds: Number(process.env.TURN_TTL_SECONDS) || 3600,
-          fetchImpl: turnFetch,
-          cache: turnCache,
+
+      // Relay-only mode without a usable relay is a deployment error. Returning
+      // STUN-only servers here would silently produce a connected-but-silent call.
+      if (config.errors.length > 0 && config.iceTransportPolicy === 'relay') {
+        res.status(503).json({
+          error: 'TURN_MISCONFIGURED',
+          message: config.errors[0],
+          ...config,
         });
-        config = mergeProviderIceServers(config, provider, null).config;
-        console.log(
-          `[ice] provider issued ${provider.iceServers.length} short-lived TURN entr(ies) for session ${session.sessionId.slice(0, 8)}`
-        );
-      } catch (err) {
-        const error = err as Error;
-        // Never log the provider URL or authorization header.
-        console.error(`[ice] TURN credential provider failed: ${error.message}`);
-        config = mergeProviderIceServers(config, null, error).config;
-        store.recordError(session.sessionId, 'TURN credential provider failed');
+        return;
+      }
+
+      res.json(config);
+    } catch (err) {
+      // Never let an unexpected failure escape as an unhandled rejection (which
+      // would take the whole process down) or as an HTML error page. The detail
+      // stays in the server log; the client only receives a stable code.
+      console.error(
+        `[ice] failed to build ICE configuration for session ${session.sessionId.slice(0, 8)}: ${
+          (err as Error)?.message || err
+        }`
+      );
+      store.recordError(session.sessionId, 'ICE configuration generation failed');
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: 'ICE_CONFIG_UNAVAILABLE',
+          message: 'ICE configuration could not be generated. Please retry.',
+        });
       }
     }
-
-    // Relay-only mode without a usable relay is a deployment error. Returning
-    // STUN-only servers here would silently produce a connected-but-silent call.
-    if (config.errors.length > 0 && config.iceTransportPolicy === 'relay') {
-      res.status(503).json({
-        error: 'TURN_MISCONFIGURED',
-        message: config.errors[0],
-        ...config,
-      });
-      return;
-    }
-
-    res.json(config);
   });
 
   app.get('/api/health', (_req, res) => {

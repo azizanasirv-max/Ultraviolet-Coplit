@@ -814,6 +814,79 @@ test('prototype2 ICE/TURN delivery is session-authenticated and secret-safe', as
 });
 
 
+test('ICE configuration with missing or invalid TURN settings is structured JSON, never a 5xx', async (t) => {
+  const saved = {
+    TURN_URLS: process.env.TURN_URLS,
+    TURN_USERNAME: process.env.TURN_USERNAME,
+    TURN_CREDENTIAL: process.env.TURN_CREDENTIAL,
+    TURN_SECRET: process.env.TURN_SECRET,
+    RSTREAM_AUTHENTICATION_TOKEN: process.env.RSTREAM_AUTHENTICATION_TOKEN,
+    RSTREAM_PROJECT_ENDPOINT: process.env.RSTREAM_PROJECT_ENDPOINT,
+    RSTREAM_PROJECT_ID: process.env.RSTREAM_PROJECT_ID,
+    TURN_CREDENTIALS_URL: process.env.TURN_CREDENTIALS_URL,
+    ICE_TRANSPORT_POLICY: process.env.ICE_TRANSPORT_POLICY,
+    STUN_URLS: process.env.STUN_URLS,
+  };
+  for (const key of Object.keys(saved) as Array<keyof typeof saved>) delete process.env[key];
+  process.env.ICE_TRANSPORT_POLICY = 'all';
+
+  const harness = await startServer();
+  t.after(async () => {
+    await harness.close();
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const fixture = await createFixture(harness.base, 'ICE settings');
+  const icePath = `/api/sessions/${fixture.sessionId}/ice-config`;
+
+  await t.test('TURN URLs without authentication return an actionable 200 payload', async () => {
+    process.env.TURN_URLS = 'turn:turn.invalid:3478?transport=udp';
+    const response = await get(harness.base, icePath, fixture.customerKey);
+    assert.equal(response.status, 200, 'a broken relay config must not break the ICE endpoint');
+    assert.equal(response.body.hasTurn, false);
+    assert.equal(response.body.turn.configured, false);
+    assert.ok(
+      response.body.errors.some((error: string) => /TURN authentication is missing/i.test(error))
+    );
+    // No credentials exist, and nothing secret may appear in the payload.
+    const serialized = JSON.stringify(response.body);
+    assert.ok(!/credential":"[^"]+/.test(serialized));
+    assert.ok(!serialized.includes('turn-pass'));
+  });
+
+  await t.test('malformed TURN URLs are reported without crashing or echoing secrets', async () => {
+    process.env.TURN_URLS = 'htp:/broken, turn:ok.invalid:3478?transport=udp';
+    process.env.TURN_USERNAME = 'turn-user';
+    process.env.TURN_CREDENTIAL = 'turn-pass';
+    const response = await get(harness.base, icePath, fixture.customerKey);
+    assert.equal(response.status, 200);
+    // A malformed entry fails the relay closed rather than using a partial set.
+    assert.equal(response.body.hasTurn, false);
+    assert.equal(response.body.turn.configured, false);
+    assert.ok(
+      response.body.errors.some((error: string) => /invalid entry/i.test(error)),
+      'the malformed entry must be reported'
+    );
+    // With no usable relay the credential must not be sent at all.
+    const serialized = JSON.stringify(response.body);
+    assert.ok(!serialized.includes('turn-pass'));
+    assert.ok(!serialized.includes('turn-user'));
+  });
+
+  await t.test('an unknown session and an unauthorized caller get JSON errors', async () => {
+    const missing = await get(harness.base, '/api/sessions/missing/ice-config', fixture.customerKey);
+    assert.equal(missing.status, 404);
+    assert.equal(missing.body.error, 'SESSION_NOT_FOUND');
+
+    const unauthorized = await get(harness.base, icePath, 'not-a-credential');
+    assert.equal(unauthorized.status, 401);
+    assert.equal(unauthorized.body.error, 'UNAUTHORIZED');
+  });
+});
+
 test('TURN credential provider is fetched server-side and never exposed', async (t) => {
   const saved = {
     TURN_URLS: process.env.TURN_URLS,

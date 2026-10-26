@@ -228,10 +228,26 @@ export const redeemInvitation = (
 /**
  * ICE/TURN configuration for one participant. Session-authenticated: TURN
  * credentials are never served to anonymous visitors.
+ *
+ * `timeoutMs` bounds the request: a hanging provider lookup on the server must
+ * never leave a joining participant waiting forever. The abort surfaces as a
+ * normal fetch rejection, which the call engine retries.
  */
-export const getIceConfig = (sessionId: string, credential: string): Promise<IceConfigResponse> =>
+export const getIceConfig = (
+  sessionId: string,
+  credential: string,
+  options: { timeoutMs?: number } = {}
+): Promise<IceConfigResponse> =>
   request(`/api/sessions/${encodeURIComponent(sessionId)}/ice-config`, {
     headers: auth(credential),
+    ...(options.timeoutMs && options.timeoutMs > 0
+      ? { signal: AbortSignal.timeout(options.timeoutMs) }
+      : {}),
   });
 
-export const getHealth = (): Promise<HealthResponse> => request('/api/health');
+export const getHealth = (options: { timeoutMs?: number } = {}): Promise<HealthResponse> =>
+  request('/api/health', {
+    ...(options.timeoutMs && options.timeoutMs > 0
+      ? { signal: AbortSignal.timeout(options.timeoutMs) }
+      : {}),
+  });

@@ -331,6 +331,30 @@ to start (no peer connection, no microphone capture) instead of showing a silent
 STUN-only call. Do not leave relay-only enabled in production unless the relay is
 confirmed working.
 
+### Diagnosing a real connection failure
+
+Work from the server outward; do not assume TURN is the cause:
+
+1. `GET /api/health` → `ice.configured`, `ice.credentialMode`, `ice.provider` and
+   `ice.warnings`. `configured: false` means the running process currently has no
+   usable relay (for example: the ExpressTURN values were entered at
+   `/admin/turn` before a restart, and process memory was cleared).
+2. `GET /api/sessions/:id/ice-config` as a participant → confirm the response is
+   JSON (not an HTML error page), `hasTurn`, and exactly the expected
+   `iceServers` entries. A 401/404 means the credential or session is wrong or
+   the server restarted; a 503 means relay-only with no relay.
+3. Salesperson dashboard → Details → `pcState`, `iceState`, candidate counts,
+   `selected pair` and `bytes sent/received`. `relay candidates 0` with
+   `policy relay` means the TURN host is unreachable or rejected the credentials.
+4. Browser devtools console for the salesperson page shows the engine log
+   (`ICE configuration attempt …`, `addIceCandidate failed`, etc.). The customer
+   page never shows these.
+5. Server log: `[ice]` lines for provider/rstream failures and unexpected ICE
+   build errors (which now return a JSON 500 instead of crashing the process).
+
+Only relay candidates from a *confirmed working* TURN server prove the relay is
+configured correctly; STUN-only success proves nothing about mobile/CGNAT peers.
+
 ## 5. What still requires an external action
 
 1. Create the relay: a coturn VPS **or** a Cloudflare/Metered/Twilio account.

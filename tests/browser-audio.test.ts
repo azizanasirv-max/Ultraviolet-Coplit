@@ -172,6 +172,11 @@ test('prototype2 role-specific interfaces', async (t) => {
     assert.equal(await customerPage.locator('[data-testid="ai-suggestion-latest"]').count(), 0);
     assert.equal(await customerPage.locator('[data-testid="diagnostics-panel"]').count(), 0);
     assert.equal(await customerPage.locator('[data-testid="captions-status"]').count(), 0);
+
+    // No internal networking/API detail either.
+    for (const token of CUSTOMER_FORBIDDEN_TEXT) {
+      assert.ok(!text.includes(token), `customer DOM leaked "${token}"`);
+    }
   });
 
   await t.test('the invitation resolves to the salesperson\'s session', async () => {
@@ -933,6 +938,157 @@ test('presence refresh flood during real Chromium negotiation leaves one healthy
   assert.equal(customerState.length, 1);
   assert.equal(customerState[0].signalingState, 'stable');
   assert.equal(customerState[0].createOfferCalls, 0, 'the customer is always the answerer');
+
+  await salespersonContext.close();
+  await customerContext.close();
+});
+
+// ---------------------------------------------------------------------------
+// Customer privacy: raw networking/API errors must never be rendered
+// ---------------------------------------------------------------------------
+
+/** Tokens that would prove an internal networking/API detail reached the DOM. */
+const CUSTOMER_FORBIDDEN_TEXT = [
+  'ICE',
+  'TURN',
+  'SDP',
+  'candidate',
+  'WebSocket',
+  'signaling',
+  'Failed to fetch',
+  'UNAUTHORIZED',
+  'TURN_MISCONFIGURED',
+  'SESSION_NOT_FOUND',
+  'HTTP 4',
+  'HTTP 5',
+  '401',
+  '403',
+  '404',
+  '500',
+  '503',
+];
+
+const assertCustomerDomIsClean = async (page: Page, context: string) => {
+  const text = (await page.textContent('[data-testid="role-customer"]')) || '';
+  for (const token of CUSTOMER_FORBIDDEN_TEXT) {
+    assert.ok(!text.includes(token), `${context}: customer DOM leaked "${token}" in: ${text}`);
+  }
+};
+
+test('customer never sees technical errors when the ICE configuration request keeps failing', async (t) => {
+  const restoreEnv = applyIceEnv({
+    TURN_URLS: null,
+    TURN_USERNAME: null,
+    TURN_CREDENTIAL: null,
+    TURN_SECRET: null,
+    ICE_TRANSPORT_POLICY: 'all',
+    STUN_URLS: null,
+  });
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const base = `http://127.0.0.1:${server.port}`;
+  const browser = await launchBrowser();
+  t.after(async () => {
+    await browser.close();
+    await server.close();
+    restoreEnv();
+  });
+
+  const salespersonContext = await openContext(browser);
+  const customerContext = await openContext(browser);
+  const salespersonPage = await salespersonContext.newPage();
+  const customerPage = await customerContext.newPage();
+
+  await salespersonPage.goto(`${base}/sales`, { waitUntil: 'domcontentloaded' });
+  const inviteUrl = await readInvitationAndOpenDashboard(salespersonPage);
+  await customerPage.goto(inviteUrl, { waitUntil: 'domcontentloaded' });
+  await customerPage.waitForSelector('[data-testid="customer-prejoin"]', { timeout: 20000 });
+
+  // Simulate a server that cannot answer the ICE endpoint (restart, cold start,
+  // dropped request). Before the fix this aborted the whole customer call.
+  await customerPage.route('**/api/sessions/*/ice-config', (route) => route.abort('connectionreset'));
+
+  await salespersonPage.click('[data-testid="join-call"]');
+  await customerPage.click('[data-testid="join-call"]');
+
+  await waitFor(
+    () => snapshot(salespersonPage),
+    (value) => value.callState === 'connected' && value.mediaFlowing,
+    30000
+  );
+  const customer = await waitFor(
+    () => snapshot(customerPage),
+    (value) => value.callState === 'connected' && value.mediaFlowing,
+    30000
+  );
+
+  // The technical detail exists internally (salesperson diagnostics) ...
+  assert.equal(customer.iceConfigLoaded, false);
+  assert.match(String(customer.iceConfigError), /could not reach the server/i);
+  // ... but it is not rendered for the customer.
+  await assertCustomerDomIsClean(customerPage, 'ICE endpoint unavailable');
+  assert.equal(await customerPage.locator('[data-testid="ice-error"]').count(), 0);
+  assert.equal(await customerPage.locator('[data-testid="customer-notice"]').count(), 0);
+
+  await salespersonContext.close();
+  await customerContext.close();
+});
+
+test('relay-only ICE failure shows the customer a plain message after recovery is exhausted', async (t) => {
+  const restoreEnv = applyIceEnv({
+    TURN_URLS: 'turn:turn.invalid:3478?transport=udp',
+    TURN_USERNAME: 'mock-turn-user',
+    TURN_CREDENTIAL: 'mock-turn-pass',
+    TURN_SECRET: null,
+    ICE_TRANSPORT_POLICY: 'relay',
+    STUN_URLS: null,
+  });
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const base = `http://127.0.0.1:${server.port}`;
+  const browser = await launchBrowser();
+  t.after(async () => {
+    await browser.close();
+    await server.close();
+    restoreEnv();
+  });
+
+  const salespersonContext = await openContext(browser);
+  const customerContext = await openContext(browser);
+  const salespersonPage = await salespersonContext.newPage();
+  const customerPage = await customerContext.newPage();
+
+  await salespersonPage.goto(`${base}/sales`, { waitUntil: 'domcontentloaded' });
+  const inviteUrl = await readInvitationAndOpenDashboard(salespersonPage);
+  await customerPage.goto(inviteUrl, { waitUntil: 'domcontentloaded' });
+  await customerPage.waitForSelector('[data-testid="customer-prejoin"]', { timeout: 20000 });
+
+  await salespersonPage.click('[data-testid="join-call"]');
+  await customerPage.click('[data-testid="join-call"]');
+
+  // The mock TURN host cannot be reached: bounded ICE restarts run first, then
+  // the terminal state is shown.
+  const customer = await waitFor(
+    () => snapshot(customerPage),
+    (value) => value.callState === 'failed',
+    90000
+  );
+  // The ICE payload itself was valid; the relay is simply unreachable.
+  assert.equal(customer.iceConfigError, null);
+  assert.equal(customer.iceConfigLoaded, true);
+
+  await assertCustomerDomIsClean(customerPage, 'relay-only failure');
+  assert.equal(await customerPage.locator('[data-testid="ice-error"]').count(), 1);
+  assert.match(
+    (await customerPage.textContent('[data-testid="ice-error"]')) || '',
+    /Unable to connect\. Please try again\./
+  );
+  assert.equal(customer.turnConfigured, true, 'the relay was configured, just unreachable');
+  assert.equal(customer.relayCandidates, 0);
+
+  // The salesperson keeps the technical diagnostics.
+  const salesperson = await snapshot(salespersonPage);
+  assert.equal(salesperson.diagnostics.iceTransportPolicy, 'relay');
+  const salespersonText = (await salespersonPage.textContent('[data-testid="role-salesperson"]')) || '';
+  assert.match(salespersonText, /TURN is unreachable or rejected the credentials/i);
 
   await salespersonContext.close();
   await customerContext.close();

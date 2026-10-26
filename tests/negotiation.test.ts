@@ -106,6 +106,7 @@ class FakePeerConnection {
   ontrack: ((event: any) => void) | null = null;
   createOfferCalls: Array<{ iceRestart: boolean }> = [];
   setRemoteDescriptionCalls: any[] = [];
+  setConfigurationCalls: any[] = [];
   failCreateOffer = false;
   failSetLocalDescription = false;
   senders: Array<{ track: FakeTrack; replaceTrack: (track: FakeTrack) => Promise<void> }> = [];
@@ -174,6 +175,15 @@ class FakePeerConnection {
     return Promise.resolve();
   }
 
+  getConfiguration() {
+    return this.configuration;
+  }
+
+  setConfiguration(configuration: any) {
+    this.setConfigurationCalls.push(configuration);
+    this.configuration = { ...this.configuration, ...configuration };
+  }
+
   getStats() {
     return Promise.resolve(new Map());
   }
@@ -192,6 +202,11 @@ class FakePeerConnection {
   __setIceState(state: string) {
     this.iceConnectionState = state;
     this.oniceconnectionstatechange?.();
+  }
+
+  __setIceGatheringState(state: string) {
+    this.iceGatheringState = state;
+    (this as any).onicegatheringstatechange?.();
   }
 }
 
@@ -275,19 +290,53 @@ class FakeUltravoxSession extends EventTarget {
 const jsonResponse = (body: unknown) =>
   new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 
-const installFetch = () => {
+const icePayload = (overrides: Record<string, unknown> = {}) => ({
+  iceServers: [{ urls: 'stun:test.invalid:19302' }],
+  hasTurn: false,
+  hasStun: true,
+  iceTransportPolicy: 'all',
+  turn: { configured: false, credentialMode: 'none', urlCount: 0, expiresAt: null },
+  warnings: [],
+  errors: [],
+  generatedAt: new Date(0).toISOString(),
+  ...overrides,
+});
+
+const turnIcePayload = (credential: string) =>
+  icePayload({
+    iceServers: [
+      { urls: 'stun:test.invalid:19302' },
+      {
+        urls: 'turn:turn.test.invalid:3478?transport=udp',
+        username: 'turn-user',
+        credential,
+      },
+    ],
+    hasTurn: true,
+    turn: { configured: true, credentialMode: 'static', urlCount: 1, expiresAt: null },
+  });
+
+let iceFetchCount = 0;
+
+/** Deterministic ICE endpoint behaviour, including transient/permanent failures. */
+type IceFetchBehavior = (attempt: number) => Response | Promise<Response>;
+
+const installFetch = (
+  options: { iceFetch?: IceFetchBehavior; healthPolicy?: 'all' | 'relay' } = {}
+) => {
+  iceFetchCount = 0;
   (globalThis as any).fetch = async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes('/ice-config')) {
+      iceFetchCount += 1;
+      if (options.iceFetch) return options.iceFetch(iceFetchCount);
+      return jsonResponse(icePayload());
+    }
+    if (url.includes('/api/health')) {
       return jsonResponse({
-        iceServers: [{ urls: 'stun:test.invalid:19302' }],
-        hasTurn: false,
-        hasStun: true,
-        iceTransportPolicy: 'all',
-        turn: { configured: false, credentialMode: 'none', urlCount: 0, expiresAt: null },
-        warnings: [],
-        errors: [],
-        generatedAt: new Date(0).toISOString(),
+        status: 'ok',
+        ice: { iceTransportPolicy: options.healthPolicy ?? 'all' },
+        iceTransportPolicy: options.healthPolicy ?? 'all',
       });
     }
     if (url.includes('/ultravox-call')) {
@@ -329,11 +378,16 @@ const setupPeer = async (
     iceRestartDelaysMs?: readonly number[];
     iceRestartVerifyMs?: number;
     disconnectGraceMs?: number;
+    iceFetch?: IceFetchBehavior;
+    healthPolicy?: 'all' | 'relay';
+    iceConfigRetryDelaysMs?: readonly number[];
+    iceConfigTimeoutMs?: number;
+    connectWatchdogMs?: number;
   } = {}
 ): Promise<Harness> => {
   FakePeerConnection.instances = [];
   FakeWebSocket.instances = [];
-  installFetch();
+  installFetch({ iceFetch: options.iceFetch, healthPolicy: options.healthPolicy });
 
   const snapshots: any[] = [];
   const sessions: FakeUltravoxSession[] = [];
@@ -347,6 +401,9 @@ const setupPeer = async (
     iceRestartDelaysMs: options.iceRestartDelaysMs ?? [1, 1, 1],
     iceRestartVerifyMs: options.iceRestartVerifyMs ?? 30,
     disconnectGraceMs: options.disconnectGraceMs ?? 20,
+    iceConfigRetryDelaysMs: options.iceConfigRetryDelaysMs ?? [1, 1],
+    iceConfigTimeoutMs: options.iceConfigTimeoutMs ?? 500,
+    connectWatchdogMs: options.connectWatchdogMs ?? 20000,
     createAiSession: () => {
       const session = new FakeUltravoxSession();
       sessions.push(session);
@@ -946,4 +1003,166 @@ test('signaling rejoin after terminal failure starts a fresh negotiation and lea
   await sleep(5);
   assert.equal(engine.getSnapshot().callState, 'connected');
   assert.equal(engine.getSnapshot().lastError, null);
+});
+
+// ---------------------------------------------------------------------------
+// ICE configuration acquisition / refresh
+// ---------------------------------------------------------------------------
+
+test('a transient ICE configuration failure is retried and the real payload is applied', async t => {
+  const { engine, pc } = await setupPeer('salesperson', {
+    iceFetch: (attempt) => {
+      if (attempt === 1) return Promise.reject(new TypeError('Failed to fetch'));
+      return jsonResponse(turnIcePayload('fresh-pass'));
+    },
+  });
+  t.after(async () => engine.stop('test finished'));
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(iceFetchCount, 2, 'one transient failure must be retried exactly once');
+  assert.equal(snapshot.iceConfigLoaded, true);
+  assert.equal(snapshot.iceConfigError, null);
+  assert.equal(snapshot.turnConfigured, true);
+  assert.equal(snapshot.callState, 'connecting');
+
+  const turn = pc.configuration.iceServers.find((entry: any) =>
+    String(entry.urls).startsWith('turn:')
+  );
+  assert.ok(turn, 'the retried payload must reach RTCPeerConnection');
+  assert.equal(turn.credential, 'fresh-pass');
+});
+
+test('an unreachable ICE endpoint still starts the call with direct-connection defaults', async t => {
+  const { engine, pc } = await setupPeer('salesperson', {
+    iceFetch: () => new Response('down', { status: 503 }),
+    healthPolicy: 'all',
+  });
+  t.after(async () => engine.stop('test finished'));
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(iceFetchCount, 3, 'all bounded attempts must be used before falling back');
+  assert.equal(snapshot.iceConfigLoaded, false);
+  assert.match(String(snapshot.iceConfigError), /HTTP 503/);
+  assert.equal(snapshot.lastError, null, 'a degraded direct call is not a terminal failure');
+  assert.notEqual(snapshot.callState, 'failed');
+
+  assert.ok(pc, 'the call must still negotiate instead of refusing to start');
+  const urls = pc.configuration.iceServers.map((entry: any) => entry.urls);
+  assert.deepEqual(urls, ['stun:stun.l.google.com:19302']);
+  assert.equal(pc.configuration.iceTransportPolicy, 'all');
+});
+
+test('an authorization failure is permanent: no retry, no terminal failure, no raw surface', async t => {
+  const { engine } = await setupPeer('salesperson', {
+    iceFetch: () =>
+      new Response(
+        JSON.stringify({ error: 'UNAUTHORIZED', message: 'A valid participant credential is required.' }),
+        { status: 401, headers: { 'Content-Type': 'application/json' } }
+      ),
+  });
+  t.after(async () => engine.stop('test finished'));
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(iceFetchCount, 1, '401 must not be retried');
+  assert.equal(snapshot.iceConfigLoaded, false);
+  assert.match(String(snapshot.iceConfigError), /UNAUTHORIZED/);
+  assert.notEqual(snapshot.callState, 'failed');
+});
+
+test('relay-only ICE with an unreachable configuration refuses to start (fail closed)', async () => {
+  FakePeerConnection.instances = [];
+  FakeWebSocket.instances = [];
+  installFetch({
+    iceFetch: () => new Response('down', { status: 503 }),
+    healthPolicy: 'relay',
+  });
+
+  const engine = new CallEngine({
+    sessionId: 'session-test',
+    role: 'salesperson',
+    credential: 'credential-test',
+    apiBase: '',
+    iceConfigRetryDelaysMs: [1, 1],
+    iceConfigTimeoutMs: 500,
+    onUpdate: () => undefined,
+  });
+
+  await engine.start();
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.callState, 'failed');
+  assert.equal(snapshot.iceConfigLoaded, false);
+  assert.match(String(snapshot.iceConfigError), /HTTP 503/);
+  assert.equal(
+    snapshot.lastError,
+    'The audio connection could not be established. Check your network and use Reconnect to try again.',
+    'the participant-facing error must stay free of transport detail'
+  );
+  assert.equal(snapshot.wsStatus, 'disconnected');
+  assert.equal(snapshot.micPermission, 'unknown');
+  assert.equal(FakeWebSocket.instances.length, 0, 'no signaling socket may open');
+  assert.equal(FakePeerConnection.instances.length, 0, 'no peer connection may be created');
+});
+
+test('an ICE restart re-reads the ICE payload and applies refreshed TURN credentials', async t => {
+  const { engine, ws, pc } = await setupPeer('salesperson', {
+    iceFetch: (attempt) => jsonResponse(turnIcePayload(`cred-${attempt}`)),
+  });
+  t.after(async () => engine.stop('test finished'));
+
+  assert.equal(iceFetchCount, 1);
+  assert.equal(engine.getSnapshot().turnCredentialMode, 'static');
+
+  // Settle the initial negotiation so the recovery path can create an offer.
+  await answerOffer(ws, pc);
+  assert.equal(pc.signalingState, 'stable');
+
+  pc.__setConnectionState('failed');
+  await sleep(60);
+
+  assert.ok(iceFetchCount >= 2, 'recovery must refresh the ICE payload');
+  assert.ok(pc.setConfigurationCalls.length >= 1, 'refreshed servers must reach the live peer connection');
+  const applied = pc.setConfigurationCalls[pc.setConfigurationCalls.length - 1];
+  const turn = applied.iceServers.find((entry: any) => String(entry.urls).startsWith('turn:'));
+  assert.ok(turn);
+  assert.notEqual(turn.credential, 'cred-1', 'the stale credential must be replaced');
+
+  const restartOffers = pc.createOfferCalls.filter((call) => call.iceRestart);
+  assert.equal(restartOffers.length, 1, 'exactly one bounded ICE-restart offer is created');
+});
+
+test('ICE gathering with zero candidates starts bounded recovery instead of hanging', async t => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+
+  await answerOffer(ws, pc);
+  assert.equal(engine.getSnapshot().callState, 'connecting');
+
+  // Relay-only with an unreachable TURN server: gathering completes with no
+  // host/srflx/relay candidates and no `failed` event is ever emitted.
+  pc.__setIceGatheringState('complete');
+  await sleep(30);
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.callState, 'reconnecting', 'a zero-candidate ICE must not stay connecting');
+  const restartOffers = pc.createOfferCalls.filter((call) => call.iceRestart);
+  assert.equal(restartOffers.length, 1, 'the bounded recovery must attempt an ICE restart');
+});
+
+test('a peer connection that never connects is bounded by the watchdog', async t => {
+  const { engine, ws, pc } = await setupPeer('salesperson', { connectWatchdogMs: 20 });
+  t.after(async () => engine.stop('test finished'));
+
+  await answerOffer(ws, pc);
+  assert.equal(engine.getSnapshot().callState, 'connecting');
+
+  await sleep(60);
+  const snapshot = engine.getSnapshot();
+  assert.ok(
+    ['reconnecting', 'failed'].includes(snapshot.callState),
+    `a stuck connection must leave connecting, got ${snapshot.callState}`
+  );
+  assert.ok(
+    pc.createOfferCalls.some((call) => call.iceRestart),
+    'the watchdog must start the bounded ICE-restart recovery'
+  );
 });
