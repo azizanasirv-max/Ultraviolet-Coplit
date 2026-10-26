@@ -85,6 +85,7 @@ starts the Vite dev server when `NODE_ENV=production`; the server then serves
 | `RSTREAM_TURN_CREDENTIAL` | optional (static mode) | Static rstream TURN credential/password from your JSON credential. |
 | `RSTREAM_TURN_URLS` | optional (static mode) | Comma-separated `turn:`/`turns:` URLs from the same rstream JSON. |
 | `RSTREAM_TURN_TTL_SECONDS` | optional | Validity window for the static credential (default 600, clamped 1-3600). **Expiry is not extended automatically.** |
+| `ADMIN_PASSWORD` | admin page | Password for `/admin/turn`. When unset, the admin page and its API are disabled (503). It is never logged or returned. |
 | `STUN_URLS` | optional | Defaults to Google STUN. |
 | `ICE_TRANSPORT_POLICY` | optional | `all` (default) or `relay` for verification. Relay-only fails with 503 if no usable TURN exists. |
 | `MAX_SESSIONS` | optional | In-memory cap, default 500. |
@@ -100,7 +101,7 @@ create a relay; a relay must run somewhere with public UDP/TCP ingress. Render
 web services only expose HTTP(S), so coturn must run on a VPS/other host (or use
 a managed provider).
 
-Five supported modes, in order of preference:
+Six supported modes, in order of preference:
 
 ### A. coturn with a shared secret (recommended, short-lived, self-hosted)
 
@@ -244,6 +245,60 @@ involved in this mode.
 `TURN_USERNAME` + `TURN_CREDENTIAL` work with any managed relay, but the password
 is delivered to every authorized browser and cannot be rotated per session.
 Use only as a fallback.
+
+### E. ExpressTURN free tier (operator-entered, temporary testing)
+
+The ExpressTURN **free** plan provides a TURN server URL, a username and a
+password. It does **not** provide a Secret Key — ExpressTURN's shared-secret
+authentication (`static-auth-secret` / HMAC credentials) is a **Premium-only**
+feature, as stated on <https://www.expressturn.com/> ("the shared secret
+authentication method is available only to Premium customers"). Free-tier
+credentials therefore use the standard TURN long-term credential mechanism
+(`lt-cred-mech`), which is exactly what a browser's `RTCIceServer`
+`username`/`credential` uses.
+
+Do not invent or derive credentials: this implementation has no HMAC path. The
+three values you enter are placed into the ICE configuration unchanged.
+
+Setup:
+
+1. Deploy the service (no persistent disk, database, Render Shell or ExpressTURN
+   Secret Key involved).
+2. Set **one** environment variable in the hosting dashboard:
+   `ADMIN_PASSWORD=<a long password you choose>`. Without it, `/admin/turn`
+   returns 503 and the admin API is disabled.
+3. Open `https://<service>/admin/turn`, sign in, and enter:
+   * **TURN server URL / address** — e.g. `turn:free.expressturn.com:3478`
+     (a bare `free.expressturn.com:3478` is accepted and normalized to `turn:`).
+     Multiple URLs can be comma-separated, e.g. add
+     `turn:free.expressturn.com:3478?transport=tcp` for a TCP fallback.
+   * **TURN username** and **TURN password** — copied verbatim from the
+     ExpressTURN dashboard.
+4. Make a call. `GET /api/health` reports `ice.configured: true`,
+   `ice.credentialMode: "static"` and `ice.provider: "expressturn"`.
+
+The credentials are held **only in this server process's memory**. A restart or
+redeploy clears them and you re-enter them in `/admin/turn`; nothing is written
+to disk, a database, Git or environment variables.
+
+Security properties:
+
+* `/admin/turn` and `/api/admin/turn-settings` require a 2-hour `HttpOnly`,
+  `SameSite=Strict` signed session cookie obtained with `ADMIN_PASSWORD`.
+  Login is rate-limited and writes are same-origin only.
+* The admin page never renders the TURN username or password back to the
+  browser, and the status API returns only `configured`, `urlCount`,
+  `updatedAt` and `storage: "memory"`. Neither value appears in page source,
+  frontend JavaScript, `/api/health`, logs or errors.
+* Authorized session participants receive the credentials only through the
+  existing authenticated ICE endpoint (`GET /api/sessions/:id/ice-config`);
+  anonymous and cross-session callers get 401. WebRTC signaling, call recovery
+  and salesperson/customer role isolation are unchanged.
+
+Precedence when several TURN sources are configured:
+`ExpressTURN` (admin page, memory) → rstream API → generic
+`TURN_CREDENTIALS_URL` → coturn/static `TURN_URLS`. Existing rstream values may
+remain set but are unused while ExpressTURN credentials are present.
 
 ### Verification mode
 
