@@ -18,6 +18,9 @@ import {
 } from '../server/turn';
 import { createPrototype2Server } from '../server';
 
+// Isolate the encrypted admin store so tests never touch the repo's ./data.
+process.env.SETTINGS_STORE_PATH ||= `${process.env.TMPDIR || '/tmp'}/uv-test-store-${process.pid}/settings.enc`;
+
 const STATIC_USERNAME = 'static-rstream-user';
 const STATIC_CREDENTIAL = 'static-rstream-credential-value';
 const STATIC_URLS =

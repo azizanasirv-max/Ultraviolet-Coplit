@@ -1,16 +1,20 @@
 /**
  * Server-rendered admin page for the ExpressTURN settings.
  *
- * The page never receives the secret key: it only renders host/port/TTL and a
- * boolean "configured". The key is submitted once, over the same-origin admin
- * API, and is encrypted server-side.
+ * The page never receives the ExpressTURN secret, the admin password, the
+ * encryption key or the one-time setup token. Setup mode shows only the *path*
+ * of the bootstrap-token file (read it through Render Shell/SSH).
  */
 import type { TurnSettingsStatus } from './turnSettingsStore';
 
+export type AdminPageMode = 'setup' | 'login' | 'settings' | 'disabled';
+
 export interface AdminPageOptions {
-  authenticated: boolean;
-  adminError: string | null;
+  mode: AdminPageMode;
   status: TurnSettingsStatus | null;
+  /** Filesystem path of the one-time setup token; never the token itself. */
+  setupTokenPath?: string | null;
+  error?: string | null;
 }
 
 const escapeHtml = (value: string): string =>
@@ -24,7 +28,7 @@ const escapeHtml = (value: string): string =>
 const pageStyles = `
   :root { color-scheme: dark; }
   body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; background: #0b0f14; color: #e6edf3; }
-  main { max-width: 640px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  main { max-width: 660px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
   h1 { font-size: 1.4rem; margin: 0 0 1.5rem; }
   h2 { font-size: 1.1rem; margin: 0 0 1rem; }
   section { border: 1px solid #2a3441; border-radius: 12px; padding: 1.25rem; background: #111823; }
@@ -43,73 +47,11 @@ const pageStyles = `
   code { font-size: .85em; }
 `;
 
-export const renderAdminPage = ({ authenticated, adminError, status }: AdminPageOptions): string => {
-  const configured = Boolean(status?.configured);
-  const host = escapeHtml(status?.host ?? '');
-  const port = status?.port ?? 3478;
-  const ttlSeconds = status?.ttlSeconds ?? 3600;
-  const statusError = status?.error ? `<p class="err">${escapeHtml(status.error)}</p>` : '';
-  const durability = status?.durable ?? 'unknown';
-  const durabilityNote =
-    durability === 'persistent-disk-mounted'
-      ? '<p class="ok">Persistent disk detected (SETTINGS_PERSISTENT_STORAGE=true).</p>'
-      : '<p class="warn">Durability not confirmed. The encrypted file below survives restarts only when SETTINGS_STORE_PATH is on a mounted persistent disk. Otherwise the settings are lost on redeploy/restart and must be re-entered.</p>';
-
-  const loginSection = `
-    <section>
-      <h2>Sign in</h2>
-      <p class="muted">Operator access only. The password is verified on the server and exchanged for a short-lived HttpOnly session cookie.</p>
-      <form id="login-form">
-        <label for="password">Admin password</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required minlength="12" />
-        <button type="submit">Sign in</button>
-      </form>
-      <p id="message" class="err" role="status"></p>
-    </section>`;
-
-  const settingsSection = `
-    <section>
-      <h2>ExpressTURN settings</h2>
-      <dl>
-        <dt>Secret key</dt><dd>${configured ? 'configured (encrypted at rest)' : 'not configured'}</dd>
-        <dt>Storage</dt><dd>${escapeHtml(status?.storage ?? 'encrypted-file')} / ${escapeHtml(status?.encryption ?? 'aes-256-gcm')}</dd>
-        <dt>File</dt><dd><code>${escapeHtml(status?.path ?? '')}</code></dd>
-        <dt>Last update</dt><dd>${status?.updatedAt ? new Date(status.updatedAt).toISOString() : '&mdash;'}</dd>
-      </dl>
-      ${durabilityNote}
-      ${statusError}
-      <form id="settings-form">
-        <label for="host">TURN hostname</label>
-        <input id="host" name="host" value="${host}" placeholder="free.expressturn.com" required />
-        <label for="port">TURN port</label>
-        <input id="port" name="port" type="number" min="1" max="65535" value="${port}" required />
-        <label for="ttl">Credential TTL (seconds)</label>
-        <input id="ttl" name="ttl" type="number" min="300" max="86400" value="${ttlSeconds}" required />
-        <label for="secret">Secret key ${configured ? '(leave blank to keep the current key)' : ''}</label>
-        <input id="secret" name="secret" type="password" autocomplete="new-password" ${configured ? '' : 'required'} />
-        <p class="muted">Official scheme: username <code>&lt;expiry&gt;:&lt;user&gt;</code>, credential <code>base64(HMAC-SHA1(secret, username))</code>.</p>
-        <button type="submit">Save settings</button>
-      </form>
-      <p id="message" class="err" role="status"></p>
-      <form id="logout-form"><button type="submit" class="secondary">Sign out</button></form>
-    </section>`;
-
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="robots" content="noindex, nofollow" />
-<title>ExpressTURN settings</title>
-<style>${pageStyles}</style>
-</head>
-<body>
-<main>
-  <h1>ExpressTURN settings</h1>
-  ${adminError ? `<section><p class="err">${escapeHtml(adminError)}</p></section>` : ''}
-  ${adminError ? '' : authenticated ? settingsSection : loginSection}
-</main>
-<script>
+/**
+ * Shared browser code. It never receives secrets from the server; the setup
+ * token and new password are read from the form and posted once.
+ */
+const pageScript = `
 (function () {
   var message = document.getElementById('message');
   var show = function (text, ok) {
@@ -120,21 +62,38 @@ export const renderAdminPage = ({ authenticated, adminError, status }: AdminPage
   var readJson = function (response) {
     return response.json().catch(function () { return {}; });
   };
-  var login = document.getElementById('login-form');
-  if (login) {
-    login.addEventListener('submit', function (event) {
+  var submit = function (formId, url, buildPayload, successText) {
+    var form = document.getElementById(formId);
+    if (!form) return;
+    form.addEventListener('submit', function (event) {
       event.preventDefault();
-      fetch('/api/admin/login', {
+      fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify({ password: document.getElementById('password').value })
+        body: JSON.stringify(buildPayload())
       }).then(function (response) {
-        if (response.ok) { window.location.reload(); return; }
-        return readJson(response).then(function (body) { show(body.message || 'Sign-in failed.', false); });
-      }).catch(function () { show('Sign-in failed.', false); });
+        return readJson(response).then(function (body) {
+          if (response.ok) {
+            if (successText) show(successText, true);
+            window.location.reload();
+            return;
+          }
+          show(body.message || 'Request failed.', false);
+        });
+      }).catch(function () { show('Request failed.', false); });
     });
-  }
+  };
+  submit('login-form', '/api/admin/login', function () {
+    return { password: document.getElementById('password').value };
+  }, '');
+  submit('setup-form', '/api/admin/setup', function () {
+    return {
+      token: document.getElementById('setup-token').value,
+      password: document.getElementById('new-password').value,
+      confirmPassword: document.getElementById('confirm-password').value
+    };
+  }, '');
   var settings = document.getElementById('settings-form');
   if (settings) {
     settings.addEventListener('submit', function (event) {
@@ -170,7 +129,116 @@ export const renderAdminPage = ({ authenticated, adminError, status }: AdminPage
     });
   }
 })();
-</script>
+`;
+
+export const renderAdminPage = ({
+  mode,
+  status,
+  setupTokenPath,
+  error,
+}: AdminPageOptions): string => {
+  const configured = Boolean(status?.configured);
+  const host = escapeHtml(status?.host ?? '');
+  const port = status?.port ?? 3478;
+  const ttlSeconds = status?.ttlSeconds ?? 3600;
+  const durability = status?.durable ?? 'assumed-ephemeral';
+  const durabilityNote =
+    durability === 'persistent-disk-mounted'
+      ? '<p class="ok">Persistent volume detected. Settings, encryption key and admin password survive restarts.</p>'
+      : `<p class="warn">This filesystem is ephemeral: the encrypted file at <code>${escapeHtml(
+          status?.path ?? ''
+        )}</code> and its key are lost on redeploy/restart. Attach a Render persistent disk (paid) and set <code>SETTINGS_STORE_PATH</code> to a path on it (for example <code>/var/data/uv-admin/settings.enc</code>).</p>`;
+  const errorBlock = error ? `<p class="err">${escapeHtml(error)}</p>` : '';
+
+  const setupSection = `
+    <section>
+      <h2>First-time setup</h2>
+      <p class="muted">No admin password exists yet. A one-time setup token was written to the server filesystem. Read it through Render's Shell/SSH (or via a mounted secret file), then set your password below. The token is deleted after setup and is never shown in this page, logs or API responses.</p>
+      <p>Token file: <code>${escapeHtml(setupTokenPath ?? 'not available')}</code></p>
+      ${errorBlock}
+      <form id="setup-form">
+        <label for="setup-token">One-time setup token</label>
+        <input id="setup-token" name="token" type="password" autocomplete="off" required minlength="16" />
+        <label for="new-password">New admin password (min 12 characters)</label>
+        <input id="new-password" name="password" type="password" autocomplete="new-password" required minlength="12" />
+        <label for="confirm-password">Confirm password</label>
+        <input id="confirm-password" name="confirmPassword" type="password" autocomplete="new-password" required minlength="12" />
+        <button type="submit">Set password and sign in</button>
+      </form>
+      <p id="message" class="err" role="status"></p>
+    </section>`;
+
+  const loginSection = `
+    <section>
+      <h2>Sign in</h2>
+      ${errorBlock}
+      <form id="login-form">
+        <label for="password">Admin password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required minlength="12" />
+        <button type="submit">Sign in</button>
+      </form>
+      <p id="message" class="err" role="status"></p>
+    </section>`;
+
+  const settingsSection = `
+    <section>
+      <h2>ExpressTURN settings</h2>
+      <dl>
+        <dt>Secret key</dt><dd>${configured ? 'configured (encrypted at rest)' : 'not configured'}</dd>
+        <dt>Storage</dt><dd>${escapeHtml(status?.storage ?? 'encrypted-file')} / ${escapeHtml(status?.encryption ?? 'aes-256-gcm')}</dd>
+        <dt>Encryption key</dt><dd>${escapeHtml(status?.keySource ?? 'unknown')}</dd>
+        <dt>File</dt><dd><code>${escapeHtml(status?.path ?? '')}</code></dd>
+        <dt>Last update</dt><dd>${status?.updatedAt ? new Date(status.updatedAt).toISOString() : '&mdash;'}</dd>
+      </dl>
+      ${durabilityNote}
+      ${errorBlock}
+      <form id="settings-form">
+        <label for="host">TURN hostname</label>
+        <input id="host" name="host" value="${host}" placeholder="free.expressturn.com" required />
+        <label for="port">TURN port</label>
+        <input id="port" name="port" type="number" min="1" max="65535" value="${port}" required />
+        <label for="ttl">Credential TTL (seconds)</label>
+        <input id="ttl" name="ttl" type="number" min="300" max="86400" value="${ttlSeconds}" required />
+        <label for="secret">Secret key ${configured ? '(leave blank to keep the current key)' : ''}</label>
+        <input id="secret" name="secret" type="password" autocomplete="new-password" ${configured ? '' : 'required'} />
+        <p class="muted">Official scheme: username <code>&lt;expiry&gt;:&lt;user&gt;</code>, credential <code>base64(HMAC-SHA1(secret, username))</code>.</p>
+        <button type="submit">Save settings</button>
+      </form>
+      <p id="message" class="err" role="status"></p>
+      <form id="logout-form"><button type="submit" class="secondary">Sign out</button></form>
+    </section>`;
+
+  const disabledSection = `
+    <section>
+      <h2>Admin setup unavailable</h2>
+      ${errorBlock || '<p class="err">The encrypted settings store is not usable.</p>'}
+      <p class="muted">Provide a writable persistent volume, or a one-time token through ADMIN_SETUP_TOKEN / ADMIN_SETUP_TOKEN_FILE. No insecure fallback is enabled.</p>
+    </section>`;
+
+  const body =
+    mode === 'setup'
+      ? setupSection
+      : mode === 'login'
+        ? loginSection
+        : mode === 'settings'
+          ? settingsSection
+          : disabledSection;
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow" />
+<title>ExpressTURN settings</title>
+<style>${pageStyles}</style>
+</head>
+<body>
+<main>
+  <h1>ExpressTURN settings</h1>
+  ${body}
+</main>
+<script>${pageScript}</script>
 </body>
 </html>`;
 };

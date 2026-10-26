@@ -1,93 +1,52 @@
 /**
- * Encrypted, server-side storage for the ExpressTURN settings.
+ * Encrypted, server-side storage for ExpressTURN settings AND the admin
+ * password hash.
  *
- * Security properties:
- *   - The secret key is encrypted at rest with AES-256-GCM.
- *   - The encryption key comes from SETTINGS_ENCRYPTION_KEY (server env only)
- *     and is never written to disk, returned by an API, or logged.
- *   - The file is written atomically with mode 0600 inside a 0700 directory.
- *   - Reads verify the GCM auth tag, so tampering/wrong keys fail closed.
+ * No secret environment variables are required:
+ *   - The AES-256-GCM encryption key is generated on first use and stored as a
+ *     0600 `settings.key` file next to the encrypted settings file. An optional
+ *     SETTINGS_ENCRYPTION_KEY env var still overrides it (advanced/legacy).
+ *   - The admin password is a salted scrypt hash inside the encrypted file.
  *
- * Durability: this is a local file. It survives restarts only when
- * SETTINGS_STORE_PATH points at a mounted persistent volume (e.g. a Render
- * persistent disk). On an ephemeral filesystem the settings are lost on
- * redeploy/restart — see getTurnSettingsStatus().durable.
+ * Durability: the store is a local file. It survives deploys/restarts only when
+ * the path is on a mounted persistent volume (e.g. a Render persistent disk).
+ * Without one, Render's filesystem is ephemeral and everything is lost on
+ * redeploy — the admin page and logs report this instead of pretending.
  */
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
+import { existsSync } from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
-import {
-  ExpressTurnServerSettings,
-  validateExpressTurnSettings,
-} from './expressTurn';
+import { ExpressTurnServerSettings, validateExpressTurnSettings } from './expressTurn';
+import { AdminPasswordRecord, isAdminPasswordRecord } from './adminCredentials';
 
 const ALGORITHM = 'aes-256-gcm';
 const ENVELOPE_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const AAD = Buffer.from('ultraviolet-copilot/expressturn-settings/v2');
+const DEFAULT_RELATIVE_STORE = path.join('data', 'turn-settings.enc');
+const RENDER_DISK_DIR = '/var/data';
 
-export interface TurnSettingsStoreConfig {
-  path: string;
-  key: Buffer | null;
-  keyError: string | null;
+export type Durability = 'persistent-disk-mounted' | 'assumed-ephemeral';
+export type KeySource = 'env' | 'key-file';
+
+export interface StorePaths {
+  dir: string;
+  file: string;
+  keyFile: string;
 }
 
-const parseEncryptionKey = (raw: string | undefined): { key: Buffer | null; error: string | null } => {
-  const value = raw?.trim();
-  if (!value) {
-    return {
-      key: null,
-      error:
-        'SETTINGS_ENCRYPTION_KEY is not configured. Add a 32-byte key (base64 or 64-char hex) so the ExpressTURN secret can be stored encrypted.',
-    };
-  }
-
-  let key: Buffer | null = null;
-  if (/^[0-9a-fA-F]{64}$/.test(value)) {
-    key = Buffer.from(value, 'hex');
-  } else {
-    const decoded = Buffer.from(value, 'base64');
-    // Reject strings that merely decode loosely (Buffer.from is lenient).
-    const reencoded = decoded.toString('base64').replace(/=+$/, '');
-    if (decoded.length === 32 && reencoded === value.replace(/=+$/, '')) key = decoded;
-  }
-
-  if (!key || key.length !== 32) {
-    return {
-      key: null,
-      error:
-        'SETTINGS_ENCRYPTION_KEY must be exactly 32 bytes, encoded as base64 (44 chars) or 64 hex characters.',
-    };
-  }
-  return { key, error: null };
-};
-
-export const resolveTurnSettingsStoreConfig = (
-  env: NodeJS.ProcessEnv = process.env
-): TurnSettingsStoreConfig => {
-  const parsed = parseEncryptionKey(env.SETTINGS_ENCRYPTION_KEY);
-  return {
-    path: env.SETTINGS_STORE_PATH?.trim() || path.join(process.cwd(), 'data', 'turn-settings.enc'),
-    key: parsed.key,
-    keyError: parsed.error,
-  };
-};
-
-interface CacheEntry {
-  fingerprint: string;
-  mtimeMs: number;
-  settings: ExpressTurnServerSettings | null;
-  error: Error | null;
+export interface StoreRuntime {
+  paths: StorePaths;
+  key: Buffer;
+  keySource: KeySource;
+  durability: Durability;
 }
 
-let cache: CacheEntry | null = null;
-
-const fingerprintOf = (config: TurnSettingsStoreConfig): string =>
-  `${config.path}|${config.key ? createHash('sha256').update(config.key).digest('hex').slice(0, 16) : 'no-key'}`;
-
-/** Test hook: forget the in-process snapshot. */
-export const clearTurnSettingsCache = (): void => {
-  cache = null;
-};
+export interface StoredState {
+  turn: ExpressTurnServerSettings | null;
+  admin: AdminPasswordRecord | null;
+}
 
 interface SettingsEnvelope {
   v: number;
@@ -96,6 +55,95 @@ interface SettingsEnvelope {
   tag: string;
   data: string;
 }
+
+interface CacheEntry {
+  fingerprint: string;
+  mtimeMs: number;
+  runtime: StoreRuntime | null;
+  state: StoredState | null;
+  error: Error | null;
+}
+
+let cache: CacheEntry | null = null;
+
+/** Test hook: forget the in-process key/state snapshot. */
+export const clearTurnSettingsCache = (): void => {
+  cache = null;
+};
+
+/**
+ * Chooses the store location. With no configuration, a mounted Render disk at
+ * /var/data is used when present; otherwise ./data (ephemeral on Render).
+ */
+export const resolveStorePaths = (env: NodeJS.ProcessEnv = process.env): StorePaths => {
+  const configured = env.SETTINGS_STORE_PATH?.trim();
+  const hasRenderDisk = existsSync(RENDER_DISK_DIR);
+  const file =
+    configured ||
+    (hasRenderDisk ? path.join(RENDER_DISK_DIR, 'uv-admin', 'settings.enc') : path.resolve(DEFAULT_RELATIVE_STORE));
+  return {
+    dir: path.dirname(file),
+    file,
+    keyFile: path.join(path.dirname(file), 'settings.key'),
+  };
+};
+
+const durabilityOf = (file: string, env: NodeJS.ProcessEnv): Durability => {
+  if (env.SETTINGS_PERSISTENT_STORAGE === 'true') return 'persistent-disk-mounted';
+  if (env.SETTINGS_PERSISTENT_STORAGE === 'false') return 'assumed-ephemeral';
+  return file === RENDER_DISK_DIR || file.startsWith(`${RENDER_DISK_DIR}/`)
+    ? 'persistent-disk-mounted'
+    : 'assumed-ephemeral';
+};
+
+const parseKeyMaterial = (raw: string): Buffer | null => {
+  const value = raw.trim();
+  if (/^[0-9a-fA-F]{64}$/.test(value)) return Buffer.from(value, 'hex');
+  const decoded = Buffer.from(value, 'base64');
+  const reencoded = decoded.toString('base64').replace(/=+$/, '');
+  if (decoded.length === 32 && reencoded === value.replace(/=+$/, '')) return decoded;
+  return null;
+};
+
+const resolveEncryptionKey = async (
+  paths: StorePaths,
+  env: NodeJS.ProcessEnv
+): Promise<{ key: Buffer; source: KeySource }> => {
+  const envKey = env.SETTINGS_ENCRYPTION_KEY?.trim();
+  if (envKey) {
+    const parsed = parseKeyMaterial(envKey);
+    if (!parsed) {
+      throw new Error('SETTINGS_ENCRYPTION_KEY must be exactly 32 bytes, encoded as base64 or 64 hex characters.');
+    }
+    return { key: parsed, source: 'env' };
+  }
+
+  let rawKey: string | null = null;
+  try {
+    rawKey = await fs.readFile(paths.keyFile, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      throw new Error('The encryption key file could not be read from the settings store directory.');
+    }
+  }
+
+  if (rawKey !== null) {
+    const parsed = parseKeyMaterial(rawKey);
+    if (!parsed) {
+      // Fail closed: replacing a malformed key would make existing data unreadable.
+      throw new Error(
+        'The encryption key file is malformed. Restore it from a backup or remove the settings store to start over (this discards saved settings).'
+      );
+    }
+    return { key: parsed, source: 'key-file' };
+  }
+
+  await fs.mkdir(paths.dir, { recursive: true, mode: 0o700 });
+  const key = randomBytes(32);
+  await fs.writeFile(paths.keyFile, `${key.toString('base64')}\n`, { encoding: 'utf8', mode: 0o600 });
+  await fs.chmod(paths.keyFile, 0o600);
+  return { key, source: 'key-file' };
+};
 
 const isEnvelope = (value: unknown): value is SettingsEnvelope => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -109,11 +157,14 @@ const isEnvelope = (value: unknown): value is SettingsEnvelope => {
   );
 };
 
-const encryptSettings = (settings: ExpressTurnServerSettings, key: Buffer): SettingsEnvelope => {
+const encryptState = (state: StoredState, key: Buffer): SettingsEnvelope => {
   const iv = randomBytes(12);
   const cipher = createCipheriv(ALGORITHM, key, iv);
   cipher.setAAD(AAD);
-  const plaintext = Buffer.from(JSON.stringify(settings), 'utf8');
+  const plaintext = Buffer.from(
+    JSON.stringify({ schemaVersion: SCHEMA_VERSION, turn: state.turn, admin: state.admin }),
+    'utf8'
+  );
   const data = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   return {
     v: ENVELOPE_VERSION,
@@ -124,26 +175,18 @@ const encryptSettings = (settings: ExpressTurnServerSettings, key: Buffer): Sett
   };
 };
 
-const decryptSettings = (envelope: SettingsEnvelope, key: Buffer): ExpressTurnServerSettings => {
-  const decipher = createDecipheriv(ALGORITHM, key, Buffer.from(envelope.iv, 'base64'));
-  decipher.setAAD(AAD);
-  decipher.setAuthTag(Buffer.from(envelope.tag, 'base64'));
-  const plaintext = Buffer.concat([
-    decipher.update(Buffer.from(envelope.data, 'base64')),
-    decipher.final(),
-  ]).toString('utf8');
-
-  const parsed = JSON.parse(plaintext) as Record<string, unknown>;
+const normalizeTurnSettings = (raw: unknown): ExpressTurnServerSettings => {
+  const record = (raw ?? {}) as Record<string, unknown>;
   const validation = validateExpressTurnSettings({
-    host: parsed.host,
-    port: parsed.port,
-    ttlSeconds: parsed.ttlSeconds,
-    secretKey: parsed.secretKey,
+    host: record.host,
+    port: record.port,
+    ttlSeconds: record.ttlSeconds,
+    secretKey: record.secretKey,
   });
   if (!validation.ok || !validation.value || !validation.secretKey) {
-    throw new Error('stored settings failed validation');
+    throw new Error('stored turn settings failed validation');
   }
-  const updatedAt = Number(parsed.updatedAt);
+  const updatedAt = Number(record.updatedAt);
   return {
     ...validation.value,
     secretKey: validation.secretKey,
@@ -151,22 +194,59 @@ const decryptSettings = (envelope: SettingsEnvelope, key: Buffer): ExpressTurnSe
   };
 };
 
-const readSettingsFile = async (
-  config: TurnSettingsStoreConfig
-): Promise<{ settings: ExpressTurnServerSettings; mtimeMs: number } | null> => {
-  let raw: string;
-  let mtimeMs: number;
-  try {
-    const stat = await fs.stat(config.path);
-    if (!stat.isFile()) throw new Error('settings path is not a file');
-    mtimeMs = stat.mtimeMs;
-    raw = await fs.readFile(config.path, 'utf8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
-    throw new Error('Stored ExpressTURN settings could not be read from SETTINGS_STORE_PATH.');
+const normalizeState = (payload: unknown): StoredState => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('unsupported schema');
+  }
+  const record = payload as Record<string, unknown>;
+
+  let turnRaw: unknown = null;
+  let adminRaw: unknown = null;
+  if (record.schemaVersion === SCHEMA_VERSION) {
+    turnRaw = record.turn ?? null;
+    adminRaw = record.admin ?? null;
+  } else if (typeof record.host === 'string') {
+    // Legacy (PR #9) encrypted file: turn settings only, no admin record.
+    turnRaw = record;
+  } else {
+    throw new Error('unsupported schema');
   }
 
-  if (!config.key) throw new Error(config.keyError || 'SETTINGS_ENCRYPTION_KEY is not configured.');
+  const turn = turnRaw ? normalizeTurnSettings(turnRaw) : null;
+  if (adminRaw !== null && !isAdminPasswordRecord(adminRaw)) {
+    throw new Error('stored admin record failed validation');
+  }
+  return { turn, admin: adminRaw as AdminPasswordRecord | null };
+};
+
+const decryptState = (envelope: SettingsEnvelope, key: Buffer): StoredState => {
+  const decipher = createDecipheriv(ALGORITHM, key, Buffer.from(envelope.iv, 'base64'));
+  decipher.setAAD(AAD);
+  decipher.setAuthTag(Buffer.from(envelope.tag, 'base64'));
+  const plaintext = Buffer.concat([
+    decipher.update(Buffer.from(envelope.data, 'base64')),
+    decipher.final(),
+  ]).toString('utf8');
+  return normalizeState(JSON.parse(plaintext));
+};
+
+const readStateFile = async (
+  paths: StorePaths,
+  key: Buffer
+): Promise<{ state: StoredState; mtimeMs: number }> => {
+  let raw: string;
+  let mtimeMs = 0;
+  try {
+    const stat = await fs.stat(paths.file);
+    if (!stat.isFile()) throw new Error('settings path is not a file');
+    mtimeMs = stat.mtimeMs;
+    raw = await fs.readFile(paths.file, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      return { state: { turn: null, admin: null }, mtimeMs: 0 };
+    }
+    throw new Error('Stored ExpressTURN settings could not be read from SETTINGS_STORE_PATH.');
+  }
 
   let envelope: unknown;
   try {
@@ -179,92 +259,125 @@ const readSettingsFile = async (
   }
 
   try {
-    return { settings: decryptSettings(envelope, config.key), mtimeMs };
+    return { state: decryptState(envelope, key), mtimeMs };
   } catch {
     // Never include ciphertext, key material or secret values in the error.
     throw new Error(
-      'Stored ExpressTURN settings could not be decrypted. Check SETTINGS_ENCRYPTION_KEY (or re-save the settings from the admin page).'
+      'Stored ExpressTURN settings could not be decrypted. Restore the matching settings.key (or remove the store to start over).'
     );
   }
 };
 
-/**
- * Loads (and caches) the encrypted settings. Returns null when nothing has been
- * saved yet. Throws a safe, actionable Error when the key is missing/invalid or
- * the stored file cannot be decrypted.
- */
-export const loadTurnSettings = async (
-  env: NodeJS.ProcessEnv = process.env
-): Promise<ExpressTurnServerSettings | null> => {
-  const config = resolveTurnSettingsStoreConfig(env);
-  const fingerprint = fingerprintOf(config);
 
-  let mtimeMs = 0;
-  try {
-    const stat = await fs.stat(config.path).catch(() => null);
-    mtimeMs = stat ? stat.mtimeMs : 0;
-  } catch {
-    mtimeMs = 0;
-  }
+const fingerprintOf = (paths: StorePaths, env: NodeJS.ProcessEnv): string =>
+  `${paths.file}|${env.SETTINGS_ENCRYPTION_KEY?.trim() ? 'env-key' : 'file-key'}`;
+
+/**
+ * Resolves the key/store location and decrypts the current state (cached by
+ * file mtime). Throws a safe, actionable error when the store is unusable.
+ */
+export const loadStoredState = async (
+  env: NodeJS.ProcessEnv = process.env
+): Promise<{ state: StoredState; runtime: StoreRuntime }> => {
+  const paths = resolveStorePaths(env);
+  const fingerprint = fingerprintOf(paths, env);
+  const stat = await fs.stat(paths.file).catch(() => null);
+  const mtimeMs = stat ? stat.mtimeMs : 0;
 
   if (cache && cache.fingerprint === fingerprint && cache.mtimeMs === mtimeMs) {
     if (cache.error) throw cache.error;
-    return cache.settings;
+    if (cache.runtime && cache.state) return { state: cache.state, runtime: cache.runtime };
   }
 
   try {
-    const loaded = await readSettingsFile(config);
+    const resolvedKey = await resolveEncryptionKey(paths, env);
+    const runtime: StoreRuntime = {
+      paths,
+      key: resolvedKey.key,
+      keySource: resolvedKey.source,
+      durability: durabilityOf(paths.file, env),
+    };
+    const loaded = await readStateFile(paths, runtime.key);
     cache = {
       fingerprint,
-      mtimeMs,
-      settings: loaded?.settings ?? null,
+      mtimeMs: loaded.mtimeMs,
+      runtime,
+      state: loaded.state,
       error: null,
     };
-    return cache.settings;
+    return { state: loaded.state, runtime };
   } catch (err) {
-    const error = err instanceof Error ? err : new Error('Stored ExpressTURN settings could not be loaded.');
-    cache = { fingerprint, mtimeMs, settings: null, error };
+    const error = err instanceof Error ? err : new Error('Stored settings could not be loaded.');
+    cache = { fingerprint, mtimeMs, runtime: null, state: null, error };
     throw error;
   }
 };
 
-/** Synchronous snapshot for request-time ICE generation (never throws). */
+export const loadTurnSettings = async (
+  env: NodeJS.ProcessEnv = process.env
+): Promise<ExpressTurnServerSettings | null> => (await loadStoredState(env)).state.turn;
+
+/** Synchronous snapshot used by the ICE endpoint (never throws). */
 export const getTurnSettingsSnapshot = (
   env: NodeJS.ProcessEnv = process.env
 ): { settings: ExpressTurnServerSettings | null; error: Error | null } => {
-  const fingerprint = fingerprintOf(resolveTurnSettingsStoreConfig(env));
-  if (!cache || cache.fingerprint !== fingerprint) return { settings: null, error: null };
-  return { settings: cache.settings, error: cache.error };
+  if (!cache) return { settings: null, error: null };
+  if (cache.fingerprint !== fingerprintOf(resolveStorePaths(env), env)) {
+    return { settings: null, error: null };
+  }
+  return { settings: cache.state?.turn ?? null, error: cache.error };
 };
 
 
+const writeState = async (
+  state: StoredState,
+  runtime: StoreRuntime,
+  env: NodeJS.ProcessEnv
+): Promise<void> => {
+  const { paths, key } = runtime;
+  const envelope = encryptState(state, key);
+  const temporary = path.join(
+    paths.dir,
+    `.${path.basename(paths.file)}.${randomBytes(6).toString('hex')}.tmp`
+  );
+
+  try {
+    await fs.mkdir(paths.dir, { recursive: true, mode: 0o700 });
+    await fs.writeFile(temporary, JSON.stringify(envelope), { encoding: 'utf8', mode: 0o600 });
+    await fs.chmod(temporary, 0o600);
+    await fs.rename(temporary, paths.file);
+    await fs.chmod(paths.file, 0o600);
+  } catch {
+    await fs.rm(temporary, { force: true }).catch(() => undefined);
+    throw new Error('ExpressTURN settings could not be written to the settings store.');
+  }
+
+  const stat = await fs.stat(paths.file).catch(() => null);
+  cache = {
+    fingerprint: fingerprintOf(paths, env),
+    mtimeMs: stat ? stat.mtimeMs : 0,
+    runtime,
+    state,
+    error: null,
+  };
+};
+
 /**
- * Validates, encrypts and atomically persists the settings. `secretKey` must be
- * supplied for the first save; omitted/empty keeps the existing secret.
+ * Persists the ExpressTURN settings (preserving any stored admin credentials).
+ * The secret is encrypted before it touches the disk.
  */
 export const saveTurnSettings = async (
   input: { host: unknown; port: unknown; ttlSeconds?: unknown; secretKey?: unknown },
   env: NodeJS.ProcessEnv = process.env
 ): Promise<ExpressTurnServerSettings> => {
-  const config = resolveTurnSettingsStoreConfig(env);
-  if (!config.key) throw new Error(config.keyError || 'SETTINGS_ENCRYPTION_KEY is not configured.');
-
-  let existingSecret: string | null = null;
-  try {
-    const current = await loadTurnSettings(env);
-    existingSecret = current?.secretKey ?? null;
-  } catch {
-    // A corrupt stored file must not block an admin from replacing it.
-  }
-
+  const { state, runtime } = await loadStoredState(env);
+  const existingSecret = state.turn?.secretKey ?? null;
   const requestedSecret =
     typeof input.secretKey === 'string' && input.secretKey.trim().length > 0
       ? input.secretKey
       : existingSecret;
 
-  if (!requestedSecret) {
-    throw new Error('A secret key is required for the first save.');
-  }
+  if (!requestedSecret) throw new Error('A secret key is required for the first save.');
 
   const validation = validateExpressTurnSettings({
     host: input.host,
@@ -282,41 +395,28 @@ export const saveTurnSettings = async (
     updatedAt: Date.now(),
   };
 
-  const envelope = encryptSettings(settings, config.key);
-  const directory = path.dirname(config.path);
-  const temporary = path.join(
-    directory,
-    `.${path.basename(config.path)}.${randomBytes(6).toString('hex')}.tmp`
-  );
-
-  try {
-    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-    await fs.writeFile(temporary, JSON.stringify(envelope), { encoding: 'utf8', mode: 0o600 });
-    await fs.chmod(temporary, 0o600);
-    await fs.rename(temporary, config.path);
-    await fs.chmod(config.path, 0o600);
-  } catch {
-    await fs.rm(temporary, { force: true }).catch(() => undefined);
-    throw new Error('ExpressTURN settings could not be written to SETTINGS_STORE_PATH.');
-  }
-
-  const stat = await fs.stat(config.path).catch(() => null);
-  cache = {
-    fingerprint: fingerprintOf(config),
-    mtimeMs: stat ? stat.mtimeMs : 0,
-    settings,
-    error: null,
-  };
+  await writeState({ turn: settings, admin: state.admin }, runtime, env);
   return settings;
+};
+
+/** Persists the admin password hash (scrypt), preserving TURN settings. */
+export const saveAdminPasswordRecord = async (
+  record: AdminPasswordRecord,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<void> => {
+  const { state, runtime } = await loadStoredState(env);
+  await writeState({ turn: state.turn, admin: record }, runtime, env);
 };
 
 export interface TurnSettingsStatus {
   configured: boolean;
+  adminConfigured: boolean;
   storeReady: boolean;
-  durable: 'unknown' | 'persistent-disk-mounted' | 'assumed-ephemeral';
+  durable: Durability;
   storage: 'encrypted-file';
   path: string;
   encryption: 'aes-256-gcm';
+  keySource: KeySource | null;
   host?: string;
   port?: number;
   ttlSeconds?: number;
@@ -324,46 +424,38 @@ export interface TurnSettingsStatus {
   error?: string;
 }
 
-/**
- * Public status for the admin page/API. Never includes the secret key.
- * Durability is reported from SETTINGS_PERSISTENT_STORAGE ("true" when the
- * configured path is a mounted persistent volume).
- */
+/** Public admin-page status. Never includes the secret, password or key. */
 export const getTurnSettingsStatus = async (
   env: NodeJS.ProcessEnv = process.env
 ): Promise<TurnSettingsStatus> => {
-  const config = resolveTurnSettingsStoreConfig(env);
-  const durability =
-    env.SETTINGS_PERSISTENT_STORAGE === 'true'
-      ? 'persistent-disk-mounted'
-      : env.SETTINGS_PERSISTENT_STORAGE === 'false'
-        ? 'assumed-ephemeral'
-        : 'unknown';
-
-  const base: TurnSettingsStatus = {
+  const paths = resolveStorePaths(env);
+  const base = {
     configured: false,
-    storeReady: Boolean(config.key),
-    durable: durability,
-    storage: 'encrypted-file',
-    path: config.path,
-    encryption: 'aes-256-gcm',
+    adminConfigured: false,
+    storeReady: false,
+    durable: durabilityOf(paths.file, env),
+    storage: 'encrypted-file' as const,
+    path: paths.file,
+    encryption: 'aes-256-gcm' as const,
+    keySource: null,
   };
 
-  if (!config.key) return { ...base, error: config.keyError ?? 'SETTINGS_ENCRYPTION_KEY is not configured.' };
-
   try {
-    const settings = await loadTurnSettings(env);
-    if (!settings) return base;
+    const { state, runtime } = await loadStoredState(env);
+    const turn = state.turn;
     return {
       ...base,
-      configured: true,
-      host: settings.host,
-      port: settings.port,
-      ttlSeconds: settings.ttlSeconds,
-      updatedAt: settings.updatedAt,
+      configured: Boolean(turn),
+      adminConfigured: Boolean(state.admin),
+      storeReady: true,
+      durable: durabilityOf(paths.file, env),
+      keySource: runtime.keySource,
+      ...(turn
+        ? { host: turn.host, port: turn.port, ttlSeconds: turn.ttlSeconds, updatedAt: turn.updatedAt }
+        : {}),
     };
   } catch (err) {
-    return { ...base, error: (err as Error)?.message || 'Stored ExpressTURN settings are unavailable.' };
+    return { ...base, error: (err as Error)?.message || 'Stored settings are unavailable.' };
   }
 };
 

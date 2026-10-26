@@ -61,22 +61,21 @@ services:
         sync: false
       - key: RSTREAM_TURN_TTL_SECONDS
         sync: false
-      # ExpressTURN (admin-managed at /admin/turn). The secret key is entered in
-      # the page and stored AES-256-GCM-encrypted; it is never in Render env.
-      # ADMIN_PASSWORD enables the page (minimum 12 characters).
-      # SETTINGS_ENCRYPTION_KEY must be 32 bytes (base64 or hex) and must remain
-      # stable so the encrypted file stays decryptable.
-      # SETTINGS_STORE_PATH should point at a mounted persistent disk; Render's
-      # default filesystem is ephemeral, so without a disk the settings are lost
-      # on redeploy. Set SETTINGS_PERSISTENT_STORAGE=true only with such a disk.
-      - key: ADMIN_PASSWORD
-        sync: false
-      - key: SETTINGS_ENCRYPTION_KEY
-        sync: false
-      - key: SETTINGS_STORE_PATH
-        sync: false
-      - key: SETTINGS_PERSISTENT_STORAGE
-        sync: false
+      # ExpressTURN (admin-managed at /admin/turn). No secret belongs in Render
+      # environment variables: the Secret Key is entered in the page and stored
+      # AES-256-GCM-encrypted, and the admin password is a scrypt hash inside the
+      # same encrypted store.
+      #
+      # Persistence requires a mounted persistent disk (paid Render plan), e.g. at
+      # /var/data (auto-detected). Without a disk Render's filesystem is ephemeral
+      # and the store/key/setup token are lost on redeploy.
+      # First run writes a one-time setup token to
+      # <store dir>/admin-setup-token (0600); read it via Render Shell/SSH to set
+      # the admin password. Optional non-secret overrides:
+      #   SETTINGS_STORE_PATH=/var/data/uv-admin/settings.enc
+      #   SETTINGS_PERSISTENT_STORAGE=true
+      #   ADMIN_SETUP_TOKEN_FILE=/etc/secrets/admin-setup-token  (secret file)
+      #   ADMIN_SETUP_TOKEN=<token>                              (single use)
       - key: TURN_USERNAME
         sync: false
       - key: TURN_CREDENTIAL

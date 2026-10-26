@@ -85,10 +85,11 @@ starts the Vite dev server when `NODE_ENV=production`; the server then serves
 | `RSTREAM_TURN_CREDENTIAL` | optional (static mode) | Static rstream TURN credential/password from your JSON credential. |
 | `RSTREAM_TURN_URLS` | optional (static mode) | Comma-separated `turn:`/`turns:` URLs from the same rstream JSON. |
 | `RSTREAM_TURN_TTL_SECONDS` | optional | Validity window for the static credential (default 600, clamped 1-3600). **Expiry is not extended automatically.** |
-| `ADMIN_PASSWORD` | for the admin page | Operator password for `/admin/turn` (minimum 12 characters). Server-side only; exchanged for a signed HttpOnly cookie. |
-| `SETTINGS_ENCRYPTION_KEY` | for the admin page | 32-byte key (base64 or 64-char hex) used for AES-256-GCM encryption of the ExpressTURN secret. Never sent to browsers. |
-| `SETTINGS_STORE_PATH` | recommended | Path of the encrypted settings file, e.g. `/var/data/turn-settings.enc` on a mounted persistent disk. |
-| `SETTINGS_PERSISTENT_STORAGE` | optional | Set to `true` when `SETTINGS_STORE_PATH` lives on a mounted persistent disk, so the admin page can confirm durability. |
+| `SETTINGS_STORE_PATH` | recommended | Encrypted store path. Defaults to `/var/data/uv-admin/settings.enc` when `/var/data` exists (mounted disk), else `./data/turn-settings.enc`. |
+| `SETTINGS_PERSISTENT_STORAGE` | optional | `true`/`false` durability hint shown in the admin page; auto-detected for `/var/data`. |
+| `ADMIN_SETUP_TOKEN_FILE` | optional bootstrap | Path to a one-time setup token (e.g. a Render secret file) if Shell/SSH is unavailable. |
+| `ADMIN_SETUP_TOKEN` | optional bootstrap | One-time setup token value; deleted/unused after setup. |
+| `SETTINGS_ENCRYPTION_KEY` | advanced only | Optional override for the auto-generated `settings.key` (32 bytes base64/hex). |
 | `STUN_URLS` | optional | Defaults to Google STUN. |
 | `ICE_TRANSPORT_POLICY` | optional | `all` (default) or `relay` for verification. Relay-only fails with 503 if no usable TURN exists. |
 | `MAX_SESSIONS` | optional | In-memory cap, default 500. |
@@ -261,36 +262,41 @@ credential = base64(HMAC-SHA1(secret key, username))
 URLs       = turn:<host>:<port>?transport=udp  + ?transport=tcp
 ```
 
-Setup:
+Setup (no secret environment variables):
 
 1. In ExpressTURN, copy the Secret Key and the TURN hostname/port (e.g.
    `free.expressturn.com` / `3478`).
-2. Set the server environment (never commit these values):
-   * `ADMIN_PASSWORD` — operator password for `/admin/turn` (min 12 chars).
-   * `SETTINGS_ENCRYPTION_KEY` — generate once with
-     `openssl rand -base64 32` (or 64 hex chars). Losing it makes the stored
-     secret unreadable.
-   * `SETTINGS_STORE_PATH` — where the encrypted settings file lives.
-   * `SETTINGS_PERSISTENT_STORAGE=true` — only when that path is on a mounted
-     persistent disk (see persistence below).
-3. Open `https://<service>/admin/turn`, sign in, enter host, port, TTL and the
-   Secret Key, and save. The key is sent once over HTTPS and encrypted
-   server-side; it is never rendered back into the page.
-4. `GET /api/health` then reports `ice.configured: true`,
+2. Ensure the encrypted store is on a persistent volume (see persistence below).
+   Nothing else needs to be configured: the AES-256-GCM key is generated on
+   first boot (`settings.key`, `0600`), and the store uses
+   `SETTINGS_STORE_PATH` (default `/var/data/uv-admin/settings.enc` when a disk
+   is mounted, otherwise `./data/turn-settings.enc`).
+3. On first boot with no admin password, the server writes a one-time setup
+   token to `<store dir>/admin-setup-token` (`0600`) and logs only its **path**.
+   Read it through Render Shell/SSH (`cat /var/data/uv-admin/admin-setup-token`),
+   open `https://<service>/admin/turn`, enter the token and choose an admin
+   password (minimum 12 characters). The token file is deleted after setup.
+   If Shell/SSH is unavailable, upload the token as a **Render secret file** and
+   set `ADMIN_SETUP_TOKEN_FILE=/etc/secrets/admin-setup-token` (or use
+   `ADMIN_SETUP_TOKEN` once). These are bootstrap-only and not secret storage.
+4. Sign in, enter host, port, TTL and the Secret Key, and save.
+5. `GET /api/health` then reports `ice.configured: true`,
    `ice.credentialMode: "ephemeral"` and `ice.provider: "expressturn"`.
 
 Security properties:
 
-* The Secret Key is encrypted at rest with AES-256-GCM (random IV, auth tag,
-  AAD) in a `0600` file; the encryption key is read only from
-  `SETTINGS_ENCRYPTION_KEY` and is never written to disk, returned by an API or
-  logged.
-* Admin login is rate-limited, exchanges `ADMIN_PASSWORD` for a 2-hour
-  HMAC-signed `HttpOnly` / `SameSite=Strict` cookie, and state-changing admin
-  calls must be same-origin. There is no default password: without
-  `ADMIN_PASSWORD` the page returns 503.
-* Without a valid `SETTINGS_ENCRYPTION_KEY` the admin page reports the exact
-  requirement and refuses to save anything.
+* The ExpressTURN Secret Key and the admin scrypt password hash live inside one
+  AES-256-GCM encrypted file (random IV, auth tag, AAD, atomic write, `0600`).
+  The 32-byte encryption key is generated on the server and stored as
+  `settings.key` (`0600`) on the same volume; it is never sent to browsers, APIs
+  or logs. An optional `SETTINGS_ENCRYPTION_KEY` env var can override it.
+* Admin authentication is set on first run and verified server-side with scrypt.
+  Sessions are 2-hour HMAC-signed `HttpOnly` / `SameSite=Strict` cookies signed
+  with a random per-process key (restart requires signing in again). There is no
+  default password and no open enrollment: without a setup token the page refuses
+  to configure anything.
+* The setup token is single-use, deleted after setup, and never appears in the
+  page, HTTP responses, logs or Git.
 * Authorized session participants receive only the derived username/credential
   through the existing authenticated ICE endpoint
   (`GET /api/sessions/:id/ice-config`); anonymous and cross-session callers get
@@ -299,20 +305,26 @@ Security properties:
 * Tampered or wrongly-keyed settings files fail closed and are reported as an
   ICE error (relay-only mode returns 503) instead of silently degrading.
 
-Persistence requirement — **this repository has no database**:
+Persistence and bootstrap — **the unavoidable minimum**:
 
-* The encrypted settings live in a local file (`SETTINGS_STORE_PATH`, default
-  `./data/turn-settings.enc`). Render web instances use an ephemeral filesystem
-  unless a disk is attached, so on the current infrastructure the file is lost
-  on every redeploy/restart and the settings must be re-entered.
-* For durable storage, attach a **Render persistent disk** (available on paid
-  instance types), mount it at e.g. `/var/data`, set
-  `SETTINGS_STORE_PATH=/var/data/turn-settings.enc` and
-  `SETTINGS_PERSISTENT_STORAGE=true`. Keep `SETTINGS_ENCRYPTION_KEY` stable in
-  the environment so the file remains decryptable.
-* If a paid disk is not acceptable, the alternative is a managed database
-  (e.g. Render Postgres) storing the same AES-256-GCM envelope. That is not
-  implemented here because the project has no database layer or `DATABASE_URL`.
+* This repository has **no database**, and Render's default filesystem is
+  **ephemeral**. Secure persistence across deploys/restarts therefore requires a
+  **Render persistent disk** (available on paid instance types). Mount it at
+  `/var/data`; the store auto-detects it, or set
+  `SETTINGS_STORE_PATH=/var/data/uv-admin/settings.enc` explicitly. The settings
+  file, its `settings.key` and the setup token then survive restarts. Without a
+  disk, the admin page shows a warning and everything must be re-entered after a
+  redeploy — the code does not pretend otherwise.
+* A secure first-admin login also requires **one out-of-band step**: there is no
+  safe way to authenticate the first operator through a public HTTP endpoint
+  alone. The app solves this without environment secrets by writing a one-time
+  token to the server filesystem, read through Render Shell/SSH (paid plans) or a
+  mounted secret file. If neither Shell access nor a secret file is available,
+  the page stays disabled rather than exposing an insecure enrollment.
+* If a paid disk is not acceptable, the alternative is a managed database (e.g.
+  Render Postgres) storing the same AES-256-GCM envelope and admin hash. That is
+  not implemented here because the project has no database layer or
+  `DATABASE_URL`.
 
 Precedence when several TURN sources are configured:
 `ExpressTURN` (admin settings) → rstream API → generic `TURN_CREDENTIALS_URL` →

@@ -36,17 +36,22 @@ import {
 import {
   ADMIN_COOKIE_NAME,
   ADMIN_SESSION_TTL_MS,
-  adminConfigurationError,
-  adminPasswordMatches,
   createAdminSessionToken,
-  isAdminConfigured,
   isAdminRequestAuthorized,
 } from './server/admin';
+import { hashAdminPassword, verifyAdminPassword } from './server/adminCredentials';
 import { renderAdminPage } from './server/adminPage';
+import type { AdminPageMode } from './server/adminPage';
+import {
+  ensureSetupToken,
+  clearGeneratedSetupToken,
+  verifySetupToken,
+} from './server/setupToken';
 import {
   getTurnSettingsSnapshot,
   getTurnSettingsStatus,
-  loadTurnSettings,
+  loadStoredState,
+  saveAdminPasswordRecord,
   saveTurnSettings,
 } from './server/turnSettingsStore';
 
@@ -218,11 +223,28 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
   const rstreamCache = options.rstreamCache ?? new Map<string, RstreamTurnResult>();
 
   /**
-   * Warm the encrypted ExpressTURN settings cache. A failure (bad encryption
-   * key / corrupt file) is surfaced safely: never the secret or ciphertext.
+   * Warm the encrypted store (generating the key file on first run) and prepare
+   * the one-time admin bootstrap token when no admin password exists yet.
+   * Failures are surfaced safely: never the secret, password, key or token.
    */
   try {
-    await loadTurnSettings();
+    const { state, runtime } = await loadStoredState();
+    console.log(
+      `[expressturn] store=${runtime.paths.file} durability=${runtime.durability} key=${runtime.keySource} admin=${state.admin ? 'configured' : 'setup-required'}`
+    );
+    if (!state.admin) {
+      const setup = await ensureSetupToken(runtime.paths.dir);
+      if (setup.available) {
+        // Path only: the token itself is never logged.
+        console.warn(
+          `[expressturn] first-run admin setup token file: ${setup.path} (read via Render Shell/SSH; deleted after setup)`
+        );
+      } else {
+        console.warn(
+          '[expressturn] admin setup unavailable: set a writable persistent store or ADMIN_SETUP_TOKEN_FILE.'
+        );
+      }
+    }
   } catch (err) {
     console.warn(`[expressturn] ${(err as Error)?.message || 'Stored settings are unavailable.'}`);
   }
@@ -834,13 +856,20 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     }
   };
 
-  const requireAdmin = (req: Request, res: Response, next: () => void): void => {
+  const requireAdmin = async (req: Request, res: Response, next: () => void): Promise<void> => {
     if (!isAdminRequestAuthorized(req.headers.cookie)) {
       res.status(401).json({ error: 'ADMIN_UNAUTHORIZED', message: 'Sign in to the admin page first.' });
       return;
     }
+    const status = await getTurnSettingsStatus();
+    if (!status.adminConfigured) {
+      res.status(401).json({ error: 'ADMIN_UNAUTHORIZED', message: 'Admin setup is not complete.' });
+      return;
+    }
     next();
   };
+
+  const secureCookie = (req: Request): boolean => req.secure || process.env.NODE_ENV === 'production';
 
   app.get(['/admin', '/admin/turn'], async (req, res) => {
     res.setHeader(
@@ -851,25 +880,45 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.type('html');
 
-    const adminError = adminConfigurationError();
-    if (adminError) {
-      res.status(503).send(renderAdminPage({ authenticated: false, adminError, status: null }));
-      return;
-    }
+    try {
+      const status = await getTurnSettingsStatus();
+      let mode: AdminPageMode = 'disabled';
+      let setupTokenPath: string | null = null;
 
-    const authenticated = isAdminRequestAuthorized(req.headers.cookie);
-    const status = authenticated ? await getTurnSettingsStatus() : null;
-    res.send(renderAdminPage({ authenticated, adminError: null, status }));
+      if (status.storeReady) {
+        if (status.adminConfigured) {
+          mode = isAdminRequestAuthorized(req.headers.cookie) ? 'settings' : 'login';
+        } else {
+          const setup = await ensureSetupToken(path.dirname(status.path));
+          setupTokenPath = setup.available ? setup.path : null;
+          mode = setup.available ? 'setup' : 'disabled';
+        }
+      }
+
+      res.status(mode === 'disabled' ? 503 : 200).send(
+        renderAdminPage({
+          mode,
+          status,
+          setupTokenPath,
+          error:
+            status.error ||
+            (mode === 'disabled'
+              ? 'No secure admin bootstrap is available. Attach a writable persistent volume, or provide ADMIN_SETUP_TOKEN / ADMIN_SETUP_TOKEN_FILE once.'
+              : null),
+        })
+      );
+    } catch {
+      res.status(503).send(
+        renderAdminPage({
+          mode: 'disabled',
+          status: null,
+          error: 'The encrypted settings store is unavailable.',
+        })
+      );
+    }
   });
 
-  app.post('/api/admin/login', (req, res) => {
-    if (!isAdminConfigured()) {
-      res.status(503).json({
-        error: 'ADMIN_DISABLED',
-        message: adminConfigurationError() || 'Admin access is not configured.',
-      });
-      return;
-    }
+  app.post('/api/admin/setup', async (req, res) => {
     if (!adminMutationOriginOk(req)) {
       res.status(403).json({ error: 'BAD_ORIGIN', message: 'Cross-origin admin requests are not allowed.' });
       return;
@@ -879,18 +928,99 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       res.status(429).json({ error: 'TOO_MANY_ATTEMPTS', message: 'Too many attempts. Try again later.' });
       return;
     }
-    if (!adminPasswordMatches((req.body as { password?: unknown } | undefined)?.password)) {
-      res.status(401).json({ error: 'INVALID_ADMIN_PASSWORD', message: 'Invalid admin password.' });
+
+    const body = (req.body ?? {}) as { token?: unknown; password?: unknown; confirmPassword?: unknown };
+    if (typeof body.confirmPassword === 'string' && body.confirmPassword !== body.password) {
+      res.status(400).json({ error: 'PASSWORD_MISMATCH', message: 'Passwords do not match.' });
       return;
     }
-    const secure = req.secure || process.env.NODE_ENV === 'production';
-    res.cookie(ADMIN_COOKIE_NAME, createAdminSessionToken(), adminCookieOptions(secure));
-    res.json({ ok: true, expiresInSeconds: Math.round(ADMIN_SESSION_TTL_MS / 1000) });
+
+    try {
+      const status = await getTurnSettingsStatus();
+      if (!status.storeReady) {
+        res.status(503).json({
+          error: 'SETTINGS_STORE_UNAVAILABLE',
+          message: status.error || 'The settings store is unavailable.',
+        });
+        return;
+      }
+      if (status.adminConfigured) {
+        res.status(409).json({ error: 'ADMIN_ALREADY_CONFIGURED', message: 'An admin password already exists.' });
+        return;
+      }
+
+      const setup = await ensureSetupToken(path.dirname(status.path));
+      if (!setup.available) {
+        res.status(503).json({
+          error: 'ADMIN_SETUP_UNAVAILABLE',
+          message: 'No setup token is available. Provide ADMIN_SETUP_TOKEN_FILE or ADMIN_SETUP_TOKEN.',
+        });
+        return;
+      }
+      if (!(await verifySetupToken(body.token, setup))) {
+        res.status(401).json({ error: 'INVALID_SETUP_TOKEN', message: 'Invalid or expired setup token.' });
+        return;
+      }
+
+      const record = await hashAdminPassword(body.password as string);
+      await saveAdminPasswordRecord(record);
+      await clearGeneratedSetupToken(setup);
+      console.log('[expressturn] admin password configured');
+
+      res.cookie(ADMIN_COOKIE_NAME, createAdminSessionToken(), adminCookieOptions(secureCookie(req)));
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({
+        error: 'ADMIN_SETUP_FAILED',
+        message: (err as Error)?.message || 'Admin setup failed.',
+      });
+    }
+  });
+
+  app.post('/api/admin/login', async (req, res) => {
+    if (!adminMutationOriginOk(req)) {
+      res.status(403).json({ error: 'BAD_ORIGIN', message: 'Cross-origin admin requests are not allowed.' });
+      return;
+    }
+    const remote = req.ip || req.socket.remoteAddress || 'unknown';
+    if (!allowAdminLogin(remote)) {
+      res.status(429).json({ error: 'TOO_MANY_ATTEMPTS', message: 'Too many attempts. Try again later.' });
+      return;
+    }
+
+    try {
+      const status = await getTurnSettingsStatus();
+      if (!status.storeReady) {
+        res.status(503).json({
+          error: 'SETTINGS_STORE_UNAVAILABLE',
+          message: status.error || 'The settings store is unavailable.',
+        });
+        return;
+      }
+      if (!status.adminConfigured) {
+        res.status(409).json({
+          error: 'ADMIN_SETUP_REQUIRED',
+          message: 'No admin password exists yet. Complete the first-time setup.',
+        });
+        return;
+      }
+
+      const { state } = await loadStoredState();
+      const password = (req.body as { password?: unknown } | undefined)?.password;
+      if (!(await verifyAdminPassword(password, state.admin))) {
+        res.status(401).json({ error: 'INVALID_ADMIN_PASSWORD', message: 'Invalid admin password.' });
+        return;
+      }
+
+      res.cookie(ADMIN_COOKIE_NAME, createAdminSessionToken(), adminCookieOptions(secureCookie(req)));
+      res.json({ ok: true, expiresInSeconds: Math.round(ADMIN_SESSION_TTL_MS / 1000) });
+    } catch {
+      res.status(503).json({ error: 'SETTINGS_STORE_UNAVAILABLE', message: 'The settings store is unavailable.' });
+    }
   });
 
   app.post('/api/admin/logout', (req, res) => {
-    const secure = req.secure || process.env.NODE_ENV === 'production';
-    res.clearCookie(ADMIN_COOKIE_NAME, { ...adminCookieOptions(secure), maxAge: undefined });
+    res.clearCookie(ADMIN_COOKIE_NAME, { ...adminCookieOptions(secureCookie(req)), maxAge: undefined });
     res.json({ ok: true });
   });
 
@@ -919,9 +1049,9 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       );
     } catch (err) {
       const message = (err as Error)?.message || 'Settings could not be saved.';
-      const status = /SETTINGS_ENCRYPTION_KEY/.test(message) ? 503 : 400;
-      res.status(status).json({
-        error: status === 503 ? 'SETTINGS_STORE_UNAVAILABLE' : 'INVALID_TURN_SETTINGS',
+      const isStoreFailure = /could not be written|could not be decrypted|settings store/i.test(message);
+      res.status(isStoreFailure ? 503 : 400).json({
+        error: isStoreFailure ? 'SETTINGS_STORE_UNAVAILABLE' : 'INVALID_TURN_SETTINGS',
         message,
       });
       return;

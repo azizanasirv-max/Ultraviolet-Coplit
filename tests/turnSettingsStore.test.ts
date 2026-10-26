@@ -1,27 +1,29 @@
 /**
- * Encrypted ExpressTURN settings store tests.
+ * Encrypted settings store tests (no secret env vars).
  *
- * These use a temporary directory and real AES-256-GCM files; they assert that
- * the secret never appears in plaintext, that tampering/wrong keys fail closed,
- * and that file permissions are 0600.
+ * The encryption key must be generated on disk (0600), settings must survive a
+ * process restart, the admin password must live only as a scrypt hash inside the
+ * encrypted file, and tampering/malformed keys must fail closed.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createCipheriv, randomBytes } from 'crypto';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { randomBytes } from 'crypto';
 import {
   clearTurnSettingsCache,
   getTurnSettingsStatus,
+  loadStoredState,
   loadTurnSettings,
-  resolveTurnSettingsStoreConfig,
+  resolveStorePaths,
+  saveAdminPasswordRecord,
   saveTurnSettings,
 } from '../server/turnSettingsStore';
+import { hashAdminPassword, verifyAdminPassword } from '../server/adminCredentials';
 
 const SECRET = 'store-test-expressturn-secret-value';
-const KEY = randomBytes(32).toString('base64');
-const OTHER_KEY = randomBytes(32).toString('base64');
+const PASSWORD = 'correct-horse-battery-staple';
 
 interface TestEnv {
   dir: string;
@@ -32,187 +34,205 @@ interface TestEnv {
 const makeEnv = async (overrides: Record<string, string | undefined> = {}): Promise<TestEnv> => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'uv-turn-store-'));
   const env: NodeJS.ProcessEnv = {
-    SETTINGS_ENCRYPTION_KEY: KEY,
     SETTINGS_STORE_PATH: path.join(dir, 'settings.enc'),
     ...overrides,
   };
   return { dir, env, cleanup: () => rm(dir, { recursive: true, force: true }) };
 };
 
-test('encrypts settings at rest with AES-256-GCM and mode 0600', async () => {
+const turnInput = (overrides: Record<string, unknown> = {}) => ({
+  host: 'turn.expressturn.com',
+  port: 3478,
+  ttlSeconds: 600,
+  secretKey: SECRET,
+  ...overrides,
+});
+
+test('generates a 0600 encryption key file and encrypts settings without env vars', async () => {
   clearTurnSettingsCache();
   const { env, cleanup } = await makeEnv();
   try {
-    const saved = await saveTurnSettings(
-      { host: 'turn.expressturn.com', port: 3478, ttlSeconds: 600, secretKey: SECRET },
-      env
-    );
+    const saved = await saveTurnSettings(turnInput(), env);
     assert.equal(saved.host, 'turn.expressturn.com');
-    assert.equal(saved.port, 3478);
-    assert.equal(saved.ttlSeconds, 600);
-    assert.ok(saved.updatedAt > 0);
+    assert.equal(saved.secretKey, SECRET);
+
+    const paths = resolveStorePaths(env);
+    assert.equal(paths.keyFile, path.join(path.dirname(paths.file), 'settings.key'));
+
+    const keyRaw = (await readFile(paths.keyFile, 'utf8')).trim();
+    assert.equal(Buffer.from(keyRaw, 'base64').length, 32);
+    assert.equal((await stat(paths.keyFile)).mode & 0o777, 0o600);
+    assert.equal((await stat(paths.file)).mode & 0o777, 0o600);
+
+    const raw = await readFile(paths.file, 'utf8');
+    assert.ok(!raw.includes(SECRET), 'secret is not plaintext on disk');
+    assert.ok(!raw.includes('turn.expressturn.com'), 'settings are fully encrypted');
+    assert.ok(!raw.includes(keyRaw), 'the key is not embedded in the settings file');
+
+    const status = await getTurnSettingsStatus(env);
+    assert.equal(status.storeReady, true);
+    assert.equal(status.configured, true);
+    assert.equal(status.adminConfigured, false);
+    assert.equal(status.keySource, 'key-file');
+    assert.ok(!JSON.stringify(status).includes(SECRET));
+    assert.ok(!JSON.stringify(status).includes(keyRaw));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('settings survive a process restart using only the persisted key file', async () => {
+  clearTurnSettingsCache();
+  const { env, cleanup } = await makeEnv();
+  try {
+    await saveTurnSettings(turnInput(), env);
+    clearTurnSettingsCache(); // simulate a restart: no in-memory key/state
 
     const loaded = await loadTurnSettings(env);
-    assert.ok(loaded);
     assert.equal(loaded?.secretKey, SECRET);
-    assert.equal(loaded?.host, 'turn.expressturn.com');
-
-    const file = env.SETTINGS_STORE_PATH as string;
-    const raw = await readFile(file, 'utf8');
-    assert.ok(!raw.includes(SECRET), 'secret must not be plaintext on disk');
-    assert.ok(!raw.includes('turn.expressturn.com'), 'settings are fully encrypted');
-    const envelope = JSON.parse(raw) as Record<string, unknown>;
-    assert.equal(envelope.v, 2);
-    assert.equal(envelope.alg, 'aes-256-gcm');
-    assert.ok(!('secretKey' in envelope));
-    assert.equal((await stat(file)).mode & 0o777, 0o600);
+    assert.equal(loaded?.port, 3478);
   } finally {
     await cleanup();
   }
 });
 
-test('keeps the existing secret when only host/port/TTL are updated', async () => {
+test('stores the admin password as a scrypt hash only and preserves records on updates', async () => {
   clearTurnSettingsCache();
   const { env, cleanup } = await makeEnv();
   try {
-    await saveTurnSettings(
-      { host: 'turn.expressturn.com', port: 3478, ttlSeconds: 600, secretKey: SECRET },
-      env
-    );
+    const record = await hashAdminPassword(PASSWORD);
+    assert.equal(record.hash.length > 0, true);
+    await saveAdminPasswordRecord(record, env);
+
     clearTurnSettingsCache();
-    const updated = await saveTurnSettings(
-      { host: 'turn2.expressturn.com', port: 3479, ttlSeconds: 900 },
-      env
-    );
-    assert.equal(updated.host, 'turn2.expressturn.com');
-    assert.equal(updated.secretKey, SECRET);
-    clearTurnSettingsCache();
-    assert.equal((await loadTurnSettings(env))?.secretKey, SECRET);
+    assert.equal(await verifyAdminPassword(PASSWORD, (await loadStoredState(env)).state.admin), true);
+    assert.equal(await verifyAdminPassword('wrong-password-123', (await loadStoredState(env)).state.admin), false);
+
+    // Saving TURN settings must keep the admin record.
+    await saveTurnSettings(turnInput({ host: 'turn2.expressturn.com' }), env);
+    assert.equal(await verifyAdminPassword(PASSWORD, (await loadStoredState(env)).state.admin), true);
+    assert.equal((await loadStoredState(env)).state.turn?.host, 'turn2.expressturn.com');
+
+    // Saving the admin record must keep TURN settings.
+    await saveAdminPasswordRecord(await hashAdminPassword('a-new-admin-password'), env);
+    assert.equal((await loadStoredState(env)).state.turn?.host, 'turn2.expressturn.com');
+    assert.equal(await verifyAdminPassword('a-new-admin-password', (await loadStoredState(env)).state.admin), true);
+    assert.equal(await verifyAdminPassword(PASSWORD, (await loadStoredState(env)).state.admin), false);
+
+    const raw = await readFile(resolveStorePaths(env).file, 'utf8');
+    assert.ok(!raw.includes(PASSWORD));
+    assert.ok(!raw.includes(record.hash));
+    assert.ok(!raw.includes(record.salt));
   } finally {
     await cleanup();
   }
 });
 
-test('requires a valid 32-byte SETTINGS_ENCRYPTION_KEY and never stores without it', async () => {
-  clearTurnSettingsCache();
-  const { env, cleanup } = await makeEnv({ SETTINGS_ENCRYPTION_KEY: undefined });
-  try {
-    const config = resolveTurnSettingsStoreConfig(env);
-    assert.equal(config.key, null);
-    assert.match(config.keyError || '', /SETTINGS_ENCRYPTION_KEY/);
-    await assert.rejects(
-      saveTurnSettings({ host: 'turn.expressturn.com', port: 3478, secretKey: SECRET }, env),
-      /SETTINGS_ENCRYPTION_KEY/
-    );
-    const status = await getTurnSettingsStatus(env);
-    assert.equal(status.storeReady, false);
-    assert.equal(status.configured, false);
-    assert.ok(!JSON.stringify(status).includes(SECRET));
-  } finally {
-    await cleanup();
-  }
-});
-
-test('rejects malformed encryption keys', async () => {
-  clearTurnSettingsCache();
-  const { env, cleanup } = await makeEnv({ SETTINGS_ENCRYPTION_KEY: 'not-a-valid-key' });
-  try {
-    const status = await getTurnSettingsStatus(env);
-    assert.equal(status.storeReady, false);
-    assert.match(status.error || '', /32 bytes/);
-  } finally {
-    await cleanup();
-  }
-});
-
-test('fails closed on tampered ciphertext and on a wrong encryption key', async () => {
+test('fails closed on tampered ciphertext, a wrong key and a malformed key file', async () => {
   clearTurnSettingsCache();
   const { env, cleanup } = await makeEnv();
   try {
-    await saveTurnSettings(
-      { host: 'turn.expressturn.com', port: 3478, ttlSeconds: 600, secretKey: SECRET },
-      env
-    );
-    const file = env.SETTINGS_STORE_PATH as string;
+    await saveTurnSettings(turnInput(), env);
+    const paths = resolveStorePaths(env);
 
-    // Tamper with one byte of ciphertext.
-    const envelope = JSON.parse(await readFile(file, 'utf8')) as { data: string };
+    // Tamper with the ciphertext.
+    const envelope = JSON.parse(await readFile(paths.file, 'utf8')) as { data: string };
     const data = Buffer.from(envelope.data, 'base64');
     data[0] = data[0] ^ 0xff;
     envelope.data = data.toString('base64');
-    await writeFile(file, JSON.stringify(envelope));
+    await writeFile(paths.file, JSON.stringify(envelope));
     clearTurnSettingsCache();
     await assert.rejects(loadTurnSettings(env), /could not be decrypted/);
 
-    // Restore a valid file, then try the wrong key.
-    await saveTurnSettings(
-      { host: 'turn.expressturn.com', port: 3478, ttlSeconds: 600, secretKey: SECRET },
-      env
+    // Recovery from a corrupt store is explicit: remove it, then re-save.
+    const { rm } = await import('fs/promises');
+    await rm(paths.file, { force: true });
+    clearTurnSettingsCache();
+    await saveTurnSettings(turnInput(), env);
+    clearTurnSettingsCache();
+    const wrongKey = randomBytes(32).toString('base64');
+    await assert.rejects(
+      loadTurnSettings({ ...env, SETTINGS_ENCRYPTION_KEY: wrongKey }),
+      /could not be decrypted/
     );
-    clearTurnSettingsCache();
-    const wrongKeyEnv = { ...env, SETTINGS_ENCRYPTION_KEY: OTHER_KEY };
-    await assert.rejects(loadTurnSettings(wrongKeyEnv), /could not be decrypted/);
 
-    // The original key still works.
+    // A malformed key file must not be silently replaced.
+    const badKeyFile = 'not-a-key\n';
+    await writeFile(paths.keyFile, badKeyFile);
     clearTurnSettingsCache();
-    assert.equal((await loadTurnSettings(env))?.secretKey, SECRET);
+    await assert.rejects(loadTurnSettings(env), /encryption key file is malformed/);
+    assert.equal(await readFile(paths.keyFile, 'utf8'), badKeyFile);
   } finally {
     await cleanup();
   }
 });
 
-test('returns no settings before the first save and reports durability without secrets', async () => {
+test('migrates a legacy turn-only encrypted file and keeps working', async () => {
   clearTurnSettingsCache();
   const { env, cleanup } = await makeEnv();
   try {
-    assert.equal(await loadTurnSettings(env), null);
+    // Build the exact envelope/plaintext PR #9 wrote (AES-256-GCM, turn only).
+    const key = randomBytes(32);
+    const paths = resolveStorePaths(env);
+    await writeFile(paths.keyFile, `${key.toString('base64')}\n`, { mode: 0o600 });
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', key, iv);
+    cipher.setAAD(Buffer.from('ultraviolet-copilot/expressturn-settings/v2'));
+    const legacy = {
+      host: 'turn.expressturn.com',
+      port: 3478,
+      ttlSeconds: 600,
+      secretKey: SECRET,
+      updatedAt: 1_800_000_000_000,
+    };
+    const data = Buffer.concat([cipher.update(JSON.stringify(legacy), 'utf8'), cipher.final()]);
+    await writeFile(
+      paths.file,
+      JSON.stringify({
+        v: 2,
+        alg: 'aes-256-gcm',
+        iv: iv.toString('base64'),
+        tag: cipher.getAuthTag().toString('base64'),
+        data: data.toString('base64'),
+      })
+    );
+
+    const loaded = await loadTurnSettings(env);
+    assert.equal(loaded?.secretKey, SECRET);
+    assert.equal((await loadStoredState(env)).state.admin, null);
+
+    // The next write upgrades the file to the combined schema and keeps secrets.
+    const record = await hashAdminPassword(PASSWORD);
+    await saveAdminPasswordRecord(record, env);
+    clearTurnSettingsCache();
+    assert.equal(await verifyAdminPassword(PASSWORD, (await loadStoredState(env)).state.admin), true);
+    assert.equal((await loadStoredState(env)).state.turn?.secretKey, SECRET);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('validation, durability reporting and empty-store status', async () => {
+  clearTurnSettingsCache();
+  const { env, cleanup } = await makeEnv();
+  try {
     const empty = await getTurnSettingsStatus(env);
     assert.equal(empty.configured, false);
+    assert.equal(empty.adminConfigured, false);
     assert.equal(empty.storeReady, true);
-    assert.equal(empty.storage, 'encrypted-file');
-    assert.equal(empty.encryption, 'aes-256-gcm');
-    assert.equal(empty.durable, 'unknown');
+    assert.equal(empty.durable, 'assumed-ephemeral');
 
-    await saveTurnSettings(
-      { host: 'turn.expressturn.com', port: 3478, ttlSeconds: 600, secretKey: SECRET },
-      env
+    await assert.rejects(
+      saveTurnSettings(turnInput({ host: 'https://turn.expressturn.com' }), env),
+      /hostname/i
     );
-    const configured = await getTurnSettingsStatus(env);
-    assert.equal(configured.configured, true);
-    assert.equal(configured.host, 'turn.expressturn.com');
-    assert.equal(configured.port, 3478);
-    assert.ok(!JSON.stringify(configured).includes(SECRET));
+    await assert.rejects(saveTurnSettings(turnInput({ port: 99999 }), env), /port/i);
+    await assert.rejects(saveTurnSettings(turnInput({ secretKey: undefined }), env), /secret key is required/i);
 
     const persistent = await getTurnSettingsStatus({ ...env, SETTINGS_PERSISTENT_STORAGE: 'true' });
     assert.equal(persistent.durable, 'persistent-disk-mounted');
     const ephemeral = await getTurnSettingsStatus({ ...env, SETTINGS_PERSISTENT_STORAGE: 'false' });
     assert.equal(ephemeral.durable, 'assumed-ephemeral');
-  } finally {
-    await cleanup();
-  }
-});
-
-test('rejects invalid settings before writing and requires a secret on the first save', async () => {
-  clearTurnSettingsCache();
-  const { env, cleanup } = await makeEnv();
-  try {
-    await assert.rejects(
-      saveTurnSettings({ host: 'https://turn.expressturn.com', port: 3478, secretKey: SECRET }, env),
-      /hostname/i
-    );
-    await assert.rejects(
-      saveTurnSettings({ host: 'turn.expressturn.com', port: 99999, secretKey: SECRET }, env),
-      /port/i
-    );
-    await assert.rejects(
-      saveTurnSettings({ host: 'turn.expressturn.com', port: 3478 }, env),
-      /secret key is required/i
-    );
-    await assert.rejects(
-      saveTurnSettings({ host: 'turn.expressturn.com', port: 3478, secretKey: 'short' }, env),
-      /between 8 and/i
-    );
-    assert.equal(await loadTurnSettings(env), null, 'nothing was persisted');
   } finally {
     await cleanup();
   }
