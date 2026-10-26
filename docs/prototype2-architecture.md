@@ -145,6 +145,18 @@ Salesperson browser                          Customer browser
   salesperson or customer credential. Anonymous and cross-session requests get
   401. The payload is applied to every `RTCPeerConnection`, including reconnects
   and ICE restarts.
+* The ICE request is bounded (8 s) and transient failures (a dropped request, a
+  cold server, 5xx/429) are retried with a short backoff. If the payload still
+  cannot be read, a normal (`all`) deployment continues with direct-connection
+  STUN defaults instead of failing the call; only `ICE_TRANSPORT_POLICY=relay`
+  fails closed. The technical reason stays in the salesperson diagnostics/server
+  log, never in the customer UI.
+* Before every ICE restart (and on a manual retry) the ICE payload is re-read so
+  expiring provider-issued TURN credentials are refreshed and applied to the
+  live peer connection with `setConfiguration`.
+* A peer connection that never reaches `connected` is bounded: a 20 s watchdog
+  and zero-candidate ICE-gathering detection both start the same bounded
+  recovery sequence, so participants are never left on "connecting" forever.
 * TURN modes: coturn `TURN_SECRET` (short-lived HMAC credentials, preferred),
   static `TURN_USERNAME`/`TURN_CREDENTIAL`, a managed provider's credentials
   API (`TURN_CREDENTIALS_URL`, GET or POST+`{ttl}`), rstream's Control plane
@@ -158,6 +170,13 @@ Salesperson browser                          Customer browser
   endpoint returns 503 `TURN_MISCONFIGURED`, the engine refuses to create a peer
   connection or capture the microphone, and the dashboard shows the reason.
   There is no silent STUN-only fallback.
+* A relay entry that `server/turn.ts` classifies as unusable (invalid/partial
+  URLs, missing authentication or expired static credentials) is withheld from
+  the `iceServers` payload, so a browser never attempts an allocation that
+  cannot succeed and never receives a credential that is useless.
+* Customer-visible copy never contains ICE/TURN/SDP values, candidate data,
+  HTTP statuses, API error codes or signaling diagnostics. Those stay in the
+  salesperson dashboard, the engine log and the server log.
 * Without TURN, carrier-NAT/mobile-data pairs still cannot connect; diagnostics
   show `relay candidates 0`, `selected pair host→srflx` and the amber TURN banner.
 

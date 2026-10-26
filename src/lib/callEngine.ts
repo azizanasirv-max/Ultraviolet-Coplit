@@ -21,7 +21,7 @@ import {
   isLiveAiStatus,
   sanitizeAiDetail,
 } from './aiStatus';
-import { ApiError, getIceConfig, IceConfigResponse } from './sessionApi';
+import { ApiError, getHealth, getIceConfig, IceConfigResponse } from './sessionApi';
 
 export type ParticipantRole = 'customer' | 'salesperson';
 export type WsStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
@@ -151,6 +151,12 @@ export interface CallEngineOptions {
   disconnectGraceMs?: number;
   /** Test seam: how long an ICE restart is given to restore media. */
   iceRestartVerifyMs?: number;
+  /** Test seam: upper bound for one ICE configuration request. */
+  iceConfigTimeoutMs?: number;
+  /** Test seam: backoff between ICE configuration fetch attempts. */
+  iceConfigRetryDelaysMs?: readonly number[];
+  /** Test seam: how long a peer connection may stay unconnected before recovery. */
+  connectWatchdogMs?: number;
 }
 
 const RECONNECT_BASE_DELAY_MS = 800;
@@ -186,11 +192,73 @@ const MAX_ICE_RESTART_ATTEMPTS = 3;
 const ICE_RESTART_DELAYS_MS = [1000, 4000, 9000] as const;
 /** How long an ICE restart is given to restore media before the next attempt. */
 const ICE_RESTART_VERIFY_MS = 10000;
+/**
+ * A peer connection that never reaches `connected` must not stay "connecting"
+ * forever: some ICE agents never emit `failed` (for example when every
+ * candidate is discarded). The watchdog starts the bounded recovery sequence.
+ */
+const CONNECT_WATCHDOG_MS = 20000;
 /** A `disconnected` transport may recover on its own; only then is it broken. */
 const DISCONNECT_GRACE_MS = 4000;
 /** Actionable, credential-free terminal error shown to both participants. */
 const TERMINAL_PEER_ERROR =
   'The audio connection could not be established. Check your network and use Reconnect to try again.';
+
+// ---------------------------------------------------------------------------
+// ICE configuration acquisition policy
+//
+// The authenticated ICE payload must be fetched *before* a peer connection is
+// created, but a single transient failure (a dropped request, a cold server, a
+// provider timeout) must not kill the call. Transient failures are retried with
+// a short bounded backoff; if the payload still cannot be read:
+//   - `ICE_TRANSPORT_POLICY=relay` deployments fail closed (no silent STUN),
+//   - everything else continues with direct-connection STUN defaults, which is
+//     strictly better than refusing to start a call that may still work.
+// ---------------------------------------------------------------------------
+
+/** Upper bound for one ICE configuration request. */
+const ICE_CONFIG_TIMEOUT_MS = 8000;
+/** Bounded backoff between transient ICE configuration attempts. */
+const ICE_CONFIG_RETRY_DELAYS_MS = [400, 1200] as const;
+
+/** HTTP statuses that a retry can plausibly fix. */
+const isRetryableIceStatus = (status: number): boolean =>
+  status === 408 || status === 425 || status === 429 || status >= 500;
+
+/**
+ * A fetch that never reached the server throws a TypeError / AbortError rather
+ * than producing an ApiError. Those are transport failures and are retryable.
+ * Authorization (401/403) and session (404) failures are not.
+ */
+const isRetryableIceError = (error: unknown): boolean => {
+  if (error instanceof ApiError) return isRetryableIceStatus(error.status);
+  const status = (error as { status?: unknown })?.status;
+  if (typeof status === 'number') return isRetryableIceStatus(status);
+  return true;
+};
+
+/** Short, credential-free description for the salesperson diagnostics. */
+const describeIceFetchError = (error: unknown): string => {
+  if (error instanceof ApiError) {
+    const detail = error.message.trim();
+    return detail
+      ? `ICE configuration request failed (${error.code || `HTTP ${error.status}`}): ${detail}`
+      : `ICE configuration request failed (HTTP ${error.status}).`;
+  }
+  const name = (error as { name?: unknown })?.name;
+  const message = String((error as { message?: unknown })?.message || error || 'unknown error');
+  if (name === 'TimeoutError' || name === 'AbortError' || /abort/i.test(message)) {
+    return 'ICE configuration request timed out.';
+  }
+  // Network-level failure (the browser's own "Failed to fetch" text is kept for
+  // the salesperson log; it is never rendered to a customer).
+  return `ICE configuration request could not reach the server: ${message}`;
+};
+
+const delay = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 
 // Used only before the authenticated payload arrives; start() aborts if the
 // real configuration cannot be fetched, so this never silently goes live.
@@ -295,6 +363,7 @@ export class CallEngine {
   private iceRestartTimer: number | null = null;
   private iceRestartVerifyTimer: number | null = null;
   private disconnectGraceTimer: number | null = null;
+  private connectWatchdog: number | null = null;
 
   // Negotiation state
   private participantId: string | null = null;
@@ -307,6 +376,9 @@ export class CallEngine {
   private iceConfigLoaded = false;
   private iceConfigError: string | null = null;
   private iceConfigWarnings: string[] = [];
+  /** Where the applied configuration came from. */
+  private iceConfigSource: 'none' | 'server' | 'fallback' = 'none';
+  private iceRefreshInFlight = false;
   private lastMediaAt = 0;
   private dtlsState = 'none';
 
@@ -786,64 +858,174 @@ export class CallEngine {
 
   /**
    * Loads and applies the session's STUN/TURN configuration before any peer
-   * connection exists. Returns false when the deployment configuration cannot
-   * be applied (for example relay-only mode without a usable TURN relay).
+   * connection exists.
+   *
+   * Returns false only when the call must not start: relay-only deployments
+   * (`ICE_TRANSPORT_POLICY=relay`) without a verified relay. In every other
+   * case a payload that cannot be fetched after bounded retries degrades to
+   * direct-connection STUN defaults instead of failing the whole call.
    */
   private async loadIceConfig(): Promise<boolean> {
-    try {
-      const config = await getIceConfig(this.options.sessionId, this.options.credential);
-      this.iceConfig = {
-        iceServers:
-          Array.isArray(config.iceServers) && config.iceServers.length
-            ? config.iceServers
-            : DEFAULT_ICE.iceServers,
-        hasTurn: Boolean(config.hasTurn),
-        hasStun: Boolean(config.hasStun),
-        iceTransportPolicy: config.iceTransportPolicy === 'relay' ? 'relay' : 'all',
-        turn: config.turn ?? DEFAULT_ICE.turn,
-        warnings: Array.isArray(config.warnings) ? config.warnings : [],
-        errors: Array.isArray(config.errors) ? config.errors : [],
-        generatedAt: config.generatedAt || new Date().toISOString(),
-      };
-      this.iceConfigLoaded = true;
-      this.iceConfigError = this.iceConfig.errors[0] ?? null;
-      this.iceConfigWarnings = this.iceConfig.warnings;
-      this.diagnostics = {
-        ...this.diagnostics,
-        hasTurn: this.iceConfig.hasTurn,
-        iceTransportPolicy: this.iceConfig.iceTransportPolicy,
-      };
+    const fetched = await this.fetchIceConfigWithRetry();
+    if (!fetched.ok) {
+      this.iceConfigLoaded = false;
+      this.iceConfigError = fetched.error;
+      this.iceConfigWarnings = [];
 
-      const turnServers = this.iceConfig.iceServers.filter((server) => {
-        const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
-        return urls.some((url) => /^turns?:/i.test(url));
-      });
-      // Never log usernames/credentials, only shape.
-      this.log(
-        `ICE configuration loaded: ${this.iceConfig.iceServers.length} server entr(ies), ` +
-          `TURN ${this.iceConfig.turn.configured ? `configured (${this.iceConfig.turn.credentialMode}, ${turnServers.length} entry)` : 'not configured'}, ` +
-          `policy ${this.iceConfig.iceTransportPolicy}.`
-      );
-      for (const warning of this.iceConfig.warnings) this.log(`ICE warning: ${warning}`);
-      for (const error of this.iceConfig.errors) this.log(`ICE error: ${error}`);
-
-      if (this.iceConfig.errors.length > 0 && this.iceConfig.iceTransportPolicy === 'relay') {
-        this.lastError =
-          this.iceConfig.errors[0] ||
-          'Relay-only ICE was requested but no usable TURN relay is configured.';
+      const relayRequired = await this.isRelayRequired();
+      if (relayRequired) {
+        // Fail closed: relay-only without a verified relay produces a
+        // connected-but-silent call, which is worse than an honest failure.
+        this.iceConfig = { ...DEFAULT_ICE, iceTransportPolicy: 'relay' };
+        this.iceConfigSource = 'none';
+        this.lastError = TERMINAL_PEER_ERROR;
+        this.log(
+          `ICE configuration unavailable and relay-only ICE is required; refusing to start. ${fetched.error}`
+        );
         return false;
       }
+
+      // Direct paths (host/srflx) can still work, so keep the call startable.
+      this.iceConfig = { ...DEFAULT_ICE };
+      this.iceConfigSource = 'fallback';
+      this.log(
+        `ICE configuration unavailable; continuing with direct-connection STUN defaults. ${fetched.error}`
+      );
       return true;
+    }
+
+    this.applyIceConfig(fetched.config);
+    this.iceConfigSource = 'server';
+
+    if (this.iceConfig.errors.length > 0 && this.iceConfig.iceTransportPolicy === 'relay') {
+      // The payload itself proves the relay-only deployment has no relay.
+      this.lastError =
+        this.iceConfig.errors[0] ||
+        'Relay-only ICE was requested but no usable TURN relay is configured.';
+      return false;
+    }
+    return true;
+  }
+
+  /** Fetches the authenticated ICE payload, retrying transient failures. */
+  private async fetchIceConfigWithRetry(): Promise<
+    { ok: true; config: IceConfigResponse } | { ok: false; error: string }
+  > {
+    const retryDelays = this.options.iceConfigRetryDelaysMs ?? ICE_CONFIG_RETRY_DELAYS_MS;
+    const timeoutMs = this.options.iceConfigTimeoutMs ?? ICE_CONFIG_TIMEOUT_MS;
+    const attempts = retryDelays.length + 1;
+    let lastError = 'ICE configuration request failed.';
+
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        const config = await getIceConfig(this.options.sessionId, this.options.credential, {
+          timeoutMs,
+        });
+        if (attempt > 1) this.log(`ICE configuration fetched on attempt ${attempt}/${attempts}.`);
+        return { ok: true, config };
+      } catch (err) {
+        lastError = describeIceFetchError(err);
+        const retryable = isRetryableIceError(err);
+        this.log(
+          `ICE configuration attempt ${attempt}/${attempts} failed (${retryable ? 'retryable' : 'permanent'}): ${lastError}`
+        );
+        if (this.stopped || this.intentionalLeave || !retryable || attempt === attempts) break;
+        await delay(retryDelays[attempt - 1]);
+      }
+    }
+
+    return { ok: false, error: lastError };
+  }
+
+  /**
+   * Best-effort recovery helper: re-reads the ICE payload so refreshed TURN
+   * credentials (provider-issued credentials expire) are applied before an ICE
+   * restart reuses them. A failure keeps the currently applied configuration.
+   */
+  private async refreshIceConfigForRecovery(): Promise<void> {
+    if (this.stopped || this.intentionalLeave || this.iceRefreshInFlight) return;
+    this.iceRefreshInFlight = true;
+    try {
+      const config = await getIceConfig(this.options.sessionId, this.options.credential, {
+        timeoutMs: this.options.iceConfigTimeoutMs ?? ICE_CONFIG_TIMEOUT_MS,
+      });
+      if (this.stopped || this.intentionalLeave) return;
+      this.applyIceConfig(config);
+      this.iceConfigSource = 'server';
+
+      const pc = this.pc;
+      if (pc && typeof pc.setConfiguration === 'function') {
+        try {
+          pc.setConfiguration({
+            iceServers: this.iceConfig.iceServers,
+            iceTransportPolicy: this.iceConfig.iceTransportPolicy,
+            bundlePolicy: 'max-bundle',
+          });
+          this.log('Applied refreshed ICE configuration to the existing peer connection.');
+        } catch (err) {
+          this.log(`Could not apply the refreshed ICE configuration: ${(err as Error)?.message || err}`);
+        }
+      }
     } catch (err) {
-      const apiError = err as ApiError;
-      const detail =
-        apiError?.code === 'TURN_MISCONFIGURED'
-          ? apiError.message
-          : `ICE configuration request failed: ${(err as Error)?.message || err}`;
-      this.iceConfigLoaded = false;
-      this.iceConfigError = detail;
-      this.lastError = detail;
-      this.log(`ICE configuration unavailable; refusing to start with unverified ICE settings. ${detail}`);
+      // Never fatal: the previous configuration stays in effect.
+      this.log(`ICE configuration refresh failed; keeping the current servers. ${describeIceFetchError(err)}`);
+    } finally {
+      this.iceRefreshInFlight = false;
+    }
+  }
+
+  /** Applies a server-issued ICE payload to engine state (never mutates the PC). */
+  private applyIceConfig(config: IceConfigResponse): void {
+    this.iceConfig = {
+      iceServers:
+        Array.isArray(config.iceServers) && config.iceServers.length
+          ? config.iceServers
+          : DEFAULT_ICE.iceServers,
+      hasTurn: Boolean(config.hasTurn),
+      hasStun: Boolean(config.hasStun),
+      iceTransportPolicy: config.iceTransportPolicy === 'relay' ? 'relay' : 'all',
+      turn: config.turn ?? DEFAULT_ICE.turn,
+      warnings: Array.isArray(config.warnings) ? config.warnings : [],
+      errors: Array.isArray(config.errors) ? config.errors : [],
+      generatedAt: config.generatedAt || new Date().toISOString(),
+    };
+    this.iceConfigLoaded = true;
+    this.iceConfigError = this.iceConfig.errors[0] ?? null;
+    this.iceConfigWarnings = this.iceConfig.warnings;
+    this.diagnostics = {
+      ...this.diagnostics,
+      hasTurn: this.iceConfig.hasTurn,
+      iceTransportPolicy: this.iceConfig.iceTransportPolicy,
+    };
+
+    const turnServers = this.iceConfig.iceServers.filter((server) => {
+      const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+      return urls.some((url) => /^turns?:/i.test(url));
+    });
+    // Never log usernames/credentials, only shape.
+    this.log(
+      `ICE configuration loaded: ${this.iceConfig.iceServers.length} server entr(ies), ` +
+        `TURN ${this.iceConfig.turn.configured ? `configured (${this.iceConfig.turn.credentialMode}, ${turnServers.length} entry)` : 'not configured'}, ` +
+        `policy ${this.iceConfig.iceTransportPolicy}.`
+    );
+    for (const warning of this.iceConfig.warnings) this.log(`ICE warning: ${warning}`);
+    for (const error of this.iceConfig.errors) this.log(`ICE error: ${error}`);
+  }
+
+  /**
+   * `ICE_TRANSPORT_POLICY=relay` is a server-side deployment setting. When the
+   * ICE payload cannot be read, the public health endpoint is the only
+   * credential-free way to learn whether a STUN-only fallback is allowed.
+   */
+  private async isRelayRequired(): Promise<boolean> {
+    if (this.iceConfigSource === 'server' || this.iceConfigLoaded) {
+      return this.iceConfig.iceTransportPolicy === 'relay';
+    }
+    try {
+      const health = await getHealth();
+      return health?.iceTransportPolicy === 'relay';
+    } catch {
+      // Unknown policy: prefer attempting a direct call over refusing outright.
       return false;
     }
   }
@@ -1233,6 +1415,11 @@ export class CallEngine {
     this.disconnectGraceTimer = null;
   }
 
+  private clearConnectWatchdog(): void {
+    if (this.connectWatchdog !== null) window.clearTimeout(this.connectWatchdog);
+    this.connectWatchdog = null;
+  }
+
   /** Cancels every timer that belongs to the current peer connection. */
   private clearPeerTimers(): void {
     this.clearOfferWatchdog();
@@ -1240,6 +1427,7 @@ export class CallEngine {
     this.clearIceRestartTimer();
     this.clearIceRestartVerifyTimer();
     this.clearDisconnectGraceTimer();
+    this.clearConnectWatchdog();
   }
 
   /**
@@ -1399,6 +1587,24 @@ export class CallEngine {
       }
     };
 
+    pc.onicegatheringstatechange = () => {
+      if (this.pc !== pc || this.pcGeneration !== generation) return;
+      this.log(`ICE gathering state: ${pc.iceGatheringState}`);
+      if (pc.iceGatheringState !== 'complete' || this.isPeerConnected()) return;
+      // Gathering complete with no candidates at all means no media path can
+      // exist (for example relay-only with an unreachable TURN server). Some
+      // ICE agents never emit `failed` in that case, so recovery must start here.
+      const total =
+        this.candidateTypes.host +
+        this.candidateTypes.srflx +
+        this.candidateTypes.prflx +
+        this.candidateTypes.relay;
+      if (total === 0) {
+        this.log('ICE gathering completed with no candidates: no media path is possible.');
+        this.onPeerFailure('ICE gathered no candidates');
+      }
+    };
+
     pc.ontrack = (event) => {
       if (this.pc !== pc || this.pcGeneration !== generation) return;
       this.log(`Received remote ${event.track.kind} track from ${peer.role}.`);
@@ -1434,6 +1640,35 @@ export class CallEngine {
     // A fresh peer connection means a fresh negotiation is starting. This is
     // deliberately not "connected" until ICE and DTLS report connected.
     this.callState = 'connecting';
+    this.armConnectWatchdog(pc);
+  }
+
+  /**
+   * Bounds how long a peer connection may stay unconnected. Without it, an ICE
+   * agent that never emits `failed` leaves both participants on "connecting"
+   * forever, with no recovery and no final message.
+   */
+  private armConnectWatchdog(pc: RTCPeerConnection): void {
+    this.clearConnectWatchdog();
+    const generation = this.pcGeneration;
+    const timeoutMs = this.options.connectWatchdogMs ?? CONNECT_WATCHDOG_MS;
+    this.connectWatchdog = window.setTimeout(() => {
+      this.connectWatchdog = null;
+      if (this.pc !== pc || this.pcGeneration !== generation) return;
+      if (this.stopped || this.intentionalLeave || this.peerFailureConfirmed) return;
+      if (this.isPeerConnected()) {
+        this.handlePeerConnected();
+        return;
+      }
+      if (this.iceRestartInFlight || this.iceRestartTimer !== null || this.callState === 'reconnecting') {
+        // A bounded recovery is already running; keep watching so a stuck
+        // attempt still reaches a definite outcome.
+        this.armConnectWatchdog(pc);
+        return;
+      }
+      this.log('Peer connection did not connect in time.');
+      this.onPeerFailure('connection did not establish in time');
+    }, timeoutMs);
   }
 
   // -------------------------------------------------------------------------
@@ -1528,11 +1763,11 @@ export class CallEngine {
 
     this.iceRestartTimer = window.setTimeout(() => {
       this.iceRestartTimer = null;
-      this.runRecoveryAttempt(reason, force);
+      void this.runRecoveryAttempt(reason, force);
     }, delay);
   }
 
-  private runRecoveryAttempt(reason: string, force = false): void {
+  private async runRecoveryAttempt(reason: string, force = false): Promise<void> {
     if (this.stopped || this.intentionalLeave || this.peerFailureConfirmed) return;
     const pc = this.pc;
     if (!pc || !this.peerParticipantId) return;
@@ -1542,6 +1777,18 @@ export class CallEngine {
     }
     if (this.iceRestartAttempts >= MAX_ICE_RESTART_ATTEMPTS) {
       this.enterTerminalPeerFailure(reason);
+      return;
+    }
+
+    // TURN credentials issued by a provider expire. Re-read the payload before
+    // reusing it so a restart after a long call does not retry dead credentials.
+    // This is best effort and never fatal; a slow/failed refresh keeps the
+    // current servers and delays the restart by at most the fetch timeout.
+    await this.refreshIceConfigForRecovery();
+    if (this.stopped || this.intentionalLeave || this.peerFailureConfirmed) return;
+    if (this.pc !== pc || !this.peerParticipantId) return;
+    if (!force && pc.connectionState === 'connected') {
+      this.handlePeerConnected();
       return;
     }
 
@@ -1589,7 +1836,7 @@ export class CallEngine {
     const force = this.pendingIceRestartForce;
     this.pendingIceRestartReason = null;
     this.pendingIceRestartForce = false;
-    this.runRecoveryAttempt(reason, force);
+    void this.runRecoveryAttempt(reason, force);
   }
 
   private armIceRestartVerification(reason: string): void {
@@ -1646,6 +1893,9 @@ export class CallEngine {
     }
     const peer = { participantId: this.peerParticipantId, role: this.peerRole };
     this.log('Manual connection retry requested.');
+    // Pick up refreshed TURN credentials; the new peer connection otherwise
+    // reuses whatever was fetched when the call started.
+    void this.refreshIceConfigForRecovery();
     this.lastError = null;
     this.callState = 'connecting';
     this.createPeerConnection(peer);
