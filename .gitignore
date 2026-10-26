@@ -10,3 +10,6 @@ coverage/
 # Local browser test dependencies (no root in sandbox)
 .browser-libs/
 .apt/
+
+# ExpressTURN encrypted settings (default local store)
+data/

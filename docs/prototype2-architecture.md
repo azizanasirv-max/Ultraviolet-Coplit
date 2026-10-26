@@ -149,9 +149,10 @@ Salesperson browser                          Customer browser
   static `TURN_USERNAME`/`TURN_CREDENTIAL`, a managed provider's credentials
   API (`TURN_CREDENTIALS_URL`, GET or POST+`{ttl}`), rstream's Control plane
   TURN issuance (`RSTREAM_AUTHENTICATION_TOKEN` + `RSTREAM_PROJECT_ENDPOINT`),
-  or static rstream JSON credentials for temporary testing
+  static rstream JSON credentials for temporary testing
   (`RSTREAM_TURN_USERNAME`/`RSTREAM_TURN_CREDENTIAL`/`RSTREAM_TURN_URLS`, which
-  expire and must be replaced manually).
+  expire and must be replaced manually), or ExpressTURN short-lived credentials
+  derived from an admin-managed secret encrypted at rest (`/admin/turn`).
   fetched and cached server-side with a static-relay fallback.
   Credentials are never logged and never appear in `/api/health`.
 * `ICE_TRANSPORT_POLICY=relay` without a usable relay is a hard failure: the ICE

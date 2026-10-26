@@ -33,6 +33,22 @@ import {
   RstreamTurnResult,
   turnSummary,
 } from './server/turn';
+import {
+  ADMIN_COOKIE_NAME,
+  ADMIN_SESSION_TTL_MS,
+  adminConfigurationError,
+  adminPasswordMatches,
+  createAdminSessionToken,
+  isAdminConfigured,
+  isAdminRequestAuthorized,
+} from './server/admin';
+import { renderAdminPage } from './server/adminPage';
+import {
+  getTurnSettingsSnapshot,
+  getTurnSettingsStatus,
+  loadTurnSettings,
+  saveTurnSettings,
+} from './server/turnSettingsStore';
 
 dotenv.config();
 
@@ -200,6 +216,25 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
   const turnFetch = options.turnFetch ?? fetch;
   const turnCache = options.turnCache ?? new Map<string, ProviderIceResult>();
   const rstreamCache = options.rstreamCache ?? new Map<string, RstreamTurnResult>();
+
+  /**
+   * Warm the encrypted ExpressTURN settings cache. A failure (bad encryption
+   * key / corrupt file) is surfaced safely: never the secret or ciphertext.
+   */
+  try {
+    await loadTurnSettings();
+  } catch (err) {
+    console.warn(`[expressturn] ${(err as Error)?.message || 'Stored settings are unavailable.'}`);
+  }
+
+  /** Request-time ExpressTURN snapshot (highest-priority TURN source). */
+  const expressTurnOptions = () => {
+    const snapshot = getTurnSettingsSnapshot();
+    return {
+      expressTurn: snapshot.settings,
+      expressTurnError: snapshot.error ? snapshot.error.message : null,
+    };
+  };
 
   /**
    * One in-flight AI call creation per session. Two concurrent "reconnect"
@@ -670,7 +705,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       return;
     }
 
-    let config = buildIceConfig({ sessionId: session.sessionId });
+    let config = buildIceConfig({ sessionId: session.sessionId, ...expressTurnOptions() });
     res.setHeader('Cache-Control', 'no-store');
 
     if (config.turn.provider === 'rstream' && config.turn.providerConfigured) {
@@ -701,7 +736,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
         config = mergeRstreamIceServers(config, null, error, fallback).config;
         store.recordError(session.sessionId, 'rstream TURN credential request failed');
       }
-    } else if (config.turn.providerConfigured) {
+    } else if (config.turn.provider === 'generic' && config.turn.providerConfigured) {
       const credentialsUrl = process.env.TURN_CREDENTIALS_URL?.trim();
       try {
         if (!credentialsUrl) throw new Error('TURN_CREDENTIALS_URL is not configured.');
@@ -743,7 +778,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
   app.get('/api/health', (_req, res) => {
     // Public: capability flags only. No keys, no TURN usernames/credentials.
     const appUrl = appUrlDiagnostics();
-    const ice = turnSummary();
+    const ice = turnSummary(process.env, expressTurnOptions());
     const ai = aiReadiness();
     res.json({
       status: 'ok',
@@ -760,6 +795,139 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       nodeVersion: process.version,
       timestamp: new Date().toISOString(),
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // ExpressTURN admin settings (operator-only, encrypted server-side storage)
+  // -------------------------------------------------------------------------
+
+  const ADMIN_LOGIN_LIMIT = 8;
+  const ADMIN_LOGIN_WINDOW_MS = 10 * 60_000;
+  const adminLoginBuckets = new Map<string, { count: number; resetAt: number }>();
+  const allowAdminLogin = (key: string): boolean => {
+    const now = Date.now();
+    const bucket = adminLoginBuckets.get(key);
+    if (!bucket || now > bucket.resetAt) {
+      adminLoginBuckets.set(key, { count: 1, resetAt: now + ADMIN_LOGIN_WINDOW_MS });
+      return true;
+    }
+    bucket.count += 1;
+    return bucket.count <= ADMIN_LOGIN_LIMIT;
+  };
+
+  const adminCookieOptions = (secure: boolean) => ({
+    httpOnly: true,
+    sameSite: 'strict' as const,
+    secure,
+    path: '/',
+    maxAge: ADMIN_SESSION_TTL_MS,
+  });
+
+  /** CSRF defence: state-changing admin calls must be same-origin. */
+  const adminMutationOriginOk = (req: Request): boolean => {
+    const origin = req.headers.origin;
+    if (!origin) return true; // non-browser clients still need the session cookie
+    try {
+      return new URL(origin).host === req.headers.host;
+    } catch {
+      return false;
+    }
+  };
+
+  const requireAdmin = (req: Request, res: Response, next: () => void): void => {
+    if (!isAdminRequestAuthorized(req.headers.cookie)) {
+      res.status(401).json({ error: 'ADMIN_UNAUTHORIZED', message: 'Sign in to the admin page first.' });
+      return;
+    }
+    next();
+  };
+
+  app.get(['/admin', '/admin/turn'], async (req, res) => {
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    );
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.type('html');
+
+    const adminError = adminConfigurationError();
+    if (adminError) {
+      res.status(503).send(renderAdminPage({ authenticated: false, adminError, status: null }));
+      return;
+    }
+
+    const authenticated = isAdminRequestAuthorized(req.headers.cookie);
+    const status = authenticated ? await getTurnSettingsStatus() : null;
+    res.send(renderAdminPage({ authenticated, adminError: null, status }));
+  });
+
+  app.post('/api/admin/login', (req, res) => {
+    if (!isAdminConfigured()) {
+      res.status(503).json({
+        error: 'ADMIN_DISABLED',
+        message: adminConfigurationError() || 'Admin access is not configured.',
+      });
+      return;
+    }
+    if (!adminMutationOriginOk(req)) {
+      res.status(403).json({ error: 'BAD_ORIGIN', message: 'Cross-origin admin requests are not allowed.' });
+      return;
+    }
+    const remote = req.ip || req.socket.remoteAddress || 'unknown';
+    if (!allowAdminLogin(remote)) {
+      res.status(429).json({ error: 'TOO_MANY_ATTEMPTS', message: 'Too many attempts. Try again later.' });
+      return;
+    }
+    if (!adminPasswordMatches((req.body as { password?: unknown } | undefined)?.password)) {
+      res.status(401).json({ error: 'INVALID_ADMIN_PASSWORD', message: 'Invalid admin password.' });
+      return;
+    }
+    const secure = req.secure || process.env.NODE_ENV === 'production';
+    res.cookie(ADMIN_COOKIE_NAME, createAdminSessionToken(), adminCookieOptions(secure));
+    res.json({ ok: true, expiresInSeconds: Math.round(ADMIN_SESSION_TTL_MS / 1000) });
+  });
+
+  app.post('/api/admin/logout', (req, res) => {
+    const secure = req.secure || process.env.NODE_ENV === 'production';
+    res.clearCookie(ADMIN_COOKIE_NAME, { ...adminCookieOptions(secure), maxAge: undefined });
+    res.json({ ok: true });
+  });
+
+  app.get('/api/admin/turn-settings', requireAdmin, async (_req, res) => {
+    const status = await getTurnSettingsStatus();
+    res.json(status);
+  });
+
+  app.put('/api/admin/turn-settings', requireAdmin, async (req, res) => {
+    if (!adminMutationOriginOk(req)) {
+      res.status(403).json({ error: 'BAD_ORIGIN', message: 'Cross-origin admin requests are not allowed.' });
+      return;
+    }
+
+    const body = (req.body ?? {}) as { host?: unknown; port?: unknown; ttlSeconds?: unknown; secretKey?: unknown };
+    try {
+      const saved = await saveTurnSettings({
+        host: body.host,
+        port: body.port,
+        ttlSeconds: body.ttlSeconds,
+        secretKey: body.secretKey,
+      });
+      // Host/port/TTL are not secrets; the secret key is never logged or returned.
+      console.log(
+        `[expressturn] settings updated (host=${saved.host} port=${saved.port} ttl=${saved.ttlSeconds}s)`
+      );
+    } catch (err) {
+      const message = (err as Error)?.message || 'Settings could not be saved.';
+      const status = /SETTINGS_ENCRYPTION_KEY/.test(message) ? 503 : 400;
+      res.status(status).json({
+        error: status === 503 ? 'SETTINGS_STORE_UNAVAILABLE' : 'INVALID_TURN_SETTINGS',
+        message,
+      });
+      return;
+    }
+
+    res.json({ ok: true, settings: await getTurnSettingsStatus() });
   });
 
   // Unknown API routes must not fall through to the SPA HTML handler.
@@ -1280,12 +1448,17 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
   }
 
   // Startup ICE/TURN diagnostics: actionable, and free of credentials/URLs.
-  console.log(`[ice] ${describeIceSettingsForLog()}`);
-  const iceStartup = turnSummary();
+  const startupExpressTurn = expressTurnOptions();
+  console.log(
+    `[ice] ${describeIceSettingsForLog(process.env, { expressTurn: Boolean(startupExpressTurn.expressTurn) })}`
+  );
+  const iceStartup = turnSummary(process.env, startupExpressTurn);
   if (iceStartup.hasErrors) {
     console.error(`[ice] CONFIGURATION ERROR: ${iceStartup.warnings.join(' ')}`);
   } else if (!iceStartup.configured) {
     console.warn(`[ice] ${iceStartup.warnings.join(' ')}`);
+  } else if (iceStartup.provider === 'expressturn') {
+    console.log('[ice] ExpressTURN short-lived credentials enabled (admin settings, encrypted at rest).');
   } else if (iceStartup.credentialMode === 'static') {
     console.warn(
       iceStartup.provider === 'rstream-static'

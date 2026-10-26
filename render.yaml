@@ -61,6 +61,22 @@ services:
         sync: false
       - key: RSTREAM_TURN_TTL_SECONDS
         sync: false
+      # ExpressTURN (admin-managed at /admin/turn). The secret key is entered in
+      # the page and stored AES-256-GCM-encrypted; it is never in Render env.
+      # ADMIN_PASSWORD enables the page (minimum 12 characters).
+      # SETTINGS_ENCRYPTION_KEY must be 32 bytes (base64 or hex) and must remain
+      # stable so the encrypted file stays decryptable.
+      # SETTINGS_STORE_PATH should point at a mounted persistent disk; Render's
+      # default filesystem is ephemeral, so without a disk the settings are lost
+      # on redeploy. Set SETTINGS_PERSISTENT_STORAGE=true only with such a disk.
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: SETTINGS_ENCRYPTION_KEY
+        sync: false
+      - key: SETTINGS_STORE_PATH
+        sync: false
+      - key: SETTINGS_PERSISTENT_STORAGE
+        sync: false
       - key: TURN_USERNAME
         sync: false
       - key: TURN_CREDENTIAL
