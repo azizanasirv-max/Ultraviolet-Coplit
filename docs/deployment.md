@@ -77,6 +77,10 @@ starts the Vite dev server when `NODE_ENV=production`; the server then serves
 | `TURN_CREDENTIALS_URL` | managed provider | Server-side GET/POST returning temporary ICE servers. |
 | `TURN_CREDENTIALS_AUTH` | with provider | Authorization header for the provider (never exposed). |
 | `TURN_CREDENTIALS_METHOD` | optional | `GET` (default) or `POST` (sends `{"ttl":N}`; Cloudflare-style). |
+| `RSTREAM_AUTHENTICATION_TOKEN` | for rstream TURN | **Server-side secret.** rstream access token (Bearer). Never sent to browsers or logs. |
+| `RSTREAM_PROJECT_ENDPOINT` | for rstream TURN | rstream project endpoint; the server calls the documented `resolve/<endpoint>` issuance route. |
+| `RSTREAM_PROJECT_ID` | alternative | Project id instead of the endpoint (`/turn-server/credentials` route). |
+| `RSTREAM_API_BASE_URL` | optional | Control plane origin, default `https://rstream.io`. `https://` required except localhost. |
 | `STUN_URLS` | optional | Defaults to Google STUN. |
 | `ICE_TRANSPORT_POLICY` | optional | `all` (default) or `relay` for verification. Relay-only fails with 503 if no usable TURN exists. |
 | `MAX_SESSIONS` | optional | In-memory cap, default 500. |
@@ -92,7 +96,7 @@ create a relay; a relay must run somewhere with public UDP/TCP ingress. Render
 web services only expose HTTP(S), so coturn must run on a VPS/other host (or use
 a managed provider).
 
-Three supported modes, in order of preference:
+Four supported modes, in order of preference:
 
 ### A. coturn with a shared secret (recommended, short-lived, self-hosted)
 
@@ -134,7 +138,68 @@ servers for 5 minutes; the provider API key stays server-side.
   server-side proxy (or accept the default 24 h TTL) if you point
   `TURN_CREDENTIALS_URL` at it. Twilio NTS is a paid product with trial credit.
 
-### C. Static credentials (least secure)
+### C. rstream managed STUN/TURN (temporary credentials)
+
+rstream's Control plane API issues short-lived, project-scoped TURN credentials.
+The server requests them on demand from the already-authenticated
+`GET /api/sessions/:id/ice-config` endpoint; the browser only ever receives the
+temporary `username`/`credential`, never the rstream token.
+
+Verified contract (checked 2026-10 against
+<https://rstream.io/docs/integrations/stun-turn>,
+<https://rstream.io/docs/integrations/apis> and
+<https://rstream.io/api/openapi.json>):
+
+```
+POST https://rstream.io/api/projects/tunnels/<project-id>/turn-server/credentials
+POST https://rstream.io/api/projects/tunnels/resolve/<project-endpoint>/turn-server/credentials
+  Authorization: Bearer <rstream access token>
+  Content-Type:  application/json
+  Body:          { "ttlSeconds": 600 }        # integer 1-3600, default 600
+  200:           { "username": "...", "credential": "...", "urls": ["turn:..."], "ttl": 600 }
+  Errors:        400 401 403 404 409 429 503   (Cache-Control: no-store)
+  Required rule: turn.credentials.create + access to the project
+```
+
+Behaviour implemented in `server/turn.ts`:
+
+* `RSTREAM_AUTHENTICATION_TOKEN` is used as the bearer token and stays
+  server-side. It is never returned, logged, or embedded in error messages.
+* `RSTREAM_PROJECT_ENDPOINT` (preferred) or `RSTREAM_PROJECT_ID` selects the
+  project; the request uses `POST` with `{"ttlSeconds": N}`.
+* The requested TTL is clamped to rstream's 1-3600 second range
+  (`TURN_TTL_SECONDS`, default 3600 → 3600).
+* Responses are validated (`username`, `credential`, at least one `turn:`/
+  `turns:` URL, `ttl`); malformed payloads are rejected, never partially used.
+* Credentials are cached per process until ~1 minute before expiry and are
+  **never** served after `expiresAt`; a 5 s request timeout bounds the call.
+* Provider failures map to actionable, secret-free messages (e.g. rotate the
+  token on 401, missing `turn.credentials.create` on 403, verify the project on
+  404) and surface as warnings for `ICE_TRANSPORT_POLICY=all`. With
+  `ICE_TRANSPORT_POLICY=relay` they fail closed with **503
+  `TURN_MISCONFIGURED`**.
+* If `TURN_URLS` + `TURN_SECRET` (or static credentials) are also configured,
+  rstream takes precedence when healthy and the static relay is **preserved as a
+  fallback** when rstream is unreachable.
+
+Render setup:
+
+1. In the rstream dashboard, copy the project endpoint (and/or project id) and
+   create an access token with `turn.credentials.create` plus access to that
+   project.
+2. Add the environment variables in the Render dashboard (they are declared
+   `sync: false` in `render.yaml`, so nothing is stored in the repo):
+   * `RSTREAM_AUTHENTICATION_TOKEN` — the access token (secret).
+   * `RSTREAM_PROJECT_ENDPOINT` — the project endpoint, **or**
+     `RSTREAM_PROJECT_ID` — the project id.
+   * optional `RSTREAM_API_BASE_URL` — only for a self-hosted/alternate control
+     plane; defaults to `https://rstream.io`.
+3. Leave `TURN_URLS` unset unless you want the static fallback.
+4. After redeploy, `GET /api/health` reports
+   `ice.credentialMode: "provider"` without exposing any URL, token or
+   credential. Real relay media must still be confirmed on two devices.
+
+### D. Static credentials (least secure)
 
 `TURN_USERNAME` + `TURN_CREDENTIAL` work with any managed relay, but the password
 is delivered to every authorized browser and cannot be rotated per session.

@@ -24,9 +24,13 @@ import {
   buildIceConfig,
   describeIceSettingsForLog,
   fetchProviderIceServers,
+  fetchRstreamTurnCredentials,
   mergeProviderIceServers,
+  mergeRstreamIceServers,
   ProviderIceResult,
   resolveIceTransportPolicy,
+  resolveTurnSettings,
+  RstreamTurnResult,
   turnSummary,
 } from './server/turn';
 
@@ -176,6 +180,8 @@ export interface CreateServerOptions {
   turnFetch?: typeof fetch;
   /** Per-server cache for provider-issued TURN credentials. */
   turnCache?: Map<string, ProviderIceResult>;
+  /** Per-server cache for rstream-issued TURN credentials. */
+  rstreamCache?: Map<string, RstreamTurnResult>;
   /** 0 picks a free port. */
   port?: number;
 }
@@ -193,6 +199,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
   const fetchImpl = options.ultravoxFetch ?? fetch;
   const turnFetch = options.turnFetch ?? fetch;
   const turnCache = options.turnCache ?? new Map<string, ProviderIceResult>();
+  const rstreamCache = options.rstreamCache ?? new Map<string, RstreamTurnResult>();
 
   /**
    * One in-flight AI call creation per session. Two concurrent "reconnect"
@@ -666,7 +673,35 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     let config = buildIceConfig({ sessionId: session.sessionId });
     res.setHeader('Cache-Control', 'no-store');
 
-    if (config.turn.providerConfigured) {
+    if (config.turn.provider === 'rstream' && config.turn.providerConfigured) {
+      // rstream managed TURN: the access token is read here and never logged or
+      // returned. If rstream is unavailable, any static/ephemeral TURN config is
+      // preserved instead of degrading to STUN-only.
+      const settings = resolveTurnSettings();
+      const fallback = buildIceConfig({ sessionId: session.sessionId, ignoreProviders: true });
+      try {
+        const provider = await fetchRstreamTurnCredentials({
+          token: settings.rstreamToken ?? '',
+          projectId: settings.rstreamProjectId,
+          projectEndpoint: settings.rstreamProjectEndpoint,
+          baseUrl: settings.rstreamBaseUrl,
+          ttlSeconds: Math.min(settings.ttlSeconds, 3600),
+          fetchImpl: turnFetch,
+          cache: rstreamCache,
+        });
+        config = mergeRstreamIceServers(config, provider, null, fallback).config;
+        const remainingSeconds = Math.max(0, Math.round((provider.expiresAt - Date.now()) / 1000));
+        console.log(
+          `[ice] rstream TURN credentials ready (${provider.urls.length} URL(s), ${remainingSeconds}s remaining) for session ${session.sessionId.slice(0, 8)}`
+        );
+      } catch (err) {
+        const error = err as Error;
+        // Error messages are provider-status based and contain no token/header.
+        console.error(`[ice] rstream TURN credential request failed: ${error.message}`);
+        config = mergeRstreamIceServers(config, null, error, fallback).config;
+        store.recordError(session.sessionId, 'rstream TURN credential request failed');
+      }
+    } else if (config.turn.providerConfigured) {
       const credentialsUrl = process.env.TURN_CREDENTIALS_URL?.trim();
       try {
         if (!credentialsUrl) throw new Error('TURN_CREDENTIALS_URL is not configured.');

@@ -146,8 +146,10 @@ Salesperson browser                          Customer browser
   401. The payload is applied to every `RTCPeerConnection`, including reconnects
   and ICE restarts.
 * TURN modes: coturn `TURN_SECRET` (short-lived HMAC credentials, preferred),
-  static `TURN_USERNAME`/`TURN_CREDENTIAL`, or a managed provider's credentials
-  API (`TURN_CREDENTIALS_URL`, GET or POST+`{ttl}`) fetched and cached server-side.
+  static `TURN_USERNAME`/`TURN_CREDENTIAL`, a managed provider's credentials
+  API (`TURN_CREDENTIALS_URL`, GET or POST+`{ttl}`), or rstream's Control plane
+  TURN issuance (`RSTREAM_AUTHENTICATION_TOKEN` + `RSTREAM_PROJECT_ENDPOINT`)
+  fetched and cached server-side with a static-relay fallback.
   Credentials are never logged and never appear in `/api/health`.
 * `ICE_TRANSPORT_POLICY=relay` without a usable relay is a hard failure: the ICE
   endpoint returns 503 `TURN_MISCONFIGURED`, the engine refuses to create a peer

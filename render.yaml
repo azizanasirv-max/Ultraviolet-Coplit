@@ -38,6 +38,17 @@ services:
         sync: false
       - key: TURN_CREDENTIALS_AUTH
         sync: false
+      # rstream managed STUN/TURN (Control plane API). RSTREAM_AUTHENTICATION_TOKEN
+      # is the server-side access token and must never reach the browser.
+      # Configure exactly one of RSTREAM_PROJECT_ENDPOINT / RSTREAM_PROJECT_ID.
+      - key: RSTREAM_AUTHENTICATION_TOKEN
+        sync: false
+      - key: RSTREAM_PROJECT_ENDPOINT
+        sync: false
+      - key: RSTREAM_PROJECT_ID
+        sync: false
+      - key: RSTREAM_API_BASE_URL
+        sync: false
       - key: TURN_USERNAME
         sync: false
       - key: TURN_CREDENTIAL
