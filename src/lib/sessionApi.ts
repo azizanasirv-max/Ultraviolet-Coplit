@@ -245,4 +245,9 @@ export const getIceConfig = (
       : {}),
   });
 
-export const getHealth = (): Promise<HealthResponse> => request('/api/health');
+export const getHealth = (options: { timeoutMs?: number } = {}): Promise<HealthResponse> =>
+  request('/api/health', {
+    ...(options.timeoutMs && options.timeoutMs > 0
+      ? { signal: AbortSignal.timeout(options.timeoutMs) }
+      : {}),
+  });

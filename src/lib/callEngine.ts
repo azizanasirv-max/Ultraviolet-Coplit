@@ -348,6 +348,8 @@ export class CallEngine {
   private negotiationAttempts = 0;
   private iceRestartAttempts = 0;
   private iceRestartInFlight = false;
+  /** True while an ICE-credential refresh is running as part of recovery. */
+  private recoveryAttemptInFlight = false;
   private pendingIceRestartReason: string | null = null;
   private pendingIceRestartForce = false;
 
@@ -1022,7 +1024,7 @@ export class CallEngine {
       return this.iceConfig.iceTransportPolicy === 'relay';
     }
     try {
-      const health = await getHealth();
+      const health = await getHealth({ timeoutMs: 4000 });
       return health?.iceTransportPolicy === 'relay';
     } catch {
       // Unknown policy: prefer attempting a direct call over refusing outright.
@@ -1444,6 +1446,7 @@ export class CallEngine {
     this.negotiationAttempts = 0;
     this.iceRestartAttempts = 0;
     this.iceRestartInFlight = false;
+    this.recoveryAttemptInFlight = false;
     this.pendingIceRestartReason = null;
     this.pendingIceRestartForce = false;
     if (reason) this.log(`Peer recovery state reset (${reason}).`);
@@ -1749,6 +1752,10 @@ export class CallEngine {
       this.log(`An ICE restart is already in flight; ignoring duplicate failure (${reason}).`);
       return;
     }
+    if (this.recoveryAttemptInFlight) {
+      this.log(`A recovery attempt is already starting; ignoring duplicate failure (${reason}).`);
+      return;
+    }
     if (this.iceRestartAttempts >= MAX_ICE_RESTART_ATTEMPTS) {
       this.enterTerminalPeerFailure(reason);
       return;
@@ -1784,7 +1791,13 @@ export class CallEngine {
     // reusing it so a restart after a long call does not retry dead credentials.
     // This is best effort and never fatal; a slow/failed refresh keeps the
     // current servers and delays the restart by at most the fetch timeout.
-    await this.refreshIceConfigForRecovery();
+    // The flag coalesces failure events that arrive while the refresh runs.
+    this.recoveryAttemptInFlight = true;
+    try {
+      await this.refreshIceConfigForRecovery();
+    } finally {
+      this.recoveryAttemptInFlight = false;
+    }
     if (this.stopped || this.intentionalLeave || this.peerFailureConfirmed) return;
     if (this.pc !== pc || !this.peerParticipantId) return;
     if (!force && pc.connectionState === 'connected') {
@@ -1870,6 +1883,7 @@ export class CallEngine {
     this.peerFailureConfirmed = true;
     this.clearPeerTimers();
     this.iceRestartInFlight = false;
+    this.recoveryAttemptInFlight = false;
     this.pendingIceRestartReason = null;
     this.pendingIceRestartForce = false;
     this.log(

@@ -1071,7 +1071,9 @@ test('relay-only ICE failure shows the customer a plain message after recovery i
     (value) => value.callState === 'failed',
     90000
   );
-  assert.match(String(customer.iceConfigError), /relay requires a usable TURN relay/i);
+  // The ICE payload itself was valid; the relay is simply unreachable.
+  assert.equal(customer.iceConfigError, null);
+  assert.equal(customer.iceConfigLoaded, true);
 
   await assertCustomerDomIsClean(customerPage, 'relay-only failure');
   assert.equal(await customerPage.locator('[data-testid="ice-error"]').count(), 1);
