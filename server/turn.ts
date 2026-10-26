@@ -22,7 +22,7 @@ import { createHash, createHmac } from 'crypto';
 
 export type IceTransportPolicy = 'all' | 'relay';
 export type TurnCredentialMode = 'ephemeral' | 'static' | 'provider' | 'none';
-export type TurnProvider = 'rstream' | 'generic';
+export type TurnProvider = 'rstream' | 'rstream-static' | 'generic';
 
 export interface IceServerConfig {
   urls: string | string[];
@@ -56,6 +56,8 @@ export interface TurnSummary {
   iceTransportPolicy: IceTransportPolicy;
   hasErrors: boolean;
   warnings: string[];
+  /** Which provider supplies TURN, when applicable. Never contains credentials. */
+  provider?: TurnProvider;
 }
 
 export interface BuildIceConfigOptions {
@@ -82,6 +84,9 @@ const TURN_URL_PATTERN = /^turns?:(?:[a-zA-Z0-9.-]+|\[[0-9a-fA-F:]+\])(?::\d{1,5
 const STUN_URL_PATTERN = /^stuns?:(?:[a-zA-Z0-9.-]+|\[[0-9a-fA-F:]+\])(?::\d{1,5})?(?:\?[^\s,]+)?$/;
 
 const DEFAULT_TURN_TTL_SECONDS = 3600;
+/** rstream reports ttl 1-3600 for issued credentials; static JSON expires too. */
+const DEFAULT_RSTREAM_STATIC_TTL_SECONDS = 600;
+const MAX_RSTREAM_STATIC_TTL_SECONDS = 3600;
 
 export const parseUrlList = (raw: unknown): string[] => {
   if (typeof raw !== 'string') return [];
@@ -129,6 +134,27 @@ const resolveTtlSeconds = (env: NodeJS.ProcessEnv): number => {
 };
 
 /**
+ * Validity window for the optional static rstream credential. rstream caps
+ * issued credentials at one hour; anything outside 1-3600 is clamped so a typo
+ * cannot make the server treat an expired credential as valid indefinitely.
+ */
+const resolveRstreamStaticTtlSeconds = (env: NodeJS.ProcessEnv): number => {
+  const parsed = Number(env.RSTREAM_TURN_TTL_SECONDS);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_RSTREAM_STATIC_TTL_SECONDS;
+  return Math.min(Math.max(Math.round(parsed), 1), MAX_RSTREAM_STATIC_TTL_SECONDS);
+};
+
+/**
+ * First time this process served a given static rstream credential. The TTL
+ * window is anchored here (not at rstream issuance, which we cannot observe),
+ * so a credential is never treated as valid beyond RSTREAM_TURN_TTL_SECONDS of
+ * first use. The key is a hash; the credential itself is never stored.
+ */
+const rstreamStaticFirstSeen = new Map<string, number>();
+
+export const clearRstreamStaticState = (): void => rstreamStaticFirstSeen.clear();
+
+/**
  * coturn / TURN REST API ephemeral credential:
  *   username   = "<unix expiry>:<user id>"
  *   credential = base64(HMAC-SHA1(shared secret, username))
@@ -164,12 +190,25 @@ export interface TurnSettings {
   rstreamProjectId: string | null;
   /** Control plane origin; `https://rstream.io` unless overridden. */
   rstreamBaseUrl: string;
+  /**
+   * Optional static rstream TURN JSON credentials (username/credential/URLs).
+   * Used only when the API-based rstream flow or a generic provider is not
+   * configured. These are NOT renewed automatically; see the expiry handling in
+   * buildIceConfig.
+   */
+  rstreamStaticUsername: string | null;
+  rstreamStaticCredential: string | null;
+  rstreamStaticUrls: string[];
+  rstreamStaticInvalidUrls: string[];
+  /** Validity window declared for the static credential (seconds). */
+  rstreamStaticTtlSeconds: number;
 }
 
 /** Reads and normalises the deployment's ICE/TURN settings. */
 export const resolveTurnSettings = (env: NodeJS.ProcessEnv = process.env): TurnSettings => {
   const turn = parseTurnUrls(env.TURN_URLS);
   const stun = parseStunUrls(env.STUN_URLS);
+  const rstreamStaticTurn = parseTurnUrls(env.RSTREAM_TURN_URLS);
   return {
     turnUrls: turn.urls,
     stunUrls: stun.urls.length > 0 ? stun.urls : DEFAULT_STUN_URLS,
@@ -187,6 +226,11 @@ export const resolveTurnSettings = (env: NodeJS.ProcessEnv = process.env): TurnS
     rstreamProjectEndpoint: env.RSTREAM_PROJECT_ENDPOINT?.trim() || null,
     rstreamProjectId: env.RSTREAM_PROJECT_ID?.trim() || null,
     rstreamBaseUrl: (env.RSTREAM_API_BASE_URL?.trim() || 'https://rstream.io').replace(/\/+$/, ''),
+    rstreamStaticUsername: env.RSTREAM_TURN_USERNAME?.trim() || null,
+    rstreamStaticCredential: env.RSTREAM_TURN_CREDENTIAL?.trim() || null,
+    rstreamStaticUrls: rstreamStaticTurn.urls,
+    rstreamStaticInvalidUrls: rstreamStaticTurn.invalid,
+    rstreamStaticTtlSeconds: resolveRstreamStaticTtlSeconds(env),
   };
 };
 
@@ -286,17 +330,96 @@ export const buildIceConfig = (options: BuildIceConfigOptions = {}): IceConfigPa
     turnUsername = null;
     turnCredential = null;
     expiresAt = null;
-  } else {
+  }
+
+  // 3. Optional static rstream JSON credentials (RSTREAM_TURN_USERNAME/
+  //    RSTREAM_TURN_CREDENTIAL/RSTREAM_TURN_URLS). Used only when no API-based
+  //    provider is configured. They expire after RSTREAM_TURN_TTL_SECONDS
+  //    (counted from first use in this process) and are NEVER renewed
+  //    automatically: an operator must paste fresh credentials and redeploy.
+  const rstreamStaticAny = Boolean(
+    settings.rstreamStaticUsername ||
+      settings.rstreamStaticCredential ||
+      settings.rstreamStaticUrls.length > 0 ||
+      settings.rstreamStaticInvalidUrls.length > 0
+  );
+  const rstreamStaticComplete = Boolean(
+    settings.rstreamStaticUsername &&
+      settings.rstreamStaticCredential &&
+      settings.rstreamStaticUrls.length > 0
+  );
+  let rstreamStaticReady = false;
+
+  if (!providerReady && rstreamStaticAny) {
+    const staticRstreamMessages: string[] = [];
+
+    for (const invalid of settings.rstreamStaticInvalidUrls) {
+      staticRstreamMessages.push(
+        `RSTREAM_TURN_URLS contains an invalid entry ("${redactUrl(invalid)}"). Use turn:<host>[:port] or turns:<host>[:port].`
+      );
+    }
+
+    if (!rstreamStaticComplete) {
+      staticRstreamMessages.push(
+        'rstream static TURN configuration is incomplete. Set RSTREAM_TURN_USERNAME, RSTREAM_TURN_CREDENTIAL and RSTREAM_TURN_URLS together, or leave all three unset.'
+      );
+    } else {
+      const fingerprint = createHash('sha256')
+        .update(
+          [
+            settings.rstreamStaticUsername,
+            settings.rstreamStaticCredential,
+            settings.rstreamStaticUrls.join(','),
+          ].join('\0')
+        )
+        .digest('hex')
+        .slice(0, 16);
+      const firstSeen = rstreamStaticFirstSeen.get(fingerprint) ?? now;
+      if (!rstreamStaticFirstSeen.has(fingerprint)) rstreamStaticFirstSeen.set(fingerprint, now);
+      const staticExpiresAt = firstSeen + settings.rstreamStaticTtlSeconds * 1000;
+
+      if (now >= staticExpiresAt) {
+        // Report the expired timestamp only when nothing else supplies TURN;
+        // otherwise keep the active relay's own expiry.
+        if (!staticUsable) expiresAt = staticExpiresAt;
+        staticRstreamMessages.push(
+          `rstream static TURN credentials have expired (RSTREAM_TURN_TTL_SECONDS=${settings.rstreamStaticTtlSeconds}s from first use). They are NOT renewed automatically; replace RSTREAM_TURN_USERNAME, RSTREAM_TURN_CREDENTIAL and RSTREAM_TURN_URLS with fresh credentials and redeploy.`
+        );
+      } else {
+        rstreamStaticReady = true;
+        provider = 'rstream-static';
+        credentialMode = 'static';
+        turnUsername = settings.rstreamStaticUsername;
+        turnCredential = settings.rstreamStaticCredential;
+        expiresAt = staticExpiresAt;
+        staticWarnings.push(
+          `rstream static TURN credentials expire after ${settings.rstreamStaticTtlSeconds}s (counted from first use in this process). They are NOT renewed automatically; replace them manually with fresh credentials and redeploy before expiry.`
+        );
+      }
+    }
+
+    if (staticRstreamMessages.length > 0) {
+      // With another usable relay this is a warning; if it is the only relay it
+      // is fatal (the HTTP layer then fails closed for relay-only mode).
+      (staticUsable ? staticWarnings : staticErrors).push(...staticRstreamMessages);
+    }
+
+    if (!rstreamStaticReady && !staticUsable) provider = 'rstream-static';
+  }
+
+  if (!providerReady) {
     warnings.push(...staticWarnings);
     errors.push(...staticErrors);
-    for (const invalid of settings.invalidTurnUrls) {
-      errors.push(
-        `TURN_URLS contains an invalid entry ("${redactUrl(invalid)}"). Use turn:<host>[:port] or turns:<host>[:port].`
-      );
+    if (!rstreamStaticReady) {
+      for (const invalid of settings.invalidTurnUrls) {
+        errors.push(
+          `TURN_URLS contains an invalid entry ("${redactUrl(invalid)}"). Use turn:<host>[:port] or turns:<host>[:port].`
+        );
+      }
     }
   }
 
-  const usableTurn = providerReady || staticUsable;
+  const usableTurn = providerReady || rstreamStaticReady || staticUsable;
 
   if (!usableTurn) {
     if (settings.policy === 'relay') {
@@ -310,10 +433,11 @@ export const buildIceConfig = (options: BuildIceConfigOptions = {}): IceConfigPa
     }
   }
 
+  const activeTurnUrls = rstreamStaticReady ? settings.rstreamStaticUrls : settings.turnUrls;
   const iceServers: IceServerConfig[] = [{ urls: settings.stunUrls }];
-  if (!providerReady && settings.turnUrls.length > 0 && credentialMode !== 'none') {
+  if (!providerReady && credentialMode !== 'none' && activeTurnUrls.length > 0) {
     iceServers.push({
-      urls: settings.turnUrls,
+      urls: activeTurnUrls,
       ...(turnUsername ? { username: turnUsername } : {}),
       ...(turnCredential ? { credential: turnCredential } : {}),
     });
@@ -327,7 +451,7 @@ export const buildIceConfig = (options: BuildIceConfigOptions = {}): IceConfigPa
     turn: {
       configured: usableTurn,
       credentialMode,
-      urlCount: providerReady ? 0 : settings.turnUrls.length,
+      urlCount: providerReady ? 0 : activeTurnUrls.length,
       expiresAt,
       providerConfigured: providerReady,
       ...(provider ? { provider } : {}),
@@ -340,7 +464,8 @@ export const buildIceConfig = (options: BuildIceConfigOptions = {}): IceConfigPa
 
 /** Health-safe summary: no URLs, no usernames, no credentials. */
 export const turnSummary = (env: NodeJS.ProcessEnv = process.env): TurnSummary => {
-  const config = buildIceConfig({ env, now: 0 });
+  // Uses the real clock so static rstream expiry is reported accurately.
+  const config = buildIceConfig({ env, now: Date.now() });
   const settings = resolveTurnSettings(env);
   return {
     configured: config.turn.configured,
@@ -348,22 +473,29 @@ export const turnSummary = (env: NodeJS.ProcessEnv = process.env): TurnSummary =
     iceTransportPolicy: settings.policy,
     hasErrors: config.errors.length > 0,
     warnings: config.errors.length > 0 ? config.errors : config.warnings,
+    ...(config.turn.provider ? { provider: config.turn.provider } : {}),
   };
 };
 
 export const describeIceSettingsForLog = (env: NodeJS.ProcessEnv = process.env): string => {
   const settings = resolveTurnSettings(env);
   const rstream = settings.rstreamToken && (settings.rstreamProjectEndpoint || settings.rstreamProjectId);
+  const rstreamStatic =
+    settings.rstreamStaticUsername &&
+    settings.rstreamStaticCredential &&
+    settings.rstreamStaticUrls.length > 0;
   const mode = rstream
     ? 'provider:rstream'
     : settings.credentialsUrl
       ? 'provider:generic'
-      : settings.secret
-        ? 'ephemeral'
-        : settings.username && settings.credential
-          ? 'static'
-          : 'none';
-  return `turnUrls=${settings.turnUrls.length} credentialMode=${mode} policy=${settings.policy} stunUrls=${settings.stunUrls.length}`;
+      : rstreamStatic
+        ? 'static:rstream'
+        : settings.secret
+          ? 'ephemeral'
+          : settings.username && settings.credential
+            ? 'static'
+            : 'none';
+  return `turnUrls=${settings.turnUrls.length} rstreamStaticUrls=${settings.rstreamStaticUrls.length} credentialMode=${mode} policy=${settings.policy} stunUrls=${settings.stunUrls.length}`;
 };
 
 // ---------------------------------------------------------------------------

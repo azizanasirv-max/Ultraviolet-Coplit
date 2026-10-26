@@ -1287,7 +1287,11 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
   } else if (!iceStartup.configured) {
     console.warn(`[ice] ${iceStartup.warnings.join(' ')}`);
   } else if (iceStartup.credentialMode === 'static') {
-    console.warn('[ice] TURN uses static credentials. Set TURN_SECRET for short-lived credentials.');
+    console.warn(
+      iceStartup.provider === 'rstream-static'
+        ? '[ice] rstream static TURN credentials are in use; they expire and must be replaced manually with fresh values.'
+        : '[ice] TURN uses static credentials. Set TURN_SECRET for short-lived credentials.'
+    );
   }
 
   const aiStartup = aiReadiness();
