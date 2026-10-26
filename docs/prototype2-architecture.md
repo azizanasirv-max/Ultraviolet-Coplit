@@ -112,17 +112,28 @@ Salesperson browser                          Customer browser
 
 * **Offerer**: salesperson only. **Answerer**: customer only. This removes glare
   by construction and is enforced again server-side (`offer` from a customer is
-  rejected).
-* A joining/reconnecting peer triggers `peer_joined`, which forces the
-  salesperson to build a fresh connection and send a new offer. Presence
-  refreshes (`session_state`) do not churn an established connection.
-* The local microphone track is added to the connection once. ICE candidates are
-  queued until the remote description exists. Duplicate offers are ignored using
-  the ICE ufrag/pwd pair.
-* `pc.connectionState === "failed"` triggers an ICE restart (with TURN this
-  moves traffic to the relay). Microphone `mute`/`ended` events (mobile browsers
-  can end a track when a second capture starts) trigger reacquisition and
-  `replaceTrack`.
+  rejected). A joining/reconnecting peer triggers `peer_joined`, which forces the
+  salesperson to build a fresh connection and send a new offer.
+* Presence refreshes (`session_state`) are a liveness hint only: they neither
+  create an offer nor recreate a peer connection. An offer in flight is tracked,
+  so a second offer is never created while `signalingState` is
+  `have-local-offer`. An unanswered offer is rolled back after a bounded timeout
+  and retried (at most 3 offers per negotiation), then the connection becomes
+  terminal.
+* `pc.connectionState === "failed"` or a failed ICE state starts **one** bounded
+  recovery sequence: up to 3 ICE restarts with backoff. Duplicate failure events
+  from `connectionState` and `iceConnectionState` are coalesced. A
+  `disconnected` state gets a short grace period and may recover on its own.
+  The customer cannot create an offer, so it asks the salesperson through the
+  role-checked `ice_restart` signaling message.
+* Only a genuine `connected` transport (ICE + DTLS) resets the recovery budget.
+  If every attempt fails, the call reports an actionable terminal error and no
+  longer recreates peer connections on presence updates. `Reconnect` (or
+  `retryConnection()`) deliberately starts one fresh negotiation inside the same
+  page/call. WebRTC failure never stops a healthy Ultravox AI session.
+* Microphone `mute`/`ended` events (mobile browsers can end a track when a second
+  capture starts) trigger reacquisition and `replaceTrack`. Remote-track and
+  peer-connection callbacks are generation-guarded and cleared on teardown.
 * Closing a peer connection no longer stops the shared microphone track — that
   was one of the reconnect bugs found by the browser tests.
 * Remote audio is attached to a persistent `<audio>` element that is primed with
@@ -269,9 +280,10 @@ rising while `answers` stays 0) without reading the frontend console.
 | --- | --- | --- |
 | `npm run test:unit` | `SessionStore`: session/credential isolation, role mismatch, single-use invitation, rotation/revocation, expiry, resume identity, duplicate prevention, AI call clearing, AI liveness vs call record, no plaintext secrets | 13/13 pass |
 | `npm run test:turn` | ICE/TURN unit tests (synthetic env + mocked provider HTTP): URL parsing, static/ephemeral/provider credentials, HMAC correctness, relay-only fail-fast, provider caching/failure, no secret leakage | 17/17 pass |
-| `npm run test:signaling` | Real HTTP + WebSocket server: join authentication, role enforcement, offer/answer/ICE relay, AI text relay to the salesperson only, cross-session isolation, reconnect identity, `peer_left`, invalid JSON, diagnostics authorization, customer-only Ultravox call, **AI call rotation, failed-creation retry, AI status relay/role enforcement/redaction, customer-disconnect AI state**, authenticated ICE endpoint, TURN static/ephemeral/provider delivery, relay misconfiguration, APP_URL, AI readiness without a key, secrecy | 29/29 pass |
+| `npm run test:signaling` | Real HTTP + WebSocket server: join authentication, role enforcement, offer/answer/ICE relay including the customer's role-checked `ice_restart` request, AI text relay to the salesperson only, cross-session isolation, reconnect identity, `peer_left`, invalid JSON, diagnostics authorization, customer-only Ultravox call, **AI call rotation, failed-creation retry, AI status relay/role enforcement/redaction, customer-disconnect AI state**, authenticated ICE endpoint, TURN static/ephemeral/provider delivery, relay misconfiguration, APP_URL, AI readiness without a key, secrecy | 31/31 pass |
+| `npm run test:negotiation` | Deterministic fake WebRTC/WebSocket: repeated `session_state` never creates a duplicate offer, no offer while `have-local-offer`, queued ICE restart runs when stable, an unanswered offer is rolled back and retried within a bounded budget, duplicate failure events coalesce into one bounded sequence, exhausted recovery yields an actionable terminal error, no PC churn after terminal failure, replacement cancels timers/ignores stale callbacks, customer restart request path, transient disconnect vs confirmed failure, AI state independent of WebRTC failure | 9/9 pass |
 | `npm run test:ai` | **Mocked `UltravoxSession` + mocked `fetch`**: new-call-per-retry, connected only from live SDK status, mic-published reporting, abnormal-close recovery, stale-callback isolation, bounded retries with real error text, duplicate-retry suppression, salesperson restart over signaling, AI failure leaves WebRTC state untouched | 8/8 pass |
-| `npm run test:browser` | Chromium, two isolated browser contexts, synthetic media: role-specific UIs, invitation scoping/replay rejection, legacy URL rejection, bidirectional RTP, `<audio>` playing, mute/unmute on both sides, reconnect without duplicate participants/tracks, AI text on the correct dashboard, AI failure isolated **and visible on the salesperson dashboard**, **salesperson-triggered AI restart without dropping audio**, **rotated invitation creates a new AI call**, server-side client diagnostics, TURN applied to every PC (incl. reconnect), relay-only policy applied, relay-only-without-TURN refuses to start, no credential leakage in DOM/snapshot | 21/21 pass |
+| `npm run test:browser` | Chromium, two isolated browser contexts, synthetic media: role-specific UIs, invitation scoping/replay rejection, legacy URL rejection, bidirectional RTP, `<audio>` playing, mute/unmute on both sides, reconnect without duplicate participants/tracks, **presence refresh during negotiation leaves one stable PC and one offer**, AI text on the correct dashboard, AI failure isolated **and visible on the salesperson dashboard**, **salesperson-triggered AI restart without dropping audio**, **rotated invitation creates a new AI call**, server-side client diagnostics, TURN applied to every PC (incl. reconnect), relay-only policy applied, relay-only-without-TURN refuses to start, no credential leakage in DOM/snapshot | 22/22 pass |
 | `npm run build` | Production Vite build | pass |
 | `npm run lint` | `tsc --noEmit` | pass |
 

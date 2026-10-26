@@ -81,6 +81,14 @@ const openContext = async (browser: Browser): Promise<BrowserContext> => {
   await context.addInitScript(() => {
     const Original = window.RTCPeerConnection;
     (window as any).__pcs = [];
+    const originalCreateOffer = (Original.prototype as any).createOffer as (
+      this: any,
+      ...args: any[]
+    ) => Promise<RTCSessionDescriptionInit>;
+    (Original.prototype as any).createOffer = function (this: any, ...args: any[]) {
+      this.__createOfferCalls = (this.__createOfferCalls || 0) + 1;
+      return originalCreateOffer.apply(this, args);
+    };
     (window as any).RTCPeerConnection = function (...args: any[]) {
       const pc = new (Original as any)(...args);
       (window as any).__pcs.push(pc);
@@ -831,4 +839,101 @@ test('relay-only mode without TURN refuses to start instead of silently using ST
   assert.equal(await page.locator('[data-testid="ice-error"]').count(), 1);
 
   await context.close();
+
+
+
+});
+
+/**
+ * Real-Chromium negotiation regression for defect D1.
+ *
+ * While the call is still connecting, the server's presence broadcasts
+ * (`session_state`, emitted on AI call/status changes) used to trigger another
+ * `makeOffer`. The answerer dropped the duplicate and the offerer stayed in
+ * `have-local-offer`. This test floods presence updates during negotiation and
+ * asserts the real peer connection remains in a single, stable negotiation.
+ *
+ * Loopback Chromium proves the signaling state machine only; it is not proof of
+ * NAT traversal.
+ */
+test('presence refreshes during real Chromium negotiation do not duplicate offers', async (t) => {
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const base = `http://127.0.0.1:${server.port}`;
+  const browser = await launchBrowser();
+  t.after(async () => {
+    await browser.close();
+    await server.close();
+  });
+
+  const salespersonContext = await openContext(browser);
+  const customerContext = await openContext(browser);
+  const salespersonPage = await salespersonContext.newPage();
+  const customerPage = await customerContext.newPage();
+
+  await salespersonPage.goto(`${base}/sales`, { waitUntil: 'domcontentloaded' });
+  const inviteUrl = await readInvitationAndOpenDashboard(salespersonPage);
+  await customerPage.goto(inviteUrl, { waitUntil: 'domcontentloaded' });
+  await customerPage.waitForSelector('[data-testid="customer-prejoin"]', { timeout: 20000 });
+
+  const inviteToken = decodeURIComponent(inviteUrl.split('invite=')[1]);
+  const credentials = await customerPage.evaluate((token) => {
+    const stored = JSON.parse(sessionStorage.getItem(`sc.prototype2.customer.${token}`) || '{}');
+    return { sessionId: stored.sessionId as string, customerKey: stored.customerKey as string };
+  }, inviteToken);
+  assert.ok(credentials.sessionId && credentials.customerKey);
+
+  // Flood server presence broadcasts while ICE/DTLS is still being set up.
+  const presenceFlood = (async () => {
+    for (let index = 0; index < 12; index += 1) {
+      await fetch(`${base}/api/sessions/${credentials.sessionId}/ultravox-call`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${credentials.customerKey}`,
+        },
+        body: JSON.stringify({ replace: true }),
+      }).catch(() => undefined);
+      await sleep(40);
+    }
+  })();
+
+  await salespersonPage.click('[data-testid="join-call"]');
+  await customerPage.click('[data-testid="join-call"]');
+
+  await waitFor(
+    () => snapshot(salespersonPage),
+    (value) =>
+      value.callState === 'connected' &&
+      value.diagnostics.bytesSent > 0 &&
+      value.diagnostics.bytesReceived > 0,
+    30000
+  );
+  await presenceFlood;
+  await sleep(500);
+
+  const state = await salespersonPage.evaluate(() => {
+    const open = (window as any).__pcs.filter((pc: any) => pc.connectionState !== 'closed');
+    return open.map((pc: any) => ({
+      signalingState: pc.signalingState,
+      createOfferCalls: pc.__createOfferCalls || 0,
+      connectionState: pc.connectionState,
+    }));
+  });
+
+  assert.equal(state.length, 1, 'exactly one active peer connection');
+  assert.equal(state[0].connectionState, 'connected');
+  assert.equal(state[0].signalingState, 'stable', 'presence refreshes must not leave an unanswered offer');
+  assert.equal(state[0].createOfferCalls, 1, 'presence refreshes must not create duplicate offers');
+
+  const customerState = await customerPage.evaluate(() =>
+    (window as any).__pcs
+      .filter((pc: any) => pc.connectionState !== 'closed')
+      .map((pc: any) => ({ signalingState: pc.signalingState, createOfferCalls: pc.__createOfferCalls || 0 }))
+  );
+  assert.equal(customerState.length, 1);
+  assert.equal(customerState[0].signalingState, 'stable');
+  assert.equal(customerState[0].createOfferCalls, 0, 'the customer is always the answerer');
+
+  await salespersonContext.close();
+  await customerContext.close();
 });
