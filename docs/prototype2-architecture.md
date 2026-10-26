@@ -151,9 +151,8 @@ Salesperson browser                          Customer browser
   TURN issuance (`RSTREAM_AUTHENTICATION_TOKEN` + `RSTREAM_PROJECT_ENDPOINT`),
   static rstream JSON credentials for temporary testing
   (`RSTREAM_TURN_USERNAME`/`RSTREAM_TURN_CREDENTIAL`/`RSTREAM_TURN_URLS`, which
-  expire and must be replaced manually), or ExpressTURN short-lived credentials
-  derived from an admin-managed secret encrypted at rest (`/admin/turn`).
-  fetched and cached server-side with a static-relay fallback.
+  expire and must be replaced manually), or ExpressTURN static credentials
+  entered by the operator at `/admin/turn` and held only in server memory.
   Credentials are never logged and never appear in `/api/health`.
 * `ICE_TRANSPORT_POLICY=relay` without a usable relay is a hard failure: the ICE
   endpoint returns 503 `TURN_MISCONFIGURED`, the engine refuses to create a peer

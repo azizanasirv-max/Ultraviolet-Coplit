@@ -85,11 +85,7 @@ starts the Vite dev server when `NODE_ENV=production`; the server then serves
 | `RSTREAM_TURN_CREDENTIAL` | optional (static mode) | Static rstream TURN credential/password from your JSON credential. |
 | `RSTREAM_TURN_URLS` | optional (static mode) | Comma-separated `turn:`/`turns:` URLs from the same rstream JSON. |
 | `RSTREAM_TURN_TTL_SECONDS` | optional | Validity window for the static credential (default 600, clamped 1-3600). **Expiry is not extended automatically.** |
-| `SETTINGS_STORE_PATH` | recommended | Encrypted store path. Defaults to `/var/data/uv-admin/settings.enc` when `/var/data` exists (mounted disk), else `./data/turn-settings.enc`. |
-| `SETTINGS_PERSISTENT_STORAGE` | optional | `true`/`false` durability hint shown in the admin page; auto-detected for `/var/data`. |
-| `ADMIN_SETUP_TOKEN_FILE` | optional bootstrap | Path to a one-time setup token (e.g. a Render secret file) if Shell/SSH is unavailable. |
-| `ADMIN_SETUP_TOKEN` | optional bootstrap | One-time setup token value; deleted/unused after setup. |
-| `SETTINGS_ENCRYPTION_KEY` | advanced only | Optional override for the auto-generated `settings.key` (32 bytes base64/hex). |
+| `ADMIN_PASSWORD` | admin page | Password for `/admin/turn`. When unset, the admin page and its API are disabled (503). It is never logged or returned. |
 | `STUN_URLS` | optional | Defaults to Google STUN. |
 | `ICE_TRANSPORT_POLICY` | optional | `all` (default) or `relay` for verification. Relay-only fails with 503 if no usable TURN exists. |
 | `MAX_SESSIONS` | optional | In-memory cap, default 500. |
@@ -250,86 +246,59 @@ involved in this mode.
 is delivered to every authorized browser and cannot be rotated per session.
 Use only as a fallback.
 
-### E. ExpressTURN (admin-managed, recommended)
+### E. ExpressTURN free tier (operator-entered, temporary testing)
 
-ExpressTURN issues credentials with a shared Secret Key. The server derives them
-locally with the official scheme
-(<https://www.expressturn.com/webrtc-secret-key-examples>):
+The ExpressTURN **free** plan provides a TURN server URL, a username and a
+password. It does **not** provide a Secret Key — ExpressTURN's shared-secret
+authentication (`static-auth-secret` / HMAC credentials) is a **Premium-only**
+feature, as stated on <https://www.expressturn.com/> ("the shared secret
+authentication method is available only to Premium customers"). Free-tier
+credentials therefore use the standard TURN long-term credential mechanism
+(`lt-cred-mech`), which is exactly what a browser's `RTCIceServer`
+`username`/`credential` uses.
 
-```
-username   = "<unix expiry seconds>:<session id>"
-credential = base64(HMAC-SHA1(secret key, username))
-URLs       = turn:<host>:<port>?transport=udp  + ?transport=tcp
-```
+Do not invent or derive credentials: this implementation has no HMAC path. The
+three values you enter are placed into the ICE configuration unchanged.
 
-Setup (no secret environment variables):
+Setup:
 
-1. In ExpressTURN, copy the Secret Key and the TURN hostname/port (e.g.
-   `free.expressturn.com` / `3478`).
-2. Ensure the encrypted store is on a persistent volume (see persistence below).
-   Nothing else needs to be configured: the AES-256-GCM key is generated on
-   first boot (`settings.key`, `0600`), and the store uses
-   `SETTINGS_STORE_PATH` (default `/var/data/uv-admin/settings.enc` when a disk
-   is mounted, otherwise `./data/turn-settings.enc`).
-3. On first boot with no admin password, the server writes a one-time setup
-   token to `<store dir>/admin-setup-token` (`0600`) and logs only its **path**.
-   Read it through Render Shell/SSH (`cat /var/data/uv-admin/admin-setup-token`),
-   open `https://<service>/admin/turn`, enter the token and choose an admin
-   password (minimum 12 characters). The token file is deleted after setup.
-   If Shell/SSH is unavailable, upload the token as a **Render secret file** and
-   set `ADMIN_SETUP_TOKEN_FILE=/etc/secrets/admin-setup-token` (or use
-   `ADMIN_SETUP_TOKEN` once). These are bootstrap-only and not secret storage.
-4. Sign in, enter host, port, TTL and the Secret Key, and save.
-5. `GET /api/health` then reports `ice.configured: true`,
-   `ice.credentialMode: "ephemeral"` and `ice.provider: "expressturn"`.
+1. Deploy the service (no persistent disk, database, Render Shell or ExpressTURN
+   Secret Key involved).
+2. Set **one** environment variable in the hosting dashboard:
+   `ADMIN_PASSWORD=<a long password you choose>`. Without it, `/admin/turn`
+   returns 503 and the admin API is disabled.
+3. Open `https://<service>/admin/turn`, sign in, and enter:
+   * **TURN server URL / address** — e.g. `turn:free.expressturn.com:3478`
+     (a bare `free.expressturn.com:3478` is accepted and normalized to `turn:`).
+     Multiple URLs can be comma-separated, e.g. add
+     `turn:free.expressturn.com:3478?transport=tcp` for a TCP fallback.
+   * **TURN username** and **TURN password** — copied verbatim from the
+     ExpressTURN dashboard.
+4. Make a call. `GET /api/health` reports `ice.configured: true`,
+   `ice.credentialMode: "static"` and `ice.provider: "expressturn"`.
+
+The credentials are held **only in this server process's memory**. A restart or
+redeploy clears them and you re-enter them in `/admin/turn`; nothing is written
+to disk, a database, Git or environment variables.
 
 Security properties:
 
-* The ExpressTURN Secret Key and the admin scrypt password hash live inside one
-  AES-256-GCM encrypted file (random IV, auth tag, AAD, atomic write, `0600`).
-  The 32-byte encryption key is generated on the server and stored as
-  `settings.key` (`0600`) on the same volume; it is never sent to browsers, APIs
-  or logs. An optional `SETTINGS_ENCRYPTION_KEY` env var can override it.
-* Admin authentication is set on first run and verified server-side with scrypt.
-  Sessions are 2-hour HMAC-signed `HttpOnly` / `SameSite=Strict` cookies signed
-  with a random per-process key (restart requires signing in again). There is no
-  default password and no open enrollment: without a setup token the page refuses
-  to configure anything.
-* The setup token is single-use, deleted after setup, and never appears in the
-  page, HTTP responses, logs or Git.
-* Authorized session participants receive only the derived username/credential
-  through the existing authenticated ICE endpoint
-  (`GET /api/sessions/:id/ice-config`); anonymous and cross-session callers get
-  401. The secret never appears in `/api/health`, diagnostics, page source or
-  logs.
-* Tampered or wrongly-keyed settings files fail closed and are reported as an
-  ICE error (relay-only mode returns 503) instead of silently degrading.
-
-Persistence and bootstrap — **the unavoidable minimum**:
-
-* This repository has **no database**, and Render's default filesystem is
-  **ephemeral**. Secure persistence across deploys/restarts therefore requires a
-  **Render persistent disk** (available on paid instance types). Mount it at
-  `/var/data`; the store auto-detects it, or set
-  `SETTINGS_STORE_PATH=/var/data/uv-admin/settings.enc` explicitly. The settings
-  file, its `settings.key` and the setup token then survive restarts. Without a
-  disk, the admin page shows a warning and everything must be re-entered after a
-  redeploy — the code does not pretend otherwise.
-* A secure first-admin login also requires **one out-of-band step**: there is no
-  safe way to authenticate the first operator through a public HTTP endpoint
-  alone. The app solves this without environment secrets by writing a one-time
-  token to the server filesystem, read through Render Shell/SSH (paid plans) or a
-  mounted secret file. If neither Shell access nor a secret file is available,
-  the page stays disabled rather than exposing an insecure enrollment.
-* If a paid disk is not acceptable, the alternative is a managed database (e.g.
-  Render Postgres) storing the same AES-256-GCM envelope and admin hash. That is
-  not implemented here because the project has no database layer or
-  `DATABASE_URL`.
+* `/admin/turn` and `/api/admin/turn-settings` require a 2-hour `HttpOnly`,
+  `SameSite=Strict` signed session cookie obtained with `ADMIN_PASSWORD`.
+  Login is rate-limited and writes are same-origin only.
+* The admin page never renders the TURN username or password back to the
+  browser, and the status API returns only `configured`, `urlCount`,
+  `updatedAt` and `storage: "memory"`. Neither value appears in page source,
+  frontend JavaScript, `/api/health`, logs or errors.
+* Authorized session participants receive the credentials only through the
+  existing authenticated ICE endpoint (`GET /api/sessions/:id/ice-config`);
+  anonymous and cross-session callers get 401. WebRTC signaling, call recovery
+  and salesperson/customer role isolation are unchanged.
 
 Precedence when several TURN sources are configured:
-`ExpressTURN` (admin settings) → rstream API → generic `TURN_CREDENTIALS_URL` →
-coturn/static `TURN_URLS`. Existing rstream values may remain set but are unused
-while ExpressTURN is configured.
+`ExpressTURN` (admin page, memory) → rstream API → generic
+`TURN_CREDENTIALS_URL` → coturn/static `TURN_URLS`. Existing rstream values may
+remain set but are unused while ExpressTURN credentials are present.
 
 ### Verification mode
 

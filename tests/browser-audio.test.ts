@@ -7,9 +7,6 @@
  * plumbing — NOT physical-device acoustics.
  */
 import test from 'node:test';
-
-// Isolate the encrypted admin store so tests never touch the repo's ./data.
-process.env.SETTINGS_STORE_PATH ||= `${process.env.TMPDIR || '/tmp'}/uv-test-store-${process.pid}/settings.enc`;
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';

@@ -26,9 +26,6 @@ import {
 import type { RstreamTurnResult } from '../server/turn';
 import { createPrototype2Server } from '../server';
 
-// Isolate the encrypted admin store so tests never touch the repo's ./data.
-process.env.SETTINGS_STORE_PATH ||= `${process.env.TMPDIR || '/tmp'}/uv-test-store-${process.pid}/settings.enc`;
-
 const TOKEN = 'rstream-access-token-do-not-leak';
 
 const rstreamEnv = (overrides: Record<string, string> = {}): NodeJS.ProcessEnv => ({

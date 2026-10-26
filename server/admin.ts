@@ -1,19 +1,42 @@
 /**
- * Admin session cookies for the ExpressTURN settings page.
+ * Admin session cookies and password check for the ExpressTURN settings page.
  *
- * There is no env-var password: the operator sets a password on first run
- * (bootstrapped by a one-time token read from the server filesystem), and the
- * password is verified against a scrypt hash inside the encrypted store.
- *
- * Session signing uses a random per-process key, so sessions never outlive a
- * restart and no signing secret has to be configured or persisted.
+ * The page is protected by `ADMIN_PASSWORD` (a server-side environment variable
+ * set once in the hosting dashboard; it is never sent back to the browser or
+ * written to logs). Sessions use an HttpOnly, SameSite=Strict cookie signed with
+ * a random per-process key, so sessions never outlive a restart and no signing
+ * secret has to be configured or persisted.
  */
-import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 
 export const ADMIN_COOKIE_NAME = 'uv_admin';
 export const ADMIN_SESSION_TTL_MS = 2 * 60 * 60 * 1000;
 const SESSION_VERSION = 'v1';
 const SESSION_KEY = randomBytes(32);
+
+/** True when the operator configured ADMIN_PASSWORD. Never returns the value. */
+export const isAdminPasswordConfigured = (env: NodeJS.ProcessEnv = process.env): boolean =>
+  Boolean(env.ADMIN_PASSWORD && env.ADMIN_PASSWORD.trim());
+
+const digest = (value: string): Buffer => createHash('sha256').update(value, 'utf8').digest();
+
+/** Constant-time comparison against ADMIN_PASSWORD; never logs the attempt. */
+export const verifyAdminPassword = (
+  candidate: unknown,
+  env: NodeJS.ProcessEnv = process.env
+): boolean => {
+  const expected = env.ADMIN_PASSWORD?.trim();
+  if (!expected || typeof candidate !== 'string') return false;
+
+  const provided = candidate.trim();
+  if (!provided) return false;
+  try {
+    return timingSafeEqual(digest(expected), digest(provided));
+  } catch {
+    return false;
+  }
+};
+
 
 const sign = (payload: string): string =>
   createHmac('sha256', SESSION_KEY).update(payload).digest('base64url');

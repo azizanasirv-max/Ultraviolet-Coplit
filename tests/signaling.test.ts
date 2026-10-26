@@ -6,9 +6,6 @@ import { createPrototype2Server } from '../server';
 // Injected server-side key; the browser never sees it.
 process.env.ULTRAVOX_API_KEY = 'test-ultravox-key';
 
-// Isolate the encrypted admin store so tests never touch the repo's ./data.
-process.env.SETTINGS_STORE_PATH ||= `${process.env.TMPDIR || '/tmp'}/uv-test-store-${process.pid}/settings.enc`;
-
 interface Harness {
   base: string;
   close: () => Promise<void>;

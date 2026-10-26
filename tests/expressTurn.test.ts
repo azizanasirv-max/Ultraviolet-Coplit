@@ -1,219 +1,219 @@
 /**
- * ExpressTURN credential generation tests.
+ * ExpressTURN static credential tests.
  *
- * The credential derivation is checked against an independent crypto
- * calculation of the official scheme documented at
- * https://www.expressturn.com/webrtc-secret-key-examples
+ * ExpressTURN's free plan supplies a TURN server URL, username and password.
+ * No Secret Key exists and no HMAC credential derivation is allowed, so these
+ * tests assert the operator's values are forwarded verbatim.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHmac } from 'crypto';
 import {
-  buildExpressTurnUrls,
-  generateExpressTurnCredentials,
-  normalizeExpressTurnTtlSeconds,
-  validateExpressTurnSettings,
-  type ExpressTurnServerSettings,
+  ExpressTurnValidationError,
+  clearExpressTurnCredentials,
+  getExpressTurnCredentials,
+  getExpressTurnStatus,
+  parseExpressTurnServerAddress,
+  setExpressTurnCredentials,
+  validateExpressTurnCredentials,
 } from '../server/expressTurn';
 import { buildIceConfig, describeIceSettingsForLog, turnSummary } from '../server/turn';
 
-const SECRET = 'unit-test-expressturn-secret';
+const USERNAME = 'expressturn-user.do-not-leak';
+const PASSWORD = 'expressturn-password-do-not-leak';
 const NOW = 1_800_000_000_000;
 
-const settings = (overrides: Partial<ExpressTurnServerSettings> = {}): ExpressTurnServerSettings => ({
-  host: 'turn.expressturn.com',
-  port: 3478,
-  ttlSeconds: 600,
-  secretKey: SECRET,
-  updatedAt: NOW,
+const input = (overrides: Record<string, unknown> = {}) => ({
+  serverAddress: 'turn:free.expressturn.com:3478',
+  username: USERNAME,
+  password: PASSWORD,
   ...overrides,
 });
 
-const expectedCredential = (username: string, secret = SECRET): string =>
-  createHmac('sha1', secret).update(username).digest('base64');
+test.afterEach(() => clearExpressTurnCredentials());
 
-test('generates the documented <expiry>:<user> username and HMAC-SHA1 Base64 credential', () => {
-  const credentials = generateExpressTurnCredentials({
-    secretKey: SECRET,
-    host: 'turn.expressturn.com',
-    port: 3478,
-    ttlSeconds: 600,
-    userId: 'session-abc',
-    now: NOW,
-  });
-
-  const expiresAtSeconds = Math.floor(NOW / 1000) + 600;
-  assert.equal(credentials.username, `${expiresAtSeconds}:session-abc`);
-  assert.equal(credentials.credential, expectedCredential(credentials.username));
-  assert.equal(credentials.expiresAt, expiresAtSeconds * 1000);
-  assert.equal(credentials.ttlSeconds, 600);
-  assert.deepEqual(credentials.urls, [
-    'turn:turn.expressturn.com:3478?transport=udp',
-    'turn:turn.expressturn.com:3478?transport=tcp',
+test('normalizes the dashboard TURN URL/address without altering credentials', () => {
+  assert.deepEqual(parseExpressTurnServerAddress('turn:free.expressturn.com:3478'), [
+    'turn:free.expressturn.com:3478',
   ]);
-});
-
-test('scopes credentials to the session id and sanitizes unsafe characters', () => {
-  const a = generateExpressTurnCredentials({
-    secretKey: SECRET,
-    host: 'turn.expressturn.com',
-    port: 3478,
-    ttlSeconds: 600,
-    userId: 'session-a',
-    now: NOW,
-  });
-  const b = generateExpressTurnCredentials({
-    secretKey: SECRET,
-    host: 'turn.expressturn.com',
-    port: 3478,
-    ttlSeconds: 600,
-    userId: 'session-b',
-    now: NOW,
-  });
-  assert.notEqual(a.credential, b.credential);
-
-  const sanitized = generateExpressTurnCredentials({
-    secretKey: SECRET,
-    host: 'turn.expressturn.com',
-    port: 3478,
-    userId: 'bad id/../with spaces',
-    now: NOW,
-  });
-  assert.match(sanitized.username, /^\d+:[A-Za-z0-9._-]+$/);
-  assert.ok(!sanitized.username.includes(' '));
-  assert.ok(!sanitized.username.includes('/'));
-});
-
-test('clamps TTL to the 300-86400 second window and builds both transports', () => {
-  assert.equal(normalizeExpressTurnTtlSeconds(undefined), 3600);
-  assert.equal(normalizeExpressTurnTtlSeconds('nope'), 3600);
-  assert.equal(normalizeExpressTurnTtlSeconds(5), 300);
-  assert.equal(normalizeExpressTurnTtlSeconds(10_000_000), 86_400);
-  assert.deepEqual(buildExpressTurnUrls('192.0.2.10', 3479), [
-    'turn:192.0.2.10:3479?transport=udp',
-    'turn:192.0.2.10:3479?transport=tcp',
+  assert.deepEqual(parseExpressTurnServerAddress('free.expressturn.com:3478'), [
+    'turn:free.expressturn.com:3478',
   ]);
+  assert.deepEqual(parseExpressTurnServerAddress('turns:turn.example.com:5349'), [
+    'turns:turn.example.com:5349',
+  ]);
+  assert.deepEqual(
+    parseExpressTurnServerAddress(
+      'turn:free.expressturn.com:3478?transport=udp, turn:free.expressturn.com:3478?transport=tcp\n'
+    ),
+    ['turn:free.expressturn.com:3478?transport=udp', 'turn:free.expressturn.com:3478?transport=tcp']
+  );
+  // Duplicates collapse; whitespace is trimmed.
+  assert.deepEqual(
+    parseExpressTurnServerAddress(' turn:free.expressturn.com:3478 , turn:free.expressturn.com:3478 '),
+    ['turn:free.expressturn.com:3478']
+  );
+
+  const saved = validateExpressTurnCredentials(input(), NOW);
+  assert.equal(saved.username, USERNAME);
+  assert.equal(saved.credential, PASSWORD);
+  assert.equal(saved.updatedAt, NOW);
 });
 
-test('validates host, port, TTL and secret without echoing the secret', () => {
-  const good = validateExpressTurnSettings({
-    host: ' Turn.ExpressTURN.com ',
-    port: '3478',
-    ttlSeconds: '600',
-    secretKey: `  ${SECRET}  `,
-  });
-  assert.equal(good.ok, true);
-  assert.deepEqual(good.value, { host: 'turn.expressturn.com', port: 3478, ttlSeconds: 600 });
-  assert.equal(good.secretKey, SECRET);
-
-  for (const host of ['https://turn.expressturn.com', 'turn.expressturn.com:3478', 'bad host', '']) {
-    const result = validateExpressTurnSettings({ host, port: 3478, secretKey: SECRET });
-    assert.equal(result.ok, false, `host should be rejected: ${host}`);
+test('rejects invalid addresses and empty credentials without echoing values', () => {
+  for (const serverAddress of [
+    'https://free.expressturn.com',
+    'turn:free.expressturn.com/path',
+    'turn:free.expressturn.com:99999',
+    'stun:stun.example.com:3478',
+    '',
+  ]) {
+    assert.throws(
+      () => parseExpressTurnServerAddress(serverAddress),
+      ExpressTurnValidationError,
+      `should reject ${serverAddress}`
+    );
   }
 
-  const badPort = validateExpressTurnSettings({ host: 'turn.expressturn.com', port: 70000, secretKey: SECRET });
-  assert.equal(badPort.ok, false);
-  assert.ok(badPort.errors.some((error) => /port/i.test(error)));
+  for (const field of ['username', 'password'] as const) {
+    const result = (() => {
+      try {
+        validateExpressTurnCredentials(input({ [field]: '   ' }), NOW);
+        return null;
+      } catch (err) {
+        return err as Error;
+      }
+    })();
+    assert.ok(result instanceof ExpressTurnValidationError);
+    assert.ok(!result.message.includes(PASSWORD));
+    assert.ok(!result.message.includes(USERNAME));
+  }
 
-  const badTtl = validateExpressTurnSettings({
-    host: 'turn.expressturn.com',
-    port: 3478,
-    ttlSeconds: 10,
-    secretKey: SECRET,
-  });
-  assert.equal(badTtl.ok, false);
-  assert.ok(badTtl.errors.some((error) => /TTL/.test(error)));
-
-  const shortSecret = validateExpressTurnSettings({ host: 'turn.expressturn.com', port: 3478, secretKey: 'short' });
-  assert.equal(shortSecret.ok, false);
-  assert.ok(!JSON.stringify(shortSecret).includes('short'));
-
-  // The secret must never be included in validation output.
-  assert.ok(!JSON.stringify(good.value).includes(SECRET));
+  const tooLong = 'x'.repeat(513);
+  assert.throws(
+    () => validateExpressTurnCredentials(input({ password: tooLong }), NOW),
+    (err: Error) => err instanceof ExpressTurnValidationError && !err.message.includes(tooLong)
+  );
+  assert.throws(
+    () => validateExpressTurnCredentials(input({ username: 'bad\nuser' }), NOW),
+    ExpressTurnValidationError
+  );
+  // Credentials are never silently trimmed: surrounding whitespace is rejected.
+  assert.throws(
+    () => validateExpressTurnCredentials(input({ password: ` ${PASSWORD}` }), NOW),
+    (err: Error) =>
+      err instanceof ExpressTurnValidationError && /whitespace/.test(err.message) && !err.message.includes(PASSWORD)
+  );
 });
 
-test('buildIceConfig issues ExpressTURN credentials as the highest-priority provider', () => {
-  const now = 1_850_000_000_000;
+
+test('keeps credentials in process memory only and exposes safe status', () => {
+  clearExpressTurnCredentials();
+  assert.equal(getExpressTurnCredentials(), null);
+  assert.deepEqual(getExpressTurnStatus(), {
+    configured: false,
+    urlCount: 0,
+    updatedAt: null,
+    storage: 'memory',
+  });
+
+  const saved = setExpressTurnCredentials(
+    input({ serverAddress: 'free.expressturn.com:3478,free.expressturn.com:3480' }),
+    NOW
+  );
+  assert.deepEqual(saved.urls, [
+    'turn:free.expressturn.com:3478',
+    'turn:free.expressturn.com:3480',
+  ]);
+  assert.deepEqual(getExpressTurnCredentials(), saved);
+
+  const status = getExpressTurnStatus();
+  assert.deepEqual(status, {
+    configured: true,
+    urlCount: 2,
+    updatedAt: NOW,
+    storage: 'memory',
+  });
+  const serialized = JSON.stringify(status);
+  assert.ok(!serialized.includes(USERNAME));
+  assert.ok(!serialized.includes(PASSWORD));
+  assert.ok(!serialized.includes('expressturn.com'));
+
+  clearExpressTurnCredentials();
+  assert.equal(getExpressTurnStatus().configured, false);
+});
+
+test('buildIceConfig forwards the supplied username/password and URL verbatim', () => {
+  const credentials = {
+    urls: ['turn:free.expressturn.com:3478?transport=udp', 'turn:free.expressturn.com:3478?transport=tcp'],
+    username: USERNAME,
+    credential: PASSWORD,
+    updatedAt: NOW,
+  };
+
   const config = buildIceConfig({
     env: {
-      // Even with rstream configured, ExpressTURN wins because it is the
-      // operator-configured provider.
+      // ExpressTURN is the operator-configured, highest-priority source.
       RSTREAM_AUTHENTICATION_TOKEN: 'legacy-token',
       RSTREAM_PROJECT_ENDPOINT: 'legacy-project',
+      TURN_URLS: 'turn:coturn.invalid:3478?transport=udp',
+      TURN_SECRET: 'legacy-coturn-secret',
     },
-    expressTurn: settings({ ttlSeconds: 600 }),
+    expressTurn: credentials,
     sessionId: 'session-42',
-    now,
+    now: NOW,
   });
 
   assert.equal(config.hasTurn, true);
-  assert.equal(config.turn.credentialMode, 'ephemeral');
-  assert.equal(config.turn.provider, 'expressturn');
   assert.equal(config.turn.configured, true);
+  assert.equal(config.turn.credentialMode, 'static');
+  assert.equal(config.turn.provider, 'expressturn');
+  assert.equal(config.turn.expiresAt, null);
   assert.equal(config.turn.urlCount, 2);
-  assert.equal(config.turn.expiresAt, now + 600_000);
   assert.deepEqual(config.errors, []);
 
-  const expectedUsername = `${Math.floor(now / 1000) + 600}:session-42`;
   const turnEntry = config.iceServers.find((entry) =>
     (Array.isArray(entry.urls) ? entry.urls : [entry.urls]).some((url) => url.startsWith('turn'))
   );
   assert.ok(turnEntry);
-  assert.equal(turnEntry?.username, expectedUsername);
-  assert.equal(turnEntry?.credential, expectedCredential(expectedUsername));
-  assert.deepEqual(turnEntry?.urls, [
-    'turn:turn.expressturn.com:3478?transport=udp',
-    'turn:turn.expressturn.com:3478?transport=tcp',
-  ]);
+  assert.equal(turnEntry?.username, USERNAME);
+  assert.equal(turnEntry?.credential, PASSWORD);
+  assert.deepEqual(turnEntry?.urls, credentials.urls);
 
-  // STUN is preserved and the secret never appears in the payload.
+  // STUN is preserved and no HMAC/derived credential appears.
   assert.ok(
     config.iceServers.some((entry) =>
       (Array.isArray(entry.urls) ? entry.urls : [entry.urls]).every((url) => url.startsWith('stun'))
     )
   );
-  assert.ok(!JSON.stringify(config).includes(SECRET));
-});
-
-test('an unusable ExpressTURN config is reported and does not use the secret', () => {
-  const now = 1_850_000_000_000;
-  const failed = buildIceConfig({
-    env: {},
-    expressTurn: settings({ secretKey: '' }),
-    expressTurnError: 'Stored ExpressTURN settings could not be decrypted.',
-    now,
-  });
-  assert.equal(failed.hasTurn, false);
-  assert.ok(failed.errors.some((error) => /ExpressTURN/.test(error)));
-
-  // With a working coturn fallback the same problem is only a warning.
-  const withFallback = buildIceConfig({
-    env: { TURN_URLS: 'turn:coturn.invalid:3478?transport=udp', TURN_SECRET: 'coturn-secret' },
-    expressTurnError: 'Stored ExpressTURN settings could not be decrypted.',
-    now,
-  });
-  assert.equal(withFallback.hasTurn, true);
-  assert.equal(withFallback.turn.credentialMode, 'ephemeral');
-  assert.ok(withFallback.warnings.some((warning) => /ExpressTURN/.test(warning)));
+  assert.ok(!JSON.stringify(config).includes('legacy-coturn-secret'));
 });
 
 test('ExpressTURN is ignored for the static fallback build and never leaks into health/logs', () => {
+  const credentials = {
+    urls: ['turn:free.expressturn.com:3478'],
+    username: USERNAME,
+    credential: PASSWORD,
+    updatedAt: NOW,
+  };
   const env = { TURN_URLS: 'turn:coturn.invalid:3478?transport=udp', TURN_SECRET: 'coturn-secret' };
-  const fallback = buildIceConfig({ env, expressTurn: settings(), ignoreProviders: true });
+
+  const fallback = buildIceConfig({ env, expressTurn: credentials, ignoreProviders: true });
   assert.equal(fallback.turn.provider, undefined);
   assert.equal(fallback.turn.credentialMode, 'ephemeral');
 
-  const summary = turnSummary(env, { expressTurn: settings() });
+  const summary = turnSummary(env, { expressTurn: credentials });
   const serialized = JSON.stringify(summary);
   assert.equal(summary.configured, true);
   assert.equal(summary.provider, 'expressturn');
-  assert.ok(!serialized.includes(SECRET));
-  assert.ok(!serialized.includes('turn.expressturn.com'));
+  assert.equal(summary.credentialMode, 'static');
+  assert.ok(!serialized.includes(USERNAME));
+  assert.ok(!serialized.includes(PASSWORD));
+  assert.ok(!serialized.includes('expressturn.com'));
   assert.ok(!serialized.includes('3478'));
 
   const logLine = describeIceSettingsForLog(env, { expressTurn: true });
-  assert.match(logLine, /credentialMode=ephemeral:expressturn/);
-  assert.ok(!logLine.includes(SECRET));
-  assert.ok(!logLine.includes('turn.expressturn.com'));
+  assert.match(logLine, /credentialMode=static:expressturn/);
+  assert.ok(!logLine.includes(USERNAME));
+  assert.ok(!logLine.includes(PASSWORD));
+  assert.ok(!logLine.includes('expressturn.com'));
 });
-

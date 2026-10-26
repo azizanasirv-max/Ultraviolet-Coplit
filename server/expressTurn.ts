@@ -1,174 +1,158 @@
 /**
- * ExpressTURN short-lived credential generation.
+ * ExpressTURN credentials entered by the operator at /admin/turn.
  *
- * Algorithm verified against the official documentation
- * https://www.expressturn.com/webrtc-secret-key-examples :
+ * The ExpressTURN **free** plan gives a TURN server URL, a username and a
+ * password (long-term credential mechanism, `lt-cred-mech`). It does NOT give a
+ * Secret Key: shared-secret (`static-auth-secret`) authentication is a Premium
+ * feature. Therefore no HMAC credential derivation happens anywhere: the
+ * operator's username and password are passed to the ICE configuration exactly
+ * as supplied.
  *
- *   username   = "<unix expiry seconds>:<user id>"
- *   credential = base64(HMAC-SHA1(shared secret key, username))
- *   ICE entry  = { urls: ["turn:free.expressturn.com:3478"], username, credential }
- *
- * The secret key stays server-side; only the derived, expiring username and
- * credential are ever sent to authorized browsers.
+ * Storage is intentionally a module-level variable: the credentials live only in
+ * this server process's memory and disappear on restart. Nothing is written to
+ * disk, a database or an environment variable.
  */
-import { createHmac } from 'crypto';
-
-export interface ExpressTurnServerSettings {
-  host: string;
-  port: number;
-  ttlSeconds: number;
-  secretKey: string;
-  /** Last admin update (epoch ms). */
-  updatedAt: number;
-}
 
 export interface ExpressTurnCredentials {
+  /** TURN URLs exactly as supplied (bare `host:port` is prefixed with `turn:`). */
   urls: string[];
   username: string;
   credential: string;
-  ttlSeconds: number;
-  /** Credential expiry (epoch ms). */
-  expiresAt: number;
+  /** Last admin save (epoch ms). */
+  updatedAt: number;
 }
 
-export const DEFAULT_EXPRESSTURN_HOST = 'free.expressturn.com';
-export const DEFAULT_EXPRESSTURN_PORT = 3478;
-export const DEFAULT_EXPRESSTURN_TTL_SECONDS = 3600;
-export const MIN_EXPRESSTURN_TTL_SECONDS = 300;
-export const MAX_EXPRESSTURN_TTL_SECONDS = 86_400;
-export const MAX_EXPRESSTURN_SECRET_LENGTH = 256;
+export interface ExpressTurnStatus {
+  configured: boolean;
+  urlCount: number;
+  updatedAt: number | null;
+  /** Always `memory`: credentials are not persisted. */
+  storage: 'memory';
+}
 
-const HOSTNAME_PATTERN =
-  /^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/;
-const IPV4_PATTERN = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
-const USER_ID_PATTERN = /[^A-Za-z0-9._-]+/g;
+export interface ExpressTurnInput {
+  serverAddress: unknown;
+  username: unknown;
+  password: unknown;
+}
 
-/** TURN hostname or IPv4 literal; no scheme, path, port or whitespace. */
-export const isValidExpressTurnHost = (host: string): boolean =>
-  typeof host === 'string' &&
-  host.length > 0 &&
-  host.length <= 253 &&
-  (HOSTNAME_PATTERN.test(host) || IPV4_PATTERN.test(host));
+export class ExpressTurnValidationError extends Error {}
 
-export const normalizeExpressTurnPort = (raw: unknown): number | null => {
-  const port = Number(raw);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) return null;
-  return port;
+export const MAX_EXPRESSTURN_FIELD_LENGTH = 512;
+
+// turn:host[:port][?transport=udp] | turns:host[:port][?transport=tcp]
+const TURN_URL_PATTERN =
+  /^turns?:(?:[a-zA-Z0-9.-]+|\[[0-9a-fA-F:]+\])(?::\d{1,5})?(?:\?[^,\s]+)?$/;
+
+const hasControlCharacters = (value: string): boolean => /[\u0000-\u001f\u007f]/.test(value);
+
+const assertValidPort = (url: string): void => {
+  const portMatch = url.match(/:(\d{1,5})(?:\?|$)/);
+  if (!portMatch) return;
+  const port = Number(portMatch[1]);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new ExpressTurnValidationError('TURN server port must be between 1 and 65535.');
+  }
 };
-
-export const normalizeExpressTurnTtlSeconds = (raw: unknown): number => {
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_EXPRESSTURN_TTL_SECONDS;
-  return Math.min(
-    Math.max(Math.round(parsed), MIN_EXPRESSTURN_TTL_SECONDS),
-    MAX_EXPRESSTURN_TTL_SECONDS
-  );
-};
-
-export interface ExpressTurnSettingsInput {
-  host: unknown;
-  port: unknown;
-  ttlSeconds?: unknown;
-  secretKey?: unknown;
-}
-
-export interface ExpressTurnValidationResult {
-  ok: boolean;
-  errors: string[];
-  value?: Omit<ExpressTurnServerSettings, 'secretKey' | 'updatedAt'>;
-  secretKey?: string;
-}
 
 /**
- * Validates admin input / decrypted settings. The secret is never echoed in
- * errors or returned in `value`.
+ * Normalizes the TURN server URL/address from the ExpressTURN dashboard.
+ * Accepts `turn:`/`turns:` URLs, or a bare `host[:port]` (prefixed with `turn:`),
+ * comma/newline separated for multiple entries. Invalid input is rejected
+ * without echoing the submitted value.
  */
-export const validateExpressTurnSettings = (input: ExpressTurnSettingsInput): ExpressTurnValidationResult => {
-  const errors: string[] = [];
-  const host = typeof input.host === 'string' ? input.host.trim().toLowerCase() : '';
-  if (!isValidExpressTurnHost(host)) {
-    errors.push('TURN hostname must be a hostname or IPv4 address, without scheme, path or port.');
+export const parseExpressTurnServerAddress = (raw: unknown): string[] => {
+  if (typeof raw !== 'string') {
+    throw new ExpressTurnValidationError('TURN server address is required.');
   }
 
-  const port = normalizeExpressTurnPort(input.port);
-  if (port === null) errors.push('TURN port must be an integer between 1 and 65535.');
+  const entries = raw
+    .split(/[,\n]/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
 
-  const ttlSeconds = normalizeExpressTurnTtlSeconds(input.ttlSeconds ?? DEFAULT_EXPRESSTURN_TTL_SECONDS);
-  if (input.ttlSeconds !== undefined) {
-    const raw = Number(input.ttlSeconds);
-    if (!Number.isFinite(raw) || raw <= 0) {
-      errors.push('TTL must be a positive number of seconds.');
-    } else if (raw < MIN_EXPRESSTURN_TTL_SECONDS || raw > MAX_EXPRESSTURN_TTL_SECONDS) {
-      errors.push(
-        `TTL must be between ${MIN_EXPRESSTURN_TTL_SECONDS} and ${MAX_EXPRESSTURN_TTL_SECONDS} seconds.`
+  if (entries.length === 0) {
+    throw new ExpressTurnValidationError('TURN server address is required.');
+  }
+  if (entries.length > 8) {
+    throw new ExpressTurnValidationError('Enter at most 8 TURN server URLs.');
+  }
+
+  const urls: string[] = [];
+  for (const entry of entries) {
+    if (hasControlCharacters(entry) || entry.length > 300) {
+      throw new ExpressTurnValidationError('TURN server address is not a valid turn:/turns: URL.');
+    }
+
+    const url = /^turns?:/i.test(entry) ? entry : `turn:${entry}`;
+    if (!TURN_URL_PATTERN.test(url)) {
+      throw new ExpressTurnValidationError(
+        'TURN server address must look like turn:host:3478 (or turns:host:5349), without a path.'
       );
     }
+    assertValidPort(url);
+    if (!urls.includes(url)) urls.push(url);
   }
 
-  let secretKey: string | undefined;
-  if (input.secretKey !== undefined) {
-    if (typeof input.secretKey !== 'string') {
-      errors.push('Secret key must be a string.');
-    } else {
-      const trimmed = input.secretKey.trim();
-      if (trimmed.length < 8 || trimmed.length > MAX_EXPRESSTURN_SECRET_LENGTH) {
-        errors.push(
-          `Secret key must be between 8 and ${MAX_EXPRESSTURN_SECRET_LENGTH} characters (whitespace is trimmed).`
-        );
-      } else {
-        secretKey = trimmed;
-      }
-    }
+  return urls;
+};
+
+const readCredentialField = (value: unknown, label: string): string => {
+  if (typeof value !== 'string') {
+    throw new ExpressTurnValidationError(`${label} is required.`);
   }
-
-  if (errors.length > 0) return { ok: false, errors };
-  return {
-    ok: true,
-    errors: [],
-    value: { host, port: port as number, ttlSeconds },
-    ...(secretKey ? { secretKey } : {}),
-  };
+  if (value.length === 0 || value.trim().length === 0) {
+    throw new ExpressTurnValidationError(`${label} is required.`);
+  }
+  if (value !== value.trim()) {
+    // Never silently modify a credential: reject surrounding whitespace instead.
+    throw new ExpressTurnValidationError(`${label} must not start or end with whitespace.`);
+  }
+  if (value.length > MAX_EXPRESSTURN_FIELD_LENGTH) {
+    throw new ExpressTurnValidationError(
+      `${label} must be at most ${MAX_EXPRESSTURN_FIELD_LENGTH} characters.`
+    );
+  }
+  if (hasControlCharacters(value)) {
+    throw new ExpressTurnValidationError(`${label} must not contain control characters.`);
+  }
+  return value;
 };
 
-/** `turn:host:port?transport=udp` and the TCP variant on the same port. */
-export const buildExpressTurnUrls = (host: string, port: number): string[] => [
-  `turn:${host}:${port}?transport=udp`,
-  `turn:${host}:${port}?transport=tcp`,
-];
+/** Validates operator input. Error messages never echo a submitted value. */
+export const validateExpressTurnCredentials = (
+  input: ExpressTurnInput,
+  now = Date.now()
+): ExpressTurnCredentials => ({
+  urls: parseExpressTurnServerAddress(input.serverAddress),
+  username: readCredentialField(input.username, 'TURN username'),
+  credential: readCredentialField(input.password, 'TURN password'),
+  updatedAt: now,
+});
 
-const sanitizeUserId = (userId: string | undefined): string => {
-  const cleaned = (userId || '').replace(USER_ID_PATTERN, '').slice(0, 64);
-  return cleaned || 'participant';
+// Process-local storage. Losing this on restart is expected and acceptable.
+let stored: ExpressTurnCredentials | null = null;
+
+/** Replaces the in-memory credentials with validated operator input. */
+export const setExpressTurnCredentials = (
+  input: ExpressTurnInput,
+  now = Date.now()
+): ExpressTurnCredentials => {
+  stored = validateExpressTurnCredentials(input, now);
+  return stored;
 };
 
-/**
- * Official ExpressTURN credential derivation. Deterministic for a given `now`,
- * which is what the tests assert against.
- */
-export const generateExpressTurnCredentials = (params: {
-  secretKey: string;
-  host: string;
-  port: number;
-  ttlSeconds?: number;
-  userId?: string;
-  now?: number;
-}): ExpressTurnCredentials => {
-  if (!params.secretKey) throw new Error('ExpressTURN secret key is not configured.');
-  if (!isValidExpressTurnHost(params.host)) throw new Error('ExpressTURN host is invalid.');
-  if (normalizeExpressTurnPort(params.port) === null) throw new Error('ExpressTURN port is invalid.');
+export const getExpressTurnCredentials = (): ExpressTurnCredentials | null => stored;
 
-  const ttlSeconds = normalizeExpressTurnTtlSeconds(params.ttlSeconds ?? DEFAULT_EXPRESSTURN_TTL_SECONDS);
-  const now = params.now ?? Date.now();
-  const expiresAtSeconds = Math.floor(now / 1000) + ttlSeconds;
-  const username = `${expiresAtSeconds}:${sanitizeUserId(params.userId)}`;
-  const credential = createHmac('sha1', params.secretKey).update(username).digest('base64');
-
-  return {
-    urls: buildExpressTurnUrls(params.host, params.port),
-    username,
-    credential,
-    ttlSeconds,
-    expiresAt: expiresAtSeconds * 1000,
-  };
+/** Drops the in-memory credentials (admin "clear" action / tests). */
+export const clearExpressTurnCredentials = (): void => {
+  stored = null;
 };
 
+/** Safe status for the admin page: no URL, username or password. */
+export const getExpressTurnStatus = (): ExpressTurnStatus => ({
+  configured: stored !== null,
+  urlCount: stored?.urls.length ?? 0,
+  updatedAt: stored?.updatedAt ?? null,
+  storage: 'memory',
+});

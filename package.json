@@ -22,7 +22,7 @@
     "test:turn": "node --import tsx --test tests/turn.test.ts",
     "test:rstream": "node --import tsx --test tests/rstream.test.ts",
     "test:rstream-static": "node --import tsx --test tests/rstreamStatic.test.ts",
-    "test:expressturn": "node --import tsx --test tests/expressTurn.test.ts tests/turnSettingsStore.test.ts tests/adminTurn.test.ts"
+    "test:expressturn": "node --import tsx --test tests/expressTurn.test.ts tests/adminTurn.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

@@ -10,6 +10,9 @@
  *     short-lived credentials (TURN_SECRET, HMAC-SHA1) are supported. Ephemeral
  *     credentials are preferred when a secret is present so no long-lived TURN
  *     password has to be shipped to browsers.
+ *   - ExpressTURN credentials entered at /admin/turn are static, process-local
+ *     username/password values (ExpressTURN free tier). They are forwarded to
+ *     authorized browsers verbatim; no HMAC/Secret-Key derivation is involved.
  *   - rstream's managed STUN/TURN service is supported natively through its
  *     documented Control plane API (RSTREAM_AUTHENTICATION_TOKEN +
  *     RSTREAM_PROJECT_ENDPOINT / RSTREAM_PROJECT_ID). See the "rstream" section
@@ -19,7 +22,7 @@
  *   - Credentials are never logged and never included in /api/health.
  */
 import { createHash, createHmac } from 'crypto';
-import { ExpressTurnServerSettings, generateExpressTurnCredentials } from './expressTurn';
+import type { ExpressTurnCredentials } from './expressTurn';
 
 export type IceTransportPolicy = 'all' | 'relay';
 export type TurnCredentialMode = 'ephemeral' | 'static' | 'provider' | 'none';
@@ -73,13 +76,11 @@ export interface BuildIceConfigOptions {
    */
   ignoreProviders?: boolean;
   /**
-   * ExpressTURN settings from the encrypted admin store. When present it is the
-   * highest-priority TURN source: short-lived credentials are generated locally
-   * with the official HMAC-SHA1 scheme.
+   * ExpressTURN credentials entered at /admin/turn (process memory). When
+   * present they are the highest-priority TURN source and are forwarded exactly
+   * as supplied.
    */
-  expressTurn?: ExpressTurnServerSettings | null;
-  /** Safe, actionable error when stored ExpressTURN settings are unusable. */
-  expressTurnError?: string | null;
+  expressTurn?: ExpressTurnCredentials | null;
 }
 
 const DEFAULT_STUN_URLS = [
@@ -309,35 +310,16 @@ export const buildIceConfig = (options: BuildIceConfigOptions = {}): IceConfigPa
     settings.turnUrls.length > 0 && credentialMode !== 'none' && !settings.invalidTurnUrls.length;
 
   // 2. Server-issued provider credentials take precedence over static ones.
-  //    The provider token/URL never leaves this process. ExpressTURN (admin
-  //    settings, encrypted store) is the highest-priority source.
+  //    The provider token/URL never leaves this process. ExpressTURN
+  //    (operator-entered, process memory) is the highest-priority source and
+  //    uses static long-term credentials exactly as entered.
   let provider: TurnProvider | null = null;
   let providerReady = false;
-  let expressTurnCredentials: {
-    urls: string[];
-    username: string;
-    credential: string;
-    expiresAt: number;
-  } | null = null;
 
-  if (!options.ignoreProviders && options.expressTurn) {
-    try {
-      expressTurnCredentials = generateExpressTurnCredentials({
-        secretKey: options.expressTurn.secretKey,
-        host: options.expressTurn.host,
-        port: options.expressTurn.port,
-        ttlSeconds: options.expressTurn.ttlSeconds,
-        userId: options.sessionId,
-        now,
-      });
-      provider = 'expressturn';
-      providerReady = true;
-    } catch {
-      // Invalid stored values: never log or echo them.
-      errors.push(
-        'Stored ExpressTURN settings are invalid; re-save the hostname, port and secret key from the admin settings page.'
-      );
-    }
+  const expressTurn = !options.ignoreProviders ? options.expressTurn ?? null : null;
+  if (expressTurn) {
+    provider = 'expressturn';
+    providerReady = true;
   }
 
   if (!options.ignoreProviders && !providerReady) {
@@ -366,11 +348,12 @@ export const buildIceConfig = (options: BuildIceConfigOptions = {}): IceConfigPa
     turnUsername = null;
     turnCredential = null;
     expiresAt = null;
-  } else if (expressTurnCredentials) {
-    credentialMode = 'ephemeral';
-    turnUsername = expressTurnCredentials.username;
-    turnCredential = expressTurnCredentials.credential;
-    expiresAt = expressTurnCredentials.expiresAt;
+  } else if (expressTurn) {
+    // ExpressTURN free-tier long-term credentials, forwarded verbatim.
+    credentialMode = 'static';
+    turnUsername = expressTurn.username;
+    turnCredential = expressTurn.credential;
+    expiresAt = null;
   }
 
   // 3. Optional static rstream JSON credentials (RSTREAM_TURN_USERNAME/
@@ -460,14 +443,6 @@ export const buildIceConfig = (options: BuildIceConfigOptions = {}): IceConfigPa
     }
   }
 
-  if (options.expressTurnError) {
-    const message = options.expressTurnError;
-    // With another usable relay this is a warning; otherwise it is actionable
-    // and (for relay-only mode) fatal.
-    if (providerReady || rstreamStaticReady || staticUsable) warnings.push(message);
-    else errors.push(message);
-  }
-
   const usableTurn = providerReady || rstreamStaticReady || staticUsable;
 
   if (!usableTurn) {
@@ -483,13 +458,13 @@ export const buildIceConfig = (options: BuildIceConfigOptions = {}): IceConfigPa
   }
 
   const activeTurnUrls =
-    expressTurnCredentials?.urls ?? (rstreamStaticReady ? settings.rstreamStaticUrls : settings.turnUrls);
+    expressTurn?.urls ?? (rstreamStaticReady ? settings.rstreamStaticUrls : settings.turnUrls);
   const iceServers: IceServerConfig[] = [{ urls: settings.stunUrls }];
-  const hasLocallyGeneratedTurn = Boolean(expressTurnCredentials);
+  const hasExpressTurn = Boolean(expressTurn);
   if (
     credentialMode !== 'none' &&
     activeTurnUrls.length > 0 &&
-    (hasLocallyGeneratedTurn || !providerReady)
+    (hasExpressTurn || !providerReady)
   ) {
     iceServers.push({
       urls: activeTurnUrls,
@@ -506,7 +481,7 @@ export const buildIceConfig = (options: BuildIceConfigOptions = {}): IceConfigPa
     turn: {
       configured: usableTurn,
       credentialMode,
-      urlCount: hasLocallyGeneratedTurn ? activeTurnUrls.length : providerReady ? 0 : activeTurnUrls.length,
+      urlCount: hasExpressTurn ? activeTurnUrls.length : providerReady ? 0 : activeTurnUrls.length,
       expiresAt,
       providerConfigured: providerReady,
       ...(provider ? { provider } : {}),
@@ -520,7 +495,7 @@ export const buildIceConfig = (options: BuildIceConfigOptions = {}): IceConfigPa
 /** Health-safe summary: no URLs, no usernames, no credentials. */
 export const turnSummary = (
   env: NodeJS.ProcessEnv = process.env,
-  options: { expressTurn?: ExpressTurnServerSettings | null; expressTurnError?: string | null } = {}
+  options: { expressTurn?: ExpressTurnCredentials | null } = {}
 ): TurnSummary => {
   // Uses the real clock so static rstream expiry is reported accurately.
   const config = buildIceConfig({ env, now: Date.now(), ...options });
@@ -546,7 +521,7 @@ export const describeIceSettingsForLog = (
     settings.rstreamStaticCredential &&
     settings.rstreamStaticUrls.length > 0;
   const mode = options.expressTurn
-    ? 'ephemeral:expressturn'
+    ? 'static:expressturn'
     : rstream
       ? 'provider:rstream'
       : settings.credentialsUrl

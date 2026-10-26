@@ -1,42 +1,35 @@
 /**
- * End-to-end admin setup + ExpressTURN delivery tests.
+ * End-to-end admin page + ExpressTURN delivery tests.
  *
- * No ADMIN_PASSWORD or SETTINGS_ENCRYPTION_KEY is set: the first admin is
- * bootstrapped with the one-time token file on the server filesystem, the
- * encryption key is generated on disk, and settings/password survive a restart.
+ * The admin page is protected by ADMIN_PASSWORD (the only server setting this
+ * feature needs). TURN credentials are entered in the page, kept in process
+ * memory, and delivered only through the session-authenticated ICE endpoint.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHmac, randomBytes } from 'crypto';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'fs/promises';
-import os from 'os';
-import path from 'path';
 import { createPrototype2Server } from '../server';
 import { ADMIN_COOKIE_NAME } from '../server/admin';
-import { clearTurnSettingsCache } from '../server/turnSettingsStore';
+import { clearExpressTurnCredentials } from '../server/expressTurn';
 
-const PASSWORD = 'correct-horse-battery-staple';
-const TURN_SECRET = 'admin-flow-expressturn-secret';
+const ADMIN_PASSWORD = 'correct-horse-battery-staple';
+const TURN_USERNAME = 'expressturn-username-do-not-leak';
+const TURN_PASSWORD = 'expressturn-password-do-not-leak';
+const TURN_ADDRESS = 'turn:free.expressturn.com:3478';
 const ENV_KEYS = [
   'ADMIN_PASSWORD',
-  'SETTINGS_ENCRYPTION_KEY',
   'SETTINGS_STORE_PATH',
-  'SETTINGS_PERSISTENT_STORAGE',
+  'SETTINGS_ENCRYPTION_KEY',
   'ADMIN_SETUP_TOKEN',
   'ADMIN_SETUP_TOKEN_FILE',
   'RSTREAM_AUTHENTICATION_TOKEN',
   'RSTREAM_PROJECT_ENDPOINT',
   'RSTREAM_PROJECT_ID',
-  'RSTREAM_TURN_USERNAME',
-  'RSTREAM_TURN_CREDENTIAL',
-  'RSTREAM_TURN_URLS',
   'TURN_CREDENTIALS_URL',
   'TURN_URLS',
   'TURN_USERNAME',
   'TURN_CREDENTIAL',
   'TURN_SECRET',
   'ICE_TRANSPORT_POLICY',
-  'APP_URL',
 ] as const;
 
 const snapshotEnv = (): Record<string, string | undefined> =>
@@ -49,10 +42,10 @@ const restoreEnv = (saved: Record<string, string | undefined>): void => {
   }
 };
 
-const clearTestEnv = (storePath: string): void => {
+const clearTestEnv = (): void => {
   for (const key of ENV_KEYS) delete process.env[key];
-  process.env.SETTINGS_STORE_PATH = storePath;
   process.env.ICE_TRANSPORT_POLICY = 'all';
+  clearExpressTurnCredentials();
 };
 
 const jsonRequest = async (
@@ -96,256 +89,304 @@ const createFixture = async (base: string, label: string) => {
   };
 };
 
-const hmacCredential = (username: string, secret = TURN_SECRET): string =>
-  createHmac('sha1', secret).update(username).digest('base64');
-
-const startServer = async () => {
-  const instance = await createPrototype2Server({
+const startServer = async () =>
+  createPrototype2Server({
     serveFrontend: false,
     port: 0,
     turnFetch: (async () => {
-      throw new Error('ExpressTURN credentials are generated locally');
+      throw new Error('ExpressTURN credentials are static and never fetched');
     }) as unknown as typeof fetch,
   });
-  return { base: `http://127.0.0.1:${instance.port}`, close: instance.close };
+
+const login = async (base: string) => {
+  const response = await jsonRequest(base, 'POST', '/api/admin/login', {
+    body: { password: ADMIN_PASSWORD },
+  });
+  assert.equal(response.status, 200);
+  const setCookie = response.headers.get('set-cookie') || '';
+  assert.match(setCookie, new RegExp(`^${ADMIN_COOKIE_NAME}=`));
+  assert.match(setCookie, /HttpOnly/i);
+  assert.match(setCookie, /SameSite=Strict/i);
+  return setCookie.split(';')[0];
 };
 
-test('first-run token setup, encrypted settings, and restart persistence without env secrets', async (t) => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'uv-admin-'));
-  const storePath = path.join(dir, 'settings.enc');
-  const saved = snapshotEnv();
-  clearTestEnv(storePath);
-  clearTurnSettingsCache();
 
-  let server = await startServer();
+test('the admin page is disabled without ADMIN_PASSWORD', async (t) => {
+  const saved = snapshotEnv();
+  clearTestEnv();
+  const server = await startServer();
+  const base = `http://127.0.0.1:${server.port}`;
   t.after(async () => {
     await server.close();
     restoreEnv(saved);
-    clearTurnSettingsCache();
-    await rm(dir, { recursive: true, force: true });
+    clearExpressTurnCredentials();
   });
 
-  const tokenPath = path.join(dir, 'admin-setup-token');
-  const token = (await readFile(tokenPath, 'utf8')).trim();
-  assert.ok(token.length >= 32);
-  assert.equal((await stat(tokenPath)).mode & 0o777, 0o600);
-  assert.equal((await stat(path.join(dir, 'settings.key'))).mode & 0o777, 0o600);
+  const page = await fetchText(base, '/admin/turn');
+  assert.equal(page.status, 503);
+  assert.match(page.text, /ADMIN_PASSWORD/);
+  assert.ok(!page.text.includes(TURN_PASSWORD));
 
-  let cookie = '';
-
-  await t.test('shows the setup form with the token path (never the token)', async () => {
-    const page = await fetchText(server.base, '/admin/turn');
-    assert.equal(page.status, 200);
-    assert.match(page.text, /First-time setup/);
-    assert.match(page.text, /admin-setup-token/);
-    assert.ok(!page.text.includes(token), 'token must never be rendered');
-    assert.ok(!page.text.includes(PASSWORD));
-    assert.equal((await jsonRequest(server.base, 'GET', '/api/admin/turn-settings')).status, 401);
-  });
-
-  await t.test('rejects a wrong token or weak password, then sets the password', async () => {
-    const wrong = await jsonRequest(server.base, 'POST', '/api/admin/setup', {
-      body: { token: 'not-the-right-token-value', password: PASSWORD, confirmPassword: PASSWORD },
-    });
-    assert.equal(wrong.status, 401);
-
-    const weak = await jsonRequest(server.base, 'POST', '/api/admin/setup', {
-      body: { token, password: 'short', confirmPassword: 'short' },
-    });
-    assert.equal(weak.status, 400);
-
-    const mismatch = await jsonRequest(server.base, 'POST', '/api/admin/setup', {
-      body: { token, password: PASSWORD, confirmPassword: 'a-different-password' },
-    });
-    assert.equal(mismatch.status, 400);
-
-    const ok = await jsonRequest(server.base, 'POST', '/api/admin/setup', {
-      body: { token, password: PASSWORD, confirmPassword: PASSWORD },
-    });
-    assert.equal(ok.status, 200);
-    const setCookie = ok.headers.get('set-cookie') || '';
-    assert.match(setCookie, new RegExp(`^${ADMIN_COOKIE_NAME}=`));
-    assert.match(setCookie, /HttpOnly/i);
-    assert.match(setCookie, /SameSite=Strict/i);
-    cookie = setCookie.split(';')[0];
-
-    // The bootstrap token is deleted and cannot be reused.
-    await assert.rejects(readFile(tokenPath, 'utf8'));
-    const reuse = await jsonRequest(server.base, 'POST', '/api/admin/setup', {
-      body: { token, password: PASSWORD, confirmPassword: PASSWORD },
-    });
-    assert.equal(reuse.status, 409);
-  });
-
-
-  await t.test('saves ExpressTURN settings encrypted and never returns the secret', async () => {
-    const initial = await jsonRequest(server.base, 'GET', '/api/admin/turn-settings', { cookie });
-    assert.equal(initial.status, 200);
-    assert.equal(initial.body.adminConfigured, true);
-    assert.equal(initial.body.configured, false);
-    assert.equal(initial.body.keySource, 'key-file');
-    assert.ok(!('secretKey' in initial.body));
-
-    const crossOrigin = await jsonRequest(server.base, 'PUT', '/api/admin/turn-settings', {
-      cookie,
-      origin: 'https://evil.example',
-      body: { host: 'turn.expressturn.com', port: 3478, secretKey: TURN_SECRET },
-    });
-    assert.equal(crossOrigin.status, 403);
-
-    const updated = await jsonRequest(server.base, 'PUT', '/api/admin/turn-settings', {
-      cookie,
-      body: { host: 'turn.expressturn.com', port: 3478, ttlSeconds: 600, secretKey: TURN_SECRET },
-    });
-    assert.equal(updated.status, 200);
-    assert.equal(updated.body.settings.configured, true);
-    assert.ok(!JSON.stringify(updated.body).includes(TURN_SECRET));
-
-    const raw = await readFile(storePath, 'utf8');
-    assert.ok(!raw.includes(TURN_SECRET), 'secret is encrypted on disk');
-    assert.ok(!raw.includes('turn.expressturn.com'));
-    assert.ok(!raw.includes(PASSWORD));
-
-    const page = await fetchText(server.base, '/admin/turn', cookie);
-    assert.equal(page.status, 200);
-    assert.match(page.text, /turn\.expressturn\.com/);
-    assert.ok(!page.text.includes(TURN_SECRET));
-    assert.ok(!page.text.includes(PASSWORD));
-  });
-
-  await t.test('issues ExpressTURN credentials to both roles and survives a restart', async () => {
-    const fixture = await createFixture(server.base, 'expressturn');
-    const icePath = `/api/sessions/${fixture.sessionId}/ice-config`;
-
-    assert.equal((await jsonRequest(server.base, 'GET', icePath)).status, 401);
-    const other = await createFixture(server.base, 'other');
-    const crossSession = await fetch(`${server.base}${icePath}`, {
-      headers: { Authorization: `Bearer ${other.customerKey}` },
-    });
-    assert.equal(crossSession.status, 401);
-
-    for (const key of [fixture.salespersonKey, fixture.customerKey]) {
-      const response = await fetch(`${server.base}${icePath}`, {
-        headers: { Authorization: `Bearer ${key}` },
-      });
-      assert.equal(response.status, 200);
-      const body = (await response.json()) as any;
-      assert.equal(body.turn.provider, 'expressturn');
-      assert.equal(body.turn.credentialMode, 'ephemeral');
-      const entry = body.iceServers.find((server_: any) =>
-        (Array.isArray(server_.urls) ? server_.urls : [server_.urls]).some((url: string) =>
-          url.startsWith('turn')
-        )
-      );
-      assert.equal(entry.credential, hmacCredential(entry.username));
-      assert.ok(!JSON.stringify(body).includes(TURN_SECRET));
-    }
-
-    const health = JSON.stringify((await jsonRequest(server.base, 'GET', '/api/health')).body);
-    assert.ok(!health.includes(TURN_SECRET));
-    assert.ok(!health.includes('turn.expressturn.com'));
-
-    // Restart: new process-style state, same persistent files.
-    await server.close();
-    clearTurnSettingsCache();
-    server = await startServer();
-
-    const login = await jsonRequest(server.base, 'POST', '/api/admin/login', {
-      body: { password: PASSWORD },
-    });
-    assert.equal(login.status, 200);
-    const restartedCookie = (login.headers.get('set-cookie') || '').split(';')[0];
-
-    const status = await jsonRequest(server.base, 'GET', '/api/admin/turn-settings', {
-      cookie: restartedCookie,
-    });
-    assert.equal(status.status, 200);
-    assert.equal(status.body.configured, true);
-    assert.equal(status.body.adminConfigured, true);
-
-    const restartedFixture = await createFixture(server.base, 'after-restart');
-    const restartedIce = await fetch(
-      `${server.base}/api/sessions/${restartedFixture.sessionId}/ice-config`,
-      { headers: { Authorization: `Bearer ${restartedFixture.customerKey}` } }
-    );
-    assert.equal(restartedIce.status, 200);
-    const restartedBody = (await restartedIce.json()) as any;
-    assert.equal(restartedBody.turn.provider, 'expressturn');
-    assert.ok(!JSON.stringify(restartedBody).includes(TURN_SECRET));
-  });
+  assert.equal((await jsonRequest(base, 'GET', '/api/admin/turn-settings')).status, 503);
+  assert.equal(
+    (await jsonRequest(base, 'PUT', '/api/admin/turn-settings', { body: { serverAddress: TURN_ADDRESS } }))
+      .status,
+    503
+  );
+  assert.equal((await jsonRequest(base, 'POST', '/api/admin/login', { body: { password: '' } })).status, 503);
 });
 
-
-test('supports an operator-provided token file (Render secret file) instead of a generated token', async (t) => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'uv-admin-secretfile-'));
-  const tokenPath = path.join(dir, 'operator-token');
-  const token = randomBytes(24).toString('base64url');
-  await writeFile(tokenPath, `${token}\n`, { mode: 0o600 });
-
+test('admin login, credential save/replace, and memory-only status', async (t) => {
   const saved = snapshotEnv();
-  clearTestEnv(path.join(dir, 'settings.enc'));
-  process.env.ADMIN_SETUP_TOKEN_FILE = tokenPath;
-  clearTurnSettingsCache();
+  clearTestEnv();
+  process.env.ADMIN_PASSWORD = ADMIN_PASSWORD;
 
   const server = await startServer();
+  const base = `http://127.0.0.1:${server.port}`;
   t.after(async () => {
     await server.close();
     restoreEnv(saved);
-    clearTurnSettingsCache();
-    await rm(dir, { recursive: true, force: true });
+    clearExpressTurnCredentials();
   });
 
-  const page = await fetchText(server.base, '/admin/turn');
-  assert.equal(page.status, 200);
-  assert.match(page.text, /First-time setup/);
-  assert.match(page.text, /operator-token/);
-  assert.ok(!page.text.includes(token));
+  await t.test('shows an empty login form and rejects wrong credentials', async () => {
+    const page = await fetchText(base, '/admin/turn');
+    assert.equal(page.status, 200);
+    assert.match(page.text, /Sign in/);
+    assert.ok(!page.text.includes(TURN_USERNAME));
+    assert.ok(!page.text.includes(TURN_PASSWORD));
+    assert.ok(!page.text.includes(ADMIN_PASSWORD));
+    assert.ok(!/Secret Key/i.test(page.text));
 
-  // No second, auto-generated token should be created in the store directory.
-  await assert.rejects(readFile(path.join(dir, 'admin-setup-token'), 'utf8'));
+    const wrong = await jsonRequest(base, 'POST', '/api/admin/login', { body: { password: 'nope' } });
+    assert.equal(wrong.status, 401);
 
-  const setup = await jsonRequest(server.base, 'POST', '/api/admin/setup', {
-    body: { token, password: PASSWORD, confirmPassword: PASSWORD },
+    const crossOrigin = await jsonRequest(base, 'POST', '/api/admin/login', {
+      origin: 'https://evil.example',
+      body: { password: ADMIN_PASSWORD },
+    });
+    assert.equal(crossOrigin.status, 403);
   });
-  assert.equal(setup.status, 200);
 
-  // The operator-provided token file is not deleted by the app.
-  assert.match(await readFile(tokenPath, 'utf8'), new RegExp(token));
+  const cookie = await login(base);
+
+  await t.test('never returns credentials in status, page or health', async () => {
+    const initial = await jsonRequest(base, 'GET', '/api/admin/turn-settings', { cookie });
+    assert.equal(initial.status, 200);
+    assert.deepEqual(initial.body, {
+      configured: false,
+      urlCount: 0,
+      updatedAt: null,
+      storage: 'memory',
+    });
+
+    const settingsPage = await fetchText(base, '/admin/turn', cookie);
+    assert.equal(settingsPage.status, 200);
+    assert.match(settingsPage.text, /not configured/);
+    assert.ok(!settingsPage.text.includes(TURN_USERNAME));
+    assert.ok(!settingsPage.text.includes(TURN_PASSWORD));
+
+    const health = await jsonRequest(base, 'GET', '/api/health');
+    assert.ok(!JSON.stringify(health.body).includes(TURN_USERNAME));
+    assert.ok(!JSON.stringify(health.body).includes(TURN_PASSWORD));
+  });
+
+  await t.test('requires the admin session and same-origin writes', async () => {
+    assert.equal((await jsonRequest(base, 'GET', '/api/admin/turn-settings')).status, 401);
+    assert.equal(
+      (
+        await jsonRequest(base, 'PUT', '/api/admin/turn-settings', {
+          body: { serverAddress: TURN_ADDRESS, username: TURN_USERNAME, password: TURN_PASSWORD },
+        })
+      ).status,
+      401
+    );
+    const crossOrigin = await jsonRequest(base, 'PUT', '/api/admin/turn-settings', {
+      cookie,
+      origin: 'https://evil.example',
+      body: { serverAddress: TURN_ADDRESS, username: TURN_USERNAME, password: TURN_PASSWORD },
+    });
+    assert.equal(crossOrigin.status, 403);
+  });
+
+  await t.test('rejects invalid values without echoing them', async () => {
+    const invalid = await jsonRequest(base, 'PUT', '/api/admin/turn-settings', {
+      cookie,
+      body: { serverAddress: 'https://free.expressturn.com', username: TURN_USERNAME, password: TURN_PASSWORD },
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.body.error, 'INVALID_TURN_CREDENTIALS');
+    assert.ok(!JSON.stringify(invalid.body).includes(TURN_PASSWORD));
+    assert.ok(!JSON.stringify(invalid.body).includes(TURN_USERNAME));
+
+    const missingPassword = await jsonRequest(base, 'PUT', '/api/admin/turn-settings', {
+      cookie,
+      body: { serverAddress: TURN_ADDRESS, username: TURN_USERNAME, password: '' },
+    });
+    assert.equal(missingPassword.status, 400);
+    assert.equal((await jsonRequest(base, 'GET', '/api/admin/turn-settings', { cookie })).body.configured, false);
+  });
+
+  await t.test('saves the credentials and never returns them', async () => {
+    const updated = await jsonRequest(base, 'PUT', '/api/admin/turn-settings', {
+      cookie,
+      body: { serverAddress: TURN_ADDRESS, username: TURN_USERNAME, password: TURN_PASSWORD },
+    });
+    assert.equal(updated.status, 200);
+    assert.equal(updated.body.ok, true);
+    assert.equal(updated.body.settings.configured, true);
+    assert.equal(updated.body.settings.urlCount, 1);
+    assert.equal(updated.body.settings.storage, 'memory');
+    const serialized = JSON.stringify(updated.body);
+    assert.ok(!serialized.includes(TURN_USERNAME));
+    assert.ok(!serialized.includes(TURN_PASSWORD));
+    assert.ok(!serialized.includes('free.expressturn.com'));
+
+    const settingsPage = await fetchText(base, '/admin/turn', cookie);
+    assert.match(settingsPage.text, /<dd>configured<\/dd>/);
+    assert.ok(!settingsPage.text.includes(TURN_USERNAME));
+    assert.ok(!settingsPage.text.includes(TURN_PASSWORD));
+  });
+
+  await t.test('replaces the credentials with newly entered values', async () => {
+    const replaced = await jsonRequest(base, 'PUT', '/api/admin/turn-settings', {
+      cookie,
+      body: {
+        serverAddress: 'turn:free.expressturn.com:3480?transport=tcp',
+        username: 'second-user',
+        password: 'second-password',
+      },
+    });
+    assert.equal(replaced.status, 200);
+    assert.equal(replaced.body.settings.urlCount, 1);
+    assert.ok(!JSON.stringify(replaced.body).includes('second-user'));
+
+    const fixture = await createFixture(base, 'replaced');
+    const response = await fetch(`${base}/api/sessions/${fixture.sessionId}/ice-config`, {
+      headers: { Authorization: `Bearer ${fixture.salespersonKey}` },
+    });
+    assert.equal(response.status, 200);
+    const config = (await response.json()) as any;
+    const turnEntry = config.iceServers.find((entry: any) =>
+      (Array.isArray(entry.urls) ? entry.urls : [entry.urls]).some((url: string) => url.startsWith('turn'))
+    );
+    assert.equal(turnEntry.username, 'second-user');
+    assert.equal(turnEntry.credential, 'second-password');
+    assert.deepEqual(turnEntry.urls, ['turn:free.expressturn.com:3480?transport=tcp']);
+  });
+
+  await t.test('signs out by clearing the session cookie', async () => {
+    const logout = await jsonRequest(base, 'POST', '/api/admin/logout', { cookie });
+    assert.equal(logout.status, 200);
+    const cleared = logout.headers.get('set-cookie') || '';
+    assert.match(cleared, new RegExp(`^${ADMIN_COOKIE_NAME}=;`));
+    assert.match(cleared, /Expires=Thu, 01 Jan 1970/);
+  });
 });
 
-test('the setup token, admin password and ExpressTURN secret never reach logs', async (t) => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'uv-admin-logs-'));
+test('ICE configuration reaches only the two authorized session participants', async (t) => {
   const saved = snapshotEnv();
-  clearTestEnv(path.join(dir, 'settings.enc'));
-  clearTurnSettingsCache();
+  clearTestEnv();
+  process.env.ADMIN_PASSWORD = ADMIN_PASSWORD;
+
+  const server = await startServer();
+  const base = `http://127.0.0.1:${server.port}`;
+  t.after(async () => {
+    await server.close();
+    restoreEnv(saved);
+    clearExpressTurnCredentials();
+  });
+
+  const cookie = await login(base);
+  const savedCredentials = await jsonRequest(base, 'PUT', '/api/admin/turn-settings', {
+    cookie,
+    body: { serverAddress: TURN_ADDRESS, username: TURN_USERNAME, password: TURN_PASSWORD },
+  });
+  assert.equal(savedCredentials.status, 200);
+
+  const fixture = await createFixture(base, 'role-isolation');
+  const other = await createFixture(base, 'other-session');
+
+  const sales = await fetch(`${base}/api/sessions/${fixture.sessionId}/ice-config`, {
+    headers: { Authorization: `Bearer ${fixture.salespersonKey}` },
+  });
+  assert.equal(sales.status, 200);
+  const salesConfig = (await sales.json()) as any;
+  assert.equal(salesConfig.turn.provider, 'expressturn');
+  assert.equal(salesConfig.turn.credentialMode, 'static');
+  assert.equal(salesConfig.turn.expiresAt, null);
+  assert.equal(salesConfig.turn.configured, true);
+
+  const customer = await fetch(`${base}/api/sessions/${fixture.sessionId}/ice-config`, {
+    headers: { Authorization: `Bearer ${fixture.customerKey}` },
+  });
+  assert.equal(customer.status, 200);
+  const customerConfig = (await customer.json()) as any;
+
+  const pickTurn = (config: any) =>
+    config.iceServers.find((entry: any) =>
+      (Array.isArray(entry.urls) ? entry.urls : [entry.urls]).some((url: string) => url.startsWith('turn'))
+    );
+  const salesTurn = pickTurn(salesConfig);
+  const customerTurn = pickTurn(customerConfig);
+  assert.deepEqual(salesTurn, {
+    urls: [TURN_ADDRESS],
+    username: TURN_USERNAME,
+    credential: TURN_PASSWORD,
+  });
+  assert.deepEqual(customerTurn, salesTurn);
+
+  // Anonymous, cross-session and unrelated credentials are rejected.
+  assert.equal((await fetch(`${base}/api/sessions/${fixture.sessionId}/ice-config`)).status, 401);
+  assert.equal(
+    (
+      await fetch(`${base}/api/sessions/${fixture.sessionId}/ice-config`, {
+        headers: { Authorization: `Bearer ${other.salespersonKey}` },
+      })
+    ).status,
+    401
+  );
+  assert.equal(
+    (
+      await fetch(`${base}/api/sessions/${other.sessionId}/ice-config`, {
+        headers: { Authorization: `Bearer ${fixture.customerKey}` },
+      })
+    ).status,
+    401
+  );
+
+  // /api/health stays credential-free.
+  const health = await jsonRequest(base, 'GET', '/api/health');
+  assert.ok(!JSON.stringify(health.body).includes(TURN_USERNAME));
+  assert.ok(!JSON.stringify(health.body).includes(TURN_PASSWORD));
+});
+
+test('credentials, admin password and requests never reach the logs', async (t) => {
+  const saved = snapshotEnv();
+  clearTestEnv();
+  process.env.ADMIN_PASSWORD = ADMIN_PASSWORD;
 
   const logMock = t.mock.method(console, 'log');
   const warnMock = t.mock.method(console, 'warn');
   const errorMock = t.mock.method(console, 'error');
 
   const server = await startServer();
+  const base = `http://127.0.0.1:${server.port}`;
   t.after(async () => {
     await server.close();
     restoreEnv(saved);
-    clearTurnSettingsCache();
-    await rm(dir, { recursive: true, force: true });
+    clearExpressTurnCredentials();
   });
 
-  const token = (await readFile(path.join(dir, 'admin-setup-token'), 'utf8')).trim();
-  const setup = await jsonRequest(server.base, 'POST', '/api/admin/setup', {
-    body: { token, password: PASSWORD, confirmPassword: PASSWORD },
-  });
-  assert.equal(setup.status, 200);
-  const cookie = (setup.headers.get('set-cookie') || '').split(';')[0];
-
-  const savedSettings = await jsonRequest(server.base, 'PUT', '/api/admin/turn-settings', {
+  const cookie = await login(base);
+  const save = await jsonRequest(base, 'PUT', '/api/admin/turn-settings', {
     cookie,
-    body: { host: 'turn.expressturn.com', port: 3478, ttlSeconds: 600, secretKey: TURN_SECRET },
+    body: { serverAddress: TURN_ADDRESS, username: TURN_USERNAME, password: TURN_PASSWORD },
   });
-  assert.equal(savedSettings.status, 200);
+  assert.equal(save.status, 200);
 
-  const fixture = await createFixture(server.base, 'logs');
-  const ice = await fetch(`${server.base}/api/sessions/${fixture.sessionId}/ice-config`, {
+  const fixture = await createFixture(base, 'logs');
+  const ice = await fetch(`${base}/api/sessions/${fixture.sessionId}/ice-config`, {
     headers: { Authorization: `Bearer ${fixture.customerKey}` },
   });
   assert.equal(ice.status, 200);
@@ -354,44 +395,8 @@ test('the setup token, admin password and ExpressTURN secret never reach logs', 
     .map((call) => call.arguments.map((value: unknown) => String(value)).join(' '))
     .join('\n');
   assert.ok(allLogs.length > 0, 'the server did log something (sanity check)');
-  assert.ok(!allLogs.includes(token), 'setup token must never be logged');
-  assert.ok(!allLogs.includes(PASSWORD), 'admin password must never be logged');
-  assert.ok(!allLogs.includes(TURN_SECRET), 'ExpressTURN secret must never be logged');
+  assert.ok(!allLogs.includes(ADMIN_PASSWORD), 'admin password must never be logged');
+  assert.ok(!allLogs.includes(TURN_USERNAME), 'TURN username must never be logged');
+  assert.ok(!allLogs.includes(TURN_PASSWORD), 'TURN password must never be logged');
+  assert.ok(!allLogs.includes('free.expressturn.com'), 'TURN URL must never be logged');
 });
-
-test('a corrupt encrypted store degrades safely and never exposes ciphertext', async (t) => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'uv-admin-corrupt-'));
-  const storePath = path.join(dir, 'settings.enc');
-  await writeFile(
-    storePath,
-    JSON.stringify({ v: 2, alg: 'aes-256-gcm', iv: 'AAAA', tag: 'BBBB', data: 'CCCC' })
-  );
-
-  const saved = snapshotEnv();
-  clearTestEnv(storePath);
-  clearTurnSettingsCache();
-
-  const server = await startServer();
-  t.after(async () => {
-    await server.close();
-    restoreEnv(saved);
-    clearTurnSettingsCache();
-    await rm(dir, { recursive: true, force: true });
-  });
-
-  const page = await fetchText(server.base, '/admin/turn');
-  assert.equal(page.status, 503);
-  assert.match(page.text, /could not be decrypted/i);
-  assert.ok(!page.text.includes('CCCC'));
-
-  const fixture = await createFixture(server.base, 'corrupt-store');
-  const response = await fetch(`${server.base}/api/sessions/${fixture.sessionId}/ice-config`, {
-    headers: { Authorization: `Bearer ${fixture.customerKey}` },
-  });
-  assert.equal(response.status, 200);
-  const body = (await response.json()) as any;
-  assert.equal(body.hasTurn, false);
-  assert.ok(body.errors.some((error: string) => /could not be decrypted/i.test(error)));
-  assert.ok(!JSON.stringify(body).includes('CCCC'));
-});
-
