@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "test": "npm run test:unit && npm run test:turn && npm run test:rstream && npm run test:signaling && npm run test:negotiation && npm run test:ai",
+    "test": "npm run test:unit && npm run test:turn && npm run test:rstream && npm run test:rstream-static && npm run test:signaling && npm run test:negotiation && npm run test:ai",
     "test:unit": "node --import tsx --test tests/sessionStore.test.ts",
     "test:signaling": "node --import tsx --test tests/signaling.test.ts",
     "test:negotiation": "node --import tsx --test tests/negotiation.test.ts",
@@ -20,7 +20,8 @@
     "start:prod": "NODE_ENV=production tsx server.ts",
     "verify": "npm run lint && npm run test",
     "test:turn": "node --import tsx --test tests/turn.test.ts",
-    "test:rstream": "node --import tsx --test tests/rstream.test.ts"
+    "test:rstream": "node --import tsx --test tests/rstream.test.ts",
+    "test:rstream-static": "node --import tsx --test tests/rstreamStatic.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

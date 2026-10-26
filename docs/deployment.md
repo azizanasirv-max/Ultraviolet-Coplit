@@ -81,6 +81,10 @@ starts the Vite dev server when `NODE_ENV=production`; the server then serves
 | `RSTREAM_PROJECT_ENDPOINT` | for rstream TURN | rstream project endpoint; the server calls the documented `resolve/<endpoint>` issuance route. |
 | `RSTREAM_PROJECT_ID` | alternative | Project id instead of the endpoint (`/turn-server/credentials` route). |
 | `RSTREAM_API_BASE_URL` | optional | Control plane origin, default `https://rstream.io`. `https://` required except localhost. |
+| `RSTREAM_TURN_USERNAME` | optional (static mode) | Static rstream TURN username from your JSON credential. No API token needed. |
+| `RSTREAM_TURN_CREDENTIAL` | optional (static mode) | Static rstream TURN credential/password from your JSON credential. |
+| `RSTREAM_TURN_URLS` | optional (static mode) | Comma-separated `turn:`/`turns:` URLs from the same rstream JSON. |
+| `RSTREAM_TURN_TTL_SECONDS` | optional | Validity window for the static credential (default 600, clamped 1-3600). **Expiry is not extended automatically.** |
 | `STUN_URLS` | optional | Defaults to Google STUN. |
 | `ICE_TRANSPORT_POLICY` | optional | `all` (default) or `relay` for verification. Relay-only fails with 503 if no usable TURN exists. |
 | `MAX_SESSIONS` | optional | In-memory cap, default 500. |
@@ -96,7 +100,7 @@ create a relay; a relay must run somewhere with public UDP/TCP ingress. Render
 web services only expose HTTP(S), so coturn must run on a VPS/other host (or use
 a managed provider).
 
-Four supported modes, in order of preference:
+Five supported modes, in order of preference:
 
 ### A. coturn with a shared secret (recommended, short-lived, self-hosted)
 
@@ -198,6 +202,36 @@ Render setup:
 4. After redeploy, `GET /api/health` reports
    `ice.credentialMode: "provider"` without exposing any URL, token or
    credential. Real relay media must still be confirmed on two devices.
+
+#### Static rstream JSON credentials (temporary testing, no API token)
+
+For short-lived testing you can paste the `username` / `credential` / `urls`
+values from an rstream TURN JSON response directly into the Render environment:
+
+* `RSTREAM_TURN_USERNAME` — the JSON `username`
+* `RSTREAM_TURN_CREDENTIAL` — the JSON `credential`
+* `RSTREAM_TURN_URLS` — the JSON `urls`, comma-separated
+  (`turn:host:3478?transport=udp,turns:host:5349?transport=tcp`)
+* `RSTREAM_TURN_TTL_SECONDS` — how long you declare them valid (default `600`,
+  clamped to 1–3600; rstream issues at most one hour)
+
+This mode needs **no** `RSTREAM_AUTHENTICATION_TOKEN` and **no** project
+identifier. It is used when the API-based flow above is not configured; if both
+are configured, the API flow wins and these static values act as its fallback.
+
+> **These credentials expire and are NOT renewed automatically.** The server
+> cannot mint new ones without the API flow, and it does not claim otherwise.
+> The TTL window starts when the process first serves the credential. Once
+> `RSTREAM_TURN_TTL_SECONDS` has elapsed, the credential is withheld from ICE
+> responses, `/api/health` reports `hasErrors: true`, and relay-only mode returns
+> 503. To recover, obtain a fresh JSON credential from rstream, update
+> `RSTREAM_TURN_USERNAME` / `RSTREAM_TURN_CREDENTIAL` / `RSTREAM_TURN_URLS` in
+> Render, and redeploy (or restart) so the new values are loaded. A new value
+> starts a new window; the same value is never extended.
+
+Static values are shown to authorized browsers by design (they are the ICE
+credential). They are never written to logs or `/api/health`, and no API token is
+involved in this mode.
 
 ### D. Static credentials (least secure)
 

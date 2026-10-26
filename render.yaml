@@ -49,6 +49,18 @@ services:
         sync: false
       - key: RSTREAM_API_BASE_URL
         sync: false
+      # Optional static rstream TURN JSON credentials for temporary testing.
+      # No API token/project is needed for this mode. These credentials EXPIRE and
+      # must be replaced manually with fresh rstream JSON values; the server does
+      # not renew them. RSTREAM_TURN_URLS is comma-separated.
+      - key: RSTREAM_TURN_USERNAME
+        sync: false
+      - key: RSTREAM_TURN_CREDENTIAL
+        sync: false
+      - key: RSTREAM_TURN_URLS
+        sync: false
+      - key: RSTREAM_TURN_TTL_SECONDS
+        sync: false
       - key: TURN_USERNAME
         sync: false
       - key: TURN_CREDENTIAL
