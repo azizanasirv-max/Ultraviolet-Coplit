@@ -233,6 +233,23 @@ test('prototype2 signaling protocol', async (t) => {
     assert.equal(answer.from, customerJoin.participantId);
     assert.equal(answer.answer.sdp, 'v=0 answer-sdp');
 
+    // C2. The answerer may ask the offerer for an ICE restart (role-checked).
+    customer.send({
+      type: 'ice_restart',
+      sessionId: fixture.sessionId,
+      reason: 'network changed',
+    });
+    const restartRequest = await salesperson.next((message) => message.type === 'ice_restart');
+    assert.equal(restartRequest.from, customerJoin.participantId);
+    assert.equal(restartRequest.fromRole, 'customer');
+    assert.equal(restartRequest.reason, 'network changed');
+
+    salesperson.send({ type: 'ice_restart', sessionId: fixture.sessionId, reason: 'spoofed' });
+    const restartRejection = await salesperson.next(
+      (message) => message.type === 'error' && message.code === 'INVALID_SIGNALING_ROLE'
+    );
+    assert.equal(restartRejection.code, 'INVALID_SIGNALING_ROLE');
+
     customer.send({
       type: 'ice_candidate',
       sessionId: fixture.sessionId,
