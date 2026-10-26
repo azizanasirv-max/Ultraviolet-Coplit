@@ -63,10 +63,8 @@ services:
         sync: false
       # ExpressTURN free-tier credentials are entered at /admin/turn and kept in
       # server memory only (no disk, database, Render Shell or Secret Key).
-      # ADMIN_PASSWORD is the only setting this flow needs; set it here (sync:
-      # false = Render prompts for the value, it is never stored in Git).
-      - key: ADMIN_PASSWORD
-        sync: false
+      # The first visit creates its own setup password in the browser, so no
+      # ADMIN_PASSWORD environment variable is needed or read.
       - key: TURN_USERNAME
         sync: false
       - key: TURN_CREDENTIAL

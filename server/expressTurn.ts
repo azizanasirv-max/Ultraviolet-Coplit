@@ -9,8 +9,10 @@
  * as supplied.
  *
  * Storage is intentionally a module-level variable: the credentials live only in
- * this server process's memory and disappear on restart. Nothing is written to
- * disk, a database or an environment variable.
+ * this server process's memory and disappear on restart. The /admin/turn setup
+ * password (server/admin.ts) is process-local too, so a restart clears the
+ * password hash and the credentials together and the page returns to first-time
+ * setup. Nothing is written to disk, a database or an environment variable.
  */
 
 export interface ExpressTurnCredentials {
