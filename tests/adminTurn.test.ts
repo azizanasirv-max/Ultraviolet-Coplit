@@ -747,4 +747,49 @@ test('setup password and TURN credentials never reach the logs', async (t) => {
   assert.ok(!allLogs.includes(TURN_PASSWORD), 'TURN password must never be logged');
   assert.ok(!allLogs.includes('free.expressturn.com'), 'TURN URL must never be logged');
   assert.ok(!allLogs.includes('scrypt$'), 'the password hash must never be logged');
+
+
+});
+
+test('in-app admin status is public, safe and reflects setup and credentials', async (t) => {
+  const saved = snapshotEnv();
+  clearTestEnv();
+  const server = await startServer();
+  const base = `http://127.0.0.1:${server.port}`;
+  t.after(async () => {
+    await server.close();
+    restoreEnv(saved);
+    clearTestEnv();
+  });
+
+  // Unauthenticated: this is what the in-app Admin Settings panel reads first.
+  const before = await jsonRequest(base, 'GET', '/api/admin/status');
+  assert.equal(before.status, 200);
+  assert.deepEqual(before.body.setup, { claimed: false, claimedAt: null });
+  assert.equal(before.body.configured, false);
+  assert.equal(before.body.urlCount, 0);
+  assert.equal(before.body.updatedAt, null);
+  assert.equal(before.body.storage, 'memory');
+  assert.equal(before.body.csrfToken, undefined, 'status must not mint a session');
+  assert.equal(before.headers.get('cache-control'), 'no-store');
+
+  const session = await claimSetup(base);
+  const afterSetup = await jsonRequest(base, 'GET', '/api/admin/status');
+  assert.equal(afterSetup.status, 200);
+  assert.equal(afterSetup.body.setup.claimed, true);
+  assert.equal(typeof afterSetup.body.setup.claimedAt, 'number');
+  assert.equal(afterSetup.body.configured, false);
+
+  assert.equal((await saveCredentials(base, session)).status, 200);
+  const afterSave = await jsonRequest(base, 'GET', '/api/admin/status');
+  assert.equal(afterSave.status, 200);
+  assert.equal(afterSave.body.configured, true);
+  assert.equal(afterSave.body.urlCount, 1);
+  assert.equal(typeof afterSave.body.updatedAt, 'number');
+
+  // The public probe is a safe-status endpoint, exactly like the authenticated one.
+  const serialized = JSON.stringify(afterSave.body);
+  for (const secret of [TURN_USERNAME, TURN_PASSWORD, TURN_ADDRESS, SETUP_PASSWORD, session.csrf]) {
+    assert.ok(!serialized.includes(secret), `public admin status leaked ${secret}`);
+  }
 });

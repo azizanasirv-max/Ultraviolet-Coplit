@@ -1524,3 +1524,79 @@ test('prototype2 participant audio is non-silent in both directions and independ
     assert.equal(await customerPage.locator('[data-testid="ai-suggestions"]').count(), 0);
   });
 });
+
+test('main app exposes Admin Settings and no Standalone or Prototype 1 UI', async (t) => {
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const base = `http://127.0.0.1:${server.port}`;
+  const browser = await launchBrowser();
+  t.after(async () => {
+    await browser.close();
+    await server.close();
+  });
+
+  const context = await openContext(browser);
+  const page = await context.newPage();
+  await page.goto(`${base}/`, { waitUntil: 'domcontentloaded' });
+
+  // The admin entry point lives in the main app chrome.
+  await page.waitForSelector('[data-testid="admin-settings-open"]', { timeout: 20000 });
+  const shellText = (await page.textContent('body')) || '';
+  assert.ok(!shellText.includes('Prototype 1'), 'Prototype 1 must be removed');
+  assert.ok(!shellText.includes('Standalone'), 'the Standalone tab must be removed');
+  assert.ok(!shellText.includes('Prototype 2 (Live Sales Call)'), 'prototype tabs must be removed');
+
+  await t.test('setup, save TURN credentials and keep the secret out of storage', async () => {
+    await page.click('[data-testid="admin-settings-open"]');
+    await page.waitForSelector('[data-testid="admin-setup-form"]', { timeout: 10000 });
+
+    const setupPassword = 'Browser-Setup-2026!';
+    const turn = {
+      server: 'turn:free.expressturn.com:3478',
+      username: 'browser-turn-user',
+      password: 'browser-turn-secret',
+    };
+
+    await page.fill('[data-testid="admin-setup-password"]', setupPassword);
+    await page.fill('[data-testid="admin-setup-confirm"]', setupPassword);
+    await page.click('[data-testid="admin-setup-form"] button[type="submit"]');
+    await page.waitForSelector('[data-testid="admin-turn-form"]', { timeout: 20000 });
+
+    await page.fill('[data-testid="admin-turn-server"]', turn.server);
+    await page.fill('[data-testid="admin-turn-username"]', turn.username);
+    await page.fill('[data-testid="admin-turn-password"]', turn.password);
+    await page.click('[data-testid="admin-turn-save"]');
+
+    await page.waitForFunction(
+      () => {
+        const status = document.querySelector('[data-testid="admin-status"]');
+        return Boolean(status && /configured \(1 URL\)/.test(status.textContent || ''));
+      },
+      undefined,
+      { timeout: 20000 }
+    );
+
+    // Secrets are cleared from the form and never written to browser storage.
+    assert.equal(await page.inputValue('[data-testid="admin-turn-password"]'), '');
+    const stored = await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }));
+    for (const secret of [turn.password, turn.username, setupPassword]) {
+      assert.ok(!stored.includes(secret), `browser storage leaked ${secret}`);
+    }
+
+    // The server confirms the relay is usable, without returning the credentials.
+    const health = await (await fetch(`${base}/api/health`)).json() as any;
+    assert.equal(health.ice.configured, true);
+    assert.equal(health.hasTurn, true);
+  });
+
+  await t.test('signing out then back in keeps the saved configuration', async () => {
+    await page.click('[data-testid="admin-logout"]');
+    await page.waitForSelector('[data-testid="admin-login-form"]', { timeout: 10000 });
+    await page.fill('[data-testid="admin-login-password"]', 'Browser-Setup-2026!');
+    await page.click('[data-testid="admin-login-form"] button[type="submit"]');
+    await page.waitForSelector('[data-testid="admin-turn-form"]', { timeout: 20000 });
+    const status = (await page.textContent('[data-testid="admin-status"]')) || '';
+    assert.match(status, /configured \(1 URL\)/);
+    assert.doesNotMatch(status, /browser-turn-user|browser-turn-secret/);
+  });
+});
+

@@ -263,8 +263,9 @@ Setup (browser only; no environment variable):
 
 1. Deploy the service (no persistent disk, database, Render Shell or ExpressTURN
    Secret Key involved).
-2. Open `https://<service>/admin/turn`. The first visit shows **First-time
-   setup**. Create a setup password:
+2. Open the app's **Admin Settings** section (button in the top bar of `/` or
+   `/sales`), or `https://<service>/admin/turn` — both drive the same backend.
+   The first visit shows **First-time setup**. Create a setup password:
    * at least 12 characters, using at least three of lowercase, uppercase,
      numbers and symbols;
    * the server stores only a salted **scrypt** hash (N=16384, r=8, p=1) in

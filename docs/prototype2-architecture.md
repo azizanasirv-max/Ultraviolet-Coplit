@@ -9,12 +9,11 @@ limitations.
 
 | Route | Who | Component | Renders |
 | --- | --- | --- | --- |
-| `/sales` | Salesperson | `src/components/prototype2/SalespersonDashboard.tsx` | Active call as the main focus (call icon, status, controls), customer speech, private AI suggestions, invitation screen, diagnostics on demand |
+| `/` and `/sales` | Salesperson / operator | `src/App.tsx` + `src/components/prototype2/SalespersonDashboard.tsx` | Salesperson dashboard plus the **Admin Settings** panel (first-run admin setup and ExpressTURN credentials) |
 | `/join?invite=<token>` | Customer | `src/components/prototype2/CustomerDashboard.tsx` | Invitation redemption, join/leave, mic + speaker controls, connection status, salesperson captions |
-| `/` | Demo/operator | `src/App.tsx` | Prototype selector; the Prototype 2 tab hosts the salesperson dashboard |
 
-The customer route never renders the salesperson dashboard, the prototype tab
-bar, AI status or error text, "AI heard"/listening indicators, AI suggestion
+The customer route never renders the salesperson dashboard, the app chrome,
+AI status or error text, "AI heard"/listening indicators, AI suggestion
 cards, private notes or diagnostics. The salesperson route never renders the
 customer join screen. **A URL parameter such as `?role=customer` grants
 nothing**: `/` with `?prototype=2&room=...&role=customer` renders an explicit
@@ -164,11 +163,12 @@ Salesperson browser                          Customer browser
   static rstream JSON credentials for temporary testing
   (`RSTREAM_TURN_USERNAME`/`RSTREAM_TURN_CREDENTIAL`/`RSTREAM_TURN_URLS`, which
   expire and must be replaced manually), or ExpressTURN static credentials
-  entered by the operator at `/admin/turn` and held only in server memory.
-  The operator creates the `/admin/turn` setup password in the browser on first
-  use (stored as a salted scrypt hash, never as plaintext and never in an
-  environment variable); later changes require that password, a signed
-  `HttpOnly`/`SameSite=Strict` session cookie and a per-session CSRF token.
+  entered by the operator in the app's **Admin Settings** panel (or at
+  `/admin/turn`) and held only in server memory. The operator creates the setup
+  password in the browser on first use (stored as a salted scrypt hash, never as
+  plaintext and never in an environment variable); later changes require that
+  password, a signed `HttpOnly`/`SameSite=Strict` session cookie and a
+  per-session CSRF token.
   Credentials and the setup hash disappear together on restart, returning the
   page to first-time setup. Credentials are never logged and never appear in
   `/api/health`.

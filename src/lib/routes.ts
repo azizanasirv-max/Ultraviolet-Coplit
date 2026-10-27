@@ -3,7 +3,7 @@
 export type RouteInfo =
   | { kind: 'salesperson' }
   | { kind: 'customer'; inviteToken: string; legacyInvitation: boolean }
-  | { kind: 'prototype-tabs' };
+  | { kind: 'app' };
 
 export const readRoute = (location: Location = window.location): RouteInfo => {
   const path = location.pathname.replace(/\/+$/, '') || '/';
@@ -29,7 +29,7 @@ export const readRoute = (location: Location = window.location): RouteInfo => {
     return { kind: 'customer', inviteToken: '', legacyInvitation: true };
   }
 
-  return { kind: 'prototype-tabs' };
+  return { kind: 'app' };
 };
 
 export const navigate = (path: string): void => {
