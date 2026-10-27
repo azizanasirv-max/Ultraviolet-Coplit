@@ -857,9 +857,24 @@ export const SalespersonDashboard: React.FC = () => {
                       ['remote', snapshot?.diagnostics.remoteTrackState ?? 'none'],
                       ['rtp out', `${snapshot?.diagnostics.bytesSent ?? 0} B`],
                       ['rtp in', `${snapshot?.diagnostics.bytesReceived ?? 0} B`],
+                      ['audio flow', snapshot?.diagnostics.audioFlow ?? 'none'],
+                      [
+                        'audio last in',
+                        snapshot?.diagnostics.lastMediaAgoMs === null ||
+                        snapshot?.diagnostics.lastMediaAgoMs === undefined
+                          ? 'never'
+                          : `${Math.round(snapshot.diagnostics.lastMediaAgoMs / 1000)}s ago`,
+                      ],
                       ['captions', snapshot?.captionStatus ?? 'off'],
                       ['ice policy', snapshot?.diagnostics.iceTransportPolicy ?? 'unknown'],
-                      ['turn', snapshot ? `${snapshot.turnConfigured ? 'configured' : 'none'} / ${snapshot.turnCredentialMode}` : 'unknown'],
+                      [
+                        'turn',
+                        snapshot
+                          ? snapshot.turnConfigured
+                            ? `configured / ${snapshot.turnCredentialMode}`
+                            : 'none — no relay, cross-network audio will fail'
+                          : 'unknown',
+                      ],
                       ['relay candidates', String(snapshot?.relayCandidates ?? 0)],
                       ['dtls', snapshot?.diagnostics.dtlsState ?? 'none'],
                     ]}

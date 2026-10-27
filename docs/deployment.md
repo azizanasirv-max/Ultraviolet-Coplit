@@ -349,7 +349,14 @@ Work from the server outward; do not assume TURN is the cause:
 4. Browser devtools console for the salesperson page shows the engine log
    (`ICE configuration attempt …`, `addIceCandidate failed`, etc.). The customer
    page never shows these.
-5. Server log: `[ice]` lines for provider/rstream failures and unexpected ICE
+5. `audio flow` reads `both` during a call. `outbound-only` means the peer is not
+   hearing this device; `inbound-only` means this device is not hearing the peer;
+   `none` with `pc connected` means no media path (typically no TURN). The engine
+   also logs `Peer connection is connected but no audio has arrived ...` and
+   starts a bounded ICE restart on its own after 8 s without any inbound RTP
+   (20 s if audio had been flowing and stopped). It never restarts ICE because a
+   background tab was throttled.
+6. Server log: `[ice]` lines for provider/rstream failures and unexpected ICE
    build errors (which now return a JSON 500 instead of crashing the process).
 
 Only relay candidates from a *confirmed working* TURN server prove the relay is

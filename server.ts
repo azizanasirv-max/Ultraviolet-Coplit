@@ -1135,6 +1135,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       'aiConnected', 'aiState', 'aiAudioReaching', 'aiLastResponseAt', 'aiReconnectAttempt',
       'reconnectAttempt', 'candidates', 'iceConfigLoaded', 'turnConfigured',
       'turnCredentialMode', 'relayCandidates', 'mediaFlowing', 'dtlsState',
+      'audioFlow', 'lastMediaAgoMs',
     ]);
     const out: Record<string, unknown> = {};
     for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {

@@ -109,7 +109,14 @@ class FakePeerConnection {
   setConfigurationCalls: any[] = [];
   failCreateOffer = false;
   failSetLocalDescription = false;
-  senders: Array<{ track: FakeTrack; replaceTrack: (track: FakeTrack) => Promise<void> }> = [];
+  senders: Array<{
+    track: FakeTrack | null;
+    replaceTrack: (track: FakeTrack | null) => Promise<void>;
+  }> = [];
+  transceivers: Array<{ receiver: any; direction: string; sender: any }> = [];
+  /** Configurable getStats() output: inbound/outbound audio RTP counters. */
+  inboundBytes = 0;
+  outboundBytes = 0;
   closed = false;
 
   constructor(configuration: any) {
@@ -119,13 +126,28 @@ class FakePeerConnection {
   }
 
   addTrack(track: FakeTrack) {
-    this.senders.push({
-      track,
-      replaceTrack: async (next: FakeTrack) => {
-        const sender = this.senders.find((item) => item.track === track);
-        if (sender) sender.track = next;
+    const sender = {
+      track: track as FakeTrack | null,
+      replaceTrack: async (next: FakeTrack | null) => {
+        sender.track = next;
       },
-    });
+    };
+    this.senders.push(sender);
+    return sender;
+  }
+
+  /** Mirrors Chrome: the sender appears in getSenders() with no track yet. */
+  addTransceiver(kind: string, init?: { direction?: string }) {
+    const sender = {
+      track: null as FakeTrack | null,
+      replaceTrack: async (next: FakeTrack | null) => {
+        sender.track = next;
+      },
+    };
+    const transceiver = { receiver: { kind }, direction: init?.direction ?? 'sendrecv', sender };
+    this.transceivers.push(transceiver);
+    this.senders.push(sender);
+    return transceiver;
   }
 
   getSenders() {
@@ -185,7 +207,22 @@ class FakePeerConnection {
   }
 
   getStats() {
-    return Promise.resolve(new Map());
+    const reports = new Map<string, any>();
+    reports.set('inbound', {
+      id: 'inbound',
+      type: 'inbound-rtp',
+      kind: 'audio',
+      bytesReceived: this.inboundBytes,
+      packetsReceived: Math.floor(this.inboundBytes / 160),
+    });
+    reports.set('outbound', {
+      id: 'outbound',
+      type: 'outbound-rtp',
+      kind: 'audio',
+      bytesSent: this.outboundBytes,
+      packetsSent: Math.floor(this.outboundBytes / 160),
+    });
+    return Promise.resolve(reports);
   }
 
   close() {
@@ -346,12 +383,15 @@ const installFetch = (
   };
 };
 
+/** Which capture every getUserMedia() call returns. Tests may override it. */
+let micStreamFactory: () => FakeStream = () => new FakeStream();
+
 Object.defineProperty(globalThis, 'navigator', {
   configurable: true,
   value: {
     language: 'en-US',
     onLine: true,
-    mediaDevices: { getUserMedia: async () => new FakeStream() },
+    mediaDevices: { getUserMedia: async () => micStreamFactory() },
   },
 });
 
@@ -383,10 +423,16 @@ const setupPeer = async (
     iceConfigRetryDelaysMs?: readonly number[];
     iceConfigTimeoutMs?: number;
     connectWatchdogMs?: number;
+    mediaFlowCheckMs?: number;
+    mediaFlowGraceMs?: number;
+    mediaStallMs?: number;
+    /** Initial microphone capture (defaults to a fresh live fake track). */
+    micStream?: () => FakeStream;
   } = {}
 ): Promise<Harness> => {
   FakePeerConnection.instances = [];
   FakeWebSocket.instances = [];
+  micStreamFactory = options.micStream ?? (() => new FakeStream());
   installFetch({ iceFetch: options.iceFetch, healthPolicy: options.healthPolicy });
 
   const snapshots: any[] = [];
@@ -404,6 +450,9 @@ const setupPeer = async (
     iceConfigRetryDelaysMs: options.iceConfigRetryDelaysMs ?? [1, 1],
     iceConfigTimeoutMs: options.iceConfigTimeoutMs ?? 500,
     connectWatchdogMs: options.connectWatchdogMs ?? 20000,
+    mediaFlowCheckMs: options.mediaFlowCheckMs ?? 60000,
+    mediaFlowGraceMs: options.mediaFlowGraceMs ?? 60000,
+    mediaStallMs: options.mediaStallMs ?? 60000,
     createAiSession: () => {
       const session = new FakeUltravoxSession();
       sessions.push(session);
@@ -1165,4 +1214,120 @@ test('a peer connection that never connects is bounded by the watchdog', async t
     pc.createOfferCalls.some((call) => call.iceRestart),
     'the watchdog must start the bounded ICE-restart recovery'
   );
+});
+
+test('a peer connection always negotiates an outbound audio m-line for a late microphone', async t => {
+  // The capture exists but the track already ended (permission revoked, device
+  // switched, or recovery in progress) when the peer connection is created.
+  const dead = () => new FakeStream([Object.assign(new FakeTrack('dead'), { readyState: 'ended' })]);
+  const { engine, ws, pc } = await setupPeer('salesperson', { micStream: dead });
+  t.after(async () => engine.stop('test finished'));
+
+  assert.equal(pc.transceivers.length, 1, 'an audio transceiver must always be negotiated');
+  assert.equal(pc.transceivers[0].direction, 'sendrecv');
+  assert.equal(pc.senders.length, 1, 'the transceiver must expose a sender');
+  assert.equal(pc.senders[0].track, null, 'no dead track may be attached');
+
+  await answerOffer(ws, pc);
+  const offersBeforeRecovery = ws.offers().length;
+
+  // Level one: the microphone becomes available after negotiation.
+  const live = new FakeStream([new FakeTrack('live')]);
+  micStreamFactory = () => live;
+  await (engine as any).recoverLocalTrack('microphone returned');
+  await sleep(10);
+
+  assert.equal(pc.senders.length, 1, 'recovery must replace the track, not add a second sender');
+  assert.ok(pc.senders[0].track, 'the recovered microphone must reach the peer connection');
+  assert.equal((pc.senders[0].track as FakeTrack).readyState, 'live');
+  assert.equal(engine.getSnapshot().localSenderCount, 1);
+
+  // The recovered microphone is renegotiated so the peer receives the m-line.
+  assert.ok(ws.offers().length > offersBeforeRecovery, 'the salesperson must renegotiate the new sender');
+});
+
+test('re-acquiring the microphone stops the previous capture', async t => {
+  let capture: FakeStream | null = null;
+  const { engine, pc } = await setupPeer('salesperson', {
+    micStream: () => {
+      capture = new FakeStream([new FakeTrack('first')]);
+      return capture;
+    },
+  });
+  t.after(async () => engine.stop('test finished'));
+
+  const previous = (capture as unknown as FakeStream).getAudioTracks()[0];
+  assert.equal(previous.readyState, 'live');
+
+  micStreamFactory = () => new FakeStream([new FakeTrack('second')]);
+  await (engine as any).recoverLocalTrack('track ended');
+  await sleep(10);
+
+  assert.equal(previous.readyState, 'ended', 'the stale capture must not stay hot');
+  assert.equal(pc.senders.length, 1);
+  assert.equal(pc.senders[0].track?.readyState, 'live');
+  assert.equal(pc.senders[0].track?.id, 'second');
+});
+
+test('a connected call with no audio recovers instead of reporting success', async t => {
+  const { engine, ws, pc } = await setupPeer('salesperson', {
+    mediaFlowCheckMs: 5,
+    mediaFlowGraceMs: 10,
+    mediaStallMs: 10,
+    iceRestartVerifyMs: 15,
+  });
+  t.after(async () => engine.stop('test finished'));
+
+  await answerOffer(ws, pc);
+  // ICE + DTLS connect, but no RTP ever arrives: the classic "connected but
+  // silent" call. Sender statistics exist, inbound is zero.
+  pc.outboundBytes = 4000;
+  pc.__setConnectionState('connected');
+  await sleep(30);
+
+  assert.equal(pc.createOfferCalls.filter((call) => call.iceRestart).length >= 1, true,
+    'a silent connected call must trigger an ICE restart');
+
+  // Answer every restart offer the way the real customer would; only the
+  // audio itself stays missing.
+  for (let index = 0; index < 8; index += 1) {
+    await answerOffer(ws, pc);
+    await sleep(40);
+  }
+
+  // After the bounded attempts it must stop and report an actionable failure.
+  await sleep(200);
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.callState, 'failed', `state=${snapshot.callState} logs=${snapshot.logs.join(' | ')}`);
+  assert.match(String(snapshot.lastError), /could not be established/i);
+});
+
+test('real inbound audio prevents the media watchdog from restarting ICE', async t => {
+  const { engine, ws, pc } = await setupPeer('salesperson', {
+    mediaFlowCheckMs: 5,
+    mediaFlowGraceMs: 10,
+    mediaStallMs: 60,
+    iceRestartVerifyMs: 15,
+  });
+  t.after(async () => engine.stop('test finished'));
+
+  await answerOffer(ws, pc);
+  pc.outboundBytes = 8000;
+  pc.inboundBytes = 5000;
+  pc.__setConnectionState('connected');
+
+  for (let index = 0; index < 4; index += 1) {
+    pc.inboundBytes += 2000;
+    pc.outboundBytes += 2500;
+    await (engine as any).sampleStats();
+    await sleep(15);
+  }
+
+  assert.equal(
+    pc.createOfferCalls.filter((call) => call.iceRestart).length,
+    0,
+    'audio that is actually arriving must never cause an ICE restart'
+  );
+  assert.equal(engine.getSnapshot().diagnostics.audioFlow, 'both');
+  assert.equal(engine.getSnapshot().diagnostics.mediaFlowing, true);
 });

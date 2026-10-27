@@ -273,6 +273,34 @@ Echo: the customer may hear the salesperson through the device speaker while the
 microphone picks it up. Browser echo cancellation is enabled on the capture;
 headphones remove the residual risk.
 
+### Verified audio path guarantees
+
+Direction by direction, the participant path guarantees:
+
+1. **An outbound audio m-line always exists.** The peer connection is created
+   with the microphone attached (`addTrack`) or, when no live capture exists yet,
+   with a `sendrecv` audio transceiver. A microphone acquired later is attached
+   with `replaceTrack`, so a late/denied-then-granted capture cannot leave a
+   "connected but one-way silent" call. Using `replaceTrack` also avoids a
+   renegotiation race with the single-offerer policy.
+2. **One capture per participant.** Re-acquiring the microphone stops the
+   previous `MediaStreamTrack`. Without that, a recovered call left the old
+   capture hot (privacy) and competing with the new one (the second concurrent
+   capture is what mutes the P2P track on some mobile browsers).
+3. **A connected transport is not a working call.** After ICE+DTLS connect, the
+   engine keeps sampling `getStats()`. If no inbound RTP ever arrives (grace
+   8 s) or media stops for 20 s, it starts the bounded recovery sequence **with
+   `force`**, which refreshes the TURN payload and performs an ICE restart.
+   Without the force flag `runRecoveryAttempt()` would just re-report
+   `connected`. The restart budget is not reset until audio is observed again,
+   so a path that reconnects silently fails honestly instead of looping.
+4. **Background tabs are excluded** from the stall decision, because a throttled
+   timer is not evidence of lost media.
+5. **Direction diagnostics.** The snapshot exposes `diagnostics.audioFlow`
+   (`both` / `inbound-only` / `outbound-only` / `none`) and
+   `diagnostics.lastMediaAgoMs`; the salesperson panel renders both. "I can hear
+   them but they cannot hear me" is now a readable state, not a guess.
+
 ## 4. Diagnostics
 
 Both dashboards show a details panel with:
@@ -388,8 +416,41 @@ when it occurs.
 
 See [deployment.md](./deployment.md) for the exact fix and Render settings.
 
-## 7. Environment variables
+### Production participant-audio diagnosis (live evidence)
 
+`GET https://ultraviolet-coplit.onrender.com/api/health` on the deployed service
+returns (checked while working on PR #12):
+
+```json
+{ "ice": { "configured": false, "credentialMode": "none",
+           "iceTransportPolicy": "all",
+           "warnings": ["No usable TURN relay is configured. Calls work only when
+             both devices can reach each other directly; mobile-data or
+             symmetric-NAT participants will have no audio."] },
+  "hasTurn": false, "publicAppUrl": null,
+  "appUrlWarnings": ["APP_URL is not set ..."], "uptimeSeconds": 20 }
+```
+
+Conclusions that are supported by that response:
+
+1. The running process has **no TURN relay at all**, so participant media can
+   only use direct host/srflx candidates. One side of a call from a
+   CGNAT/mobile/symmetric-NAT network gets no media path; the AI path still
+   works because Ultravox/LiveKit uses its own relay infrastructure.
+2. The ExpressTURN settings are **process memory only**. `uptimeSeconds: 20`
+   shows a fresh process (Render spin-down/wake-up or a redeploy), so anything
+   entered at `/admin/turn` earlier is gone and must be re-entered after every
+   restart.
+3. `APP_URL` is unset, so invitations fall back to the request host. Not an
+   audio cause, but it must be configured for a stable public origin.
+
+What cannot be concluded from the health endpoint: whether ExpressTURN accepts
+the operator's credentials, whether a relay candidate was gathered, or what the
+selected candidate pair was. Those need `/admin/turn` to be configured and a
+real two-network call; `relay candidates > 0` plus a `relay` selected pair in
+the salesperson panel is the only local proof that the relay works.
+
+## 7. Environment variables
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `ULTRAVOX_API_KEY` | yes | Server-side Ultravox call creation. Never sent to clients. |
@@ -422,6 +483,18 @@ that must be added.
 * No real TURN relay was available during development: relay media flow is NOT
   verified. Static and short-lived credential generation, provider fetching (with
   mocked HTTP) and the relay-only fail-fast path are covered by automated tests.
+* The deployed Render service currently reports `hasTurn: false` (see §6), so
+  participant audio across networks cannot work there until `/admin/turn` is
+  configured. Because those settings live only in process memory, they must be
+  re-entered after every restart/spin-down/redeploy.
+* Silent-call detection is derived from RTP counters (`getStats()`), not from
+  decoded acoustics, in production. The automated tests do decode the received
+  audio, but only in Chromium on the same host.
+* The customer device still captures the microphone twice (participant path +
+  Ultravox SDK), so the AI capture competes with the participant capture on
+  hardware that allows only one capture at a time. Now the engine releases stale
+  captures and recovers the participant track, but it cannot share one capture
+  with the SDK's public API.
 * Static TURN credentials, when used instead of `TURN_SECRET`, are delivered to
   every authorized browser and cannot be rotated per session.
 * Managed-provider response shapes are covered by mocks; no live vendor API was
