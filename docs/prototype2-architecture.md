@@ -9,12 +9,11 @@ limitations.
 
 | Route | Who | Component | Renders |
 | --- | --- | --- | --- |
-| `/sales` | Salesperson | `src/components/prototype2/SalespersonDashboard.tsx` | Active call as the main focus (call icon, status, controls), customer speech, private AI suggestions, invitation screen, diagnostics on demand |
+| `/` and `/sales` | Salesperson / operator | `src/App.tsx` + `src/components/prototype2/SalespersonDashboard.tsx` | Salesperson dashboard plus the **Admin Settings** panel (first-run admin setup and ExpressTURN credentials) |
 | `/join?invite=<token>` | Customer | `src/components/prototype2/CustomerDashboard.tsx` | Invitation redemption, join/leave, mic + speaker controls, connection status, salesperson captions |
-| `/` | Demo/operator | `src/App.tsx` | Prototype selector; the Prototype 2 tab hosts the salesperson dashboard |
 
-The customer route never renders the salesperson dashboard, the prototype tab
-bar, AI status or error text, "AI heard"/listening indicators, AI suggestion
+The customer route never renders the salesperson dashboard, the app chrome,
+AI status or error text, "AI heard"/listening indicators, AI suggestion
 cards, private notes or diagnostics. The salesperson route never renders the
 customer join screen. **A URL parameter such as `?role=customer` grants
 nothing**: `/` with `?prototype=2&room=...&role=customer` renders an explicit
@@ -164,11 +163,12 @@ Salesperson browser                          Customer browser
   static rstream JSON credentials for temporary testing
   (`RSTREAM_TURN_USERNAME`/`RSTREAM_TURN_CREDENTIAL`/`RSTREAM_TURN_URLS`, which
   expire and must be replaced manually), or ExpressTURN static credentials
-  entered by the operator at `/admin/turn` and held only in server memory.
-  The operator creates the `/admin/turn` setup password in the browser on first
-  use (stored as a salted scrypt hash, never as plaintext and never in an
-  environment variable); later changes require that password, a signed
-  `HttpOnly`/`SameSite=Strict` session cookie and a per-session CSRF token.
+  entered by the operator in the app's **Admin Settings** panel (or at
+  `/admin/turn`) and held only in server memory. The operator creates the setup
+  password in the browser on first use (stored as a salted scrypt hash, never as
+  plaintext and never in an environment variable); later changes require that
+  password, a signed `HttpOnly`/`SameSite=Strict` session cookie and a
+  per-session CSRF token.
   Credentials and the setup hash disappear together on restart, returning the
   page to first-time setup. Credentials are never logged and never appear in
   `/api/health`.
@@ -273,6 +273,34 @@ Echo: the customer may hear the salesperson through the device speaker while the
 microphone picks it up. Browser echo cancellation is enabled on the capture;
 headphones remove the residual risk.
 
+### Verified audio path guarantees
+
+Direction by direction, the participant path guarantees:
+
+1. **An outbound audio m-line always exists.** The peer connection is created
+   with the microphone attached (`addTrack`) or, when no live capture exists yet,
+   with a `sendrecv` audio transceiver. A microphone acquired later is attached
+   with `replaceTrack`, so a late/denied-then-granted capture cannot leave a
+   "connected but one-way silent" call. Using `replaceTrack` also avoids a
+   renegotiation race with the single-offerer policy.
+2. **One capture per participant.** Re-acquiring the microphone stops the
+   previous `MediaStreamTrack`. Without that, a recovered call left the old
+   capture hot (privacy) and competing with the new one (the second concurrent
+   capture is what mutes the P2P track on some mobile browsers).
+3. **A connected transport is not a working call.** After ICE+DTLS connect, the
+   engine keeps sampling `getStats()`. If no inbound RTP ever arrives (grace
+   8 s) or media stops for 20 s, it starts the bounded recovery sequence **with
+   `force`**, which refreshes the TURN payload and performs an ICE restart.
+   Without the force flag `runRecoveryAttempt()` would just re-report
+   `connected`. The restart budget is not reset until audio is observed again,
+   so a path that reconnects silently fails honestly instead of looping.
+4. **Background tabs are excluded** from the stall decision, because a throttled
+   timer is not evidence of lost media.
+5. **Direction diagnostics.** The snapshot exposes `diagnostics.audioFlow`
+   (`both` / `inbound-only` / `outbound-only` / `none`) and
+   `diagnostics.lastMediaAgoMs`; the salesperson panel renders both. "I can hear
+   them but they cannot hear me" is now a readable state, not a guess.
+
 ## 4. Diagnostics
 
 Both dashboards show a details panel with:
@@ -311,18 +339,22 @@ rising while `answers` stays 0) without reading the frontend console.
 | `npm run test:unit` | `SessionStore`: session/credential isolation, role mismatch, single-use invitation, rotation/revocation, expiry, resume identity, duplicate prevention, AI call clearing, AI liveness vs call record, no plaintext secrets | 13/13 pass |
 | `npm run test:turn` | ICE/TURN unit tests (synthetic env + mocked provider HTTP): URL parsing, static/ephemeral/provider credentials, HMAC correctness, relay-only fail-fast, provider caching/failure, no secret leakage | 17/17 pass |
 | `npm run test:signaling` | Real HTTP + WebSocket server: join authentication, role enforcement, offer/answer/ICE relay including the customer's role-checked `ice_restart` request, AI text relay to the salesperson only, cross-session isolation, reconnect identity, `peer_left`, invalid JSON, diagnostics authorization, customer-only Ultravox call, **AI call rotation, failed-creation retry, AI status relay/role enforcement/redaction, customer-disconnect AI state**, authenticated ICE endpoint, TURN static/ephemeral/provider delivery, relay misconfiguration, APP_URL, AI readiness without a key, secrecy | 31/31 pass |
-| `npm run test:negotiation` | Deterministic fake WebRTC/WebSocket: repeated `session_state` never creates a duplicate offer, no offer while `have-local-offer`, queued ICE restart runs when stable, an unanswered offer is rolled back and retried within a bounded budget, signaling-send/createOffer/setLocalDescription failures each consume one bounded attempt, bounded recovery reaches terminal with no busy loop, a later attempt within budget can recover, watchdog never rolls back an in-flight answer, a failed answer re-arms the watchdog, stale-peer answers cannot cancel a new watchdog, signaling rejoin after terminal starts a fresh negotiation, duplicate failure events coalesce, no PC churn after terminal, replacement cancels timers/ignores stale callbacks, customer restart request path, transient disconnect, AI independence | 17/17 pass |
+| `npm run test:negotiation` | Deterministic fake WebRTC/WebSocket: repeated `session_state` never creates a duplicate offer, no offer while `have-local-offer`, queued ICE restart runs when stable, an unanswered offer is rolled back and retried within a bounded budget, signaling-send/createOffer/setLocalDescription failures each consume one bounded attempt, bounded recovery reaches terminal with no busy loop, a later attempt within budget can recover, watchdog never rolls back an in-flight answer, a failed answer re-arms the watchdog, stale-peer answers cannot cancel a new watchdog, signaling rejoin after terminal starts a fresh negotiation, duplicate failure events coalesce, no PC churn after terminal, replacement cancels timers/ignores stale callbacks, customer restart request path, transient disconnect, AI independence, **late microphone attaches through a sendrecv transceiver + replaceTrack with one sender**, **microphone recovery stops the stale capture**, **a connected call with no inbound RTP recovers through a forced bounded ICE restart and then fails honestly**, **real inbound RTP never causes an ICE restart** | 28/28 pass |
 | `npm run test:ai` | **Mocked `UltravoxSession` + mocked `fetch`**: new-call-per-retry, connected only from live SDK status, mic-published reporting, abnormal-close recovery, stale-callback isolation, bounded retries with real error text, duplicate-retry suppression, salesperson restart over signaling, AI failure leaves WebRTC state untouched | 8/8 pass |
-| `npm run test:browser` | Chromium, two isolated browser contexts, synthetic media: role-specific UIs, invitation scoping/replay rejection, legacy URL rejection, bidirectional RTP, `<audio>` playing, mute/unmute on both sides, reconnect without duplicate participants/tracks, **presence-refresh flood smoke test (real Chromium; the deterministic suite is the D1 regression proof)**, AI text on the correct dashboard, AI failure isolated **and visible on the salesperson dashboard**, **salesperson-triggered AI restart without dropping audio**, **rotated invitation creates a new AI call**, server-side client diagnostics, TURN applied to every PC (incl. reconnect), relay-only policy applied, relay-only-without-TURN refuses to start, no credential leakage in DOM/snapshot | 22/22 pass |
+| `npm run test:browser` | Chromium, two isolated browser contexts, synthetic media: role-specific UIs, invitation scoping/replay rejection, legacy URL rejection, bidirectional RTP, `<audio>` playing, mute/unmute on both sides, reconnect without duplicate participants/tracks, **presence-refresh flood smoke test (real Chromium; the deterministic suite is the D1 regression proof)**, AI text on the correct dashboard, AI failure isolated **and visible on the salesperson dashboard**, **salesperson-triggered AI restart without dropping audio**, **rotated invitation creates a new AI call**, server-side client diagnostics, TURN applied to every PC (incl. reconnect), relay-only policy applied, relay-only-without-TURN refuses to start, no credential leakage in DOM/snapshot, **two browser instances with different microphone tones (440 Hz / 1200 Hz) prove non-silent decoded audio in each direction independently with matching inbound RTP bytes/packets/audioLevel**, **the AI capture is a separate capture and an AI failure never interrupts participant audio**, **reconnect leaves exactly one live, enabled capture and audio still flowing**, **the customer DOM shows no RTP/ICE/TURN error or AI internals** | 30/30 pass |
 | `npm run build` | Production Vite build | pass |
 | `npm run lint` | `tsc --noEmit` | pass |
 
 ### What synthetic tests do NOT prove
 
 Chromium's fake audio device proves that signaling, negotiation, track routing,
-RTP flow and element playback work. It does **not** prove acoustic quality,
-speaker/microphone behaviour, echo, Bluetooth routing, iOS autoplay, or
-connectivity across carrier NATs. Those require the two-device plan below.
+RTP flow, decoded remote audio energy and element playback work. The tone test
+decodes the received stream and requires the *other* participant's frequency in
+each direction, so a duplicated or silent stream fails. It does **not** prove
+acoustic quality, speaker/microphone behaviour, echo, Bluetooth routing, iOS
+autoplay, or connectivity across carrier NATs — everything ran on one host with
+host candidates and no relay. Those require the two-device plan below and a
+configured TURN relay.
 
 The AI lifecycle tests use a **fake `UltravoxSession` and a mocked provider
 HTTP call**. They prove that the app requests a new call instead of reusing a
@@ -388,8 +420,41 @@ when it occurs.
 
 See [deployment.md](./deployment.md) for the exact fix and Render settings.
 
-## 7. Environment variables
+### Production participant-audio diagnosis (live evidence)
 
+`GET https://ultraviolet-coplit.onrender.com/api/health` on the deployed service
+returns (checked while working on PR #12):
+
+```json
+{ "ice": { "configured": false, "credentialMode": "none",
+           "iceTransportPolicy": "all",
+           "warnings": ["No usable TURN relay is configured. Calls work only when
+             both devices can reach each other directly; mobile-data or
+             symmetric-NAT participants will have no audio."] },
+  "hasTurn": false, "publicAppUrl": null,
+  "appUrlWarnings": ["APP_URL is not set ..."], "uptimeSeconds": 20 }
+```
+
+Conclusions that are supported by that response:
+
+1. The running process has **no TURN relay at all**, so participant media can
+   only use direct host/srflx candidates. One side of a call from a
+   CGNAT/mobile/symmetric-NAT network gets no media path; the AI path still
+   works because Ultravox/LiveKit uses its own relay infrastructure.
+2. The ExpressTURN settings are **process memory only**. `uptimeSeconds: 20`
+   shows a fresh process (Render spin-down/wake-up or a redeploy), so anything
+   entered at `/admin/turn` earlier is gone and must be re-entered after every
+   restart.
+3. `APP_URL` is unset, so invitations fall back to the request host. Not an
+   audio cause, but it must be configured for a stable public origin.
+
+What cannot be concluded from the health endpoint: whether ExpressTURN accepts
+the operator's credentials, whether a relay candidate was gathered, or what the
+selected candidate pair was. Those need `/admin/turn` to be configured and a
+real two-network call; `relay candidates > 0` plus a `relay` selected pair in
+the salesperson panel is the only local proof that the relay works.
+
+## 7. Environment variables
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `ULTRAVOX_API_KEY` | yes | Server-side Ultravox call creation. Never sent to clients. |
@@ -422,6 +487,18 @@ that must be added.
 * No real TURN relay was available during development: relay media flow is NOT
   verified. Static and short-lived credential generation, provider fetching (with
   mocked HTTP) and the relay-only fail-fast path are covered by automated tests.
+* The deployed Render service currently reports `hasTurn: false` (see §6), so
+  participant audio across networks cannot work there until `/admin/turn` is
+  configured. Because those settings live only in process memory, they must be
+  re-entered after every restart/spin-down/redeploy.
+* Silent-call detection is derived from RTP counters (`getStats()`), not from
+  decoded acoustics, in production. The automated tests do decode the received
+  audio, but only in Chromium on the same host.
+* The customer device still captures the microphone twice (participant path +
+  Ultravox SDK), so the AI capture competes with the participant capture on
+  hardware that allows only one capture at a time. Now the engine releases stale
+  captures and recovers the participant track, but it cannot share one capture
+  with the SDK's public API.
 * Static TURN credentials, when used instead of `TURN_SECRET`, are delivered to
   every authorized browser and cannot be rotated per session.
 * Managed-provider response shapes are covered by mocks; no live vendor API was

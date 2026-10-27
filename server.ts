@@ -615,62 +615,8 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
   });
 
   // -------------------------------------------------------------------------
-  // Prototype 1 (single-speaker engine test) and shared endpoints
+  // Shared session endpoints
   // -------------------------------------------------------------------------
-
-  app.post('/api/ultravox/call', async (req, res) => {
-    const apiKey = ultravoxApiKey();
-    if (!apiKey) {
-      res.status(503).json({
-        error: 'MISSING_API_KEY',
-        message: 'The server is missing ULTRAVOX_API_KEY. Ask the operator to configure it.',
-      });
-      return;
-    }
-
-    const { systemPrompt, temperature = 0.1 } = req.body || {};
-
-    try {
-      const response = await fetchImpl('https://api.ultravox.ai/api/calls', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-        body: JSON.stringify({
-          model: 'ultravox-v0.7',
-          initialOutputMedium: 'MESSAGE_MEDIUM_TEXT',
-          maxDuration: '3600s',
-          systemPrompt:
-            typeof systemPrompt === 'string' && systemPrompt.trim()
-              ? systemPrompt.slice(0, 4000)
-              : 'You are a sales copilot assistant. Provide brief, concise text responses when prompted.',
-          temperature: typeof temperature === 'number' ? temperature : 0.1,
-        }),
-      });
-
-      if (!response.ok) {
-        const errText = await response.text();
-        res.status(response.status).json({
-          error: 'ULTRAVOX_API_ERROR',
-          status: response.status,
-          message: `Ultravox API returned HTTP ${response.status}`,
-          details: errText.slice(0, 500),
-        });
-        return;
-      }
-
-      const data = (await response.json()) as Record<string, unknown>;
-      res.json({
-        callId: data.callId,
-        joinUrl: data.joinUrl,
-        model: data.model || 'ultravox-v0.7',
-        created: data.created,
-      });
-    } catch (err) {
-      res.status(502).json({
-        error: 'ULTRAVOX_UNREACHABLE',
-        message: (err as Error)?.message || 'Failed to contact Ultravox.',
-      });
-    }
-  });
 
   /**
    * ICE/TURN configuration for one authenticated participant.
@@ -943,6 +889,18 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     csrfToken: session.csrfToken,
   });
 
+  /**
+   * Public, unauthenticated readiness probe for the in-app Admin Settings panel.
+   * It decides whether the panel shows first-time setup or sign-in. Only safe
+   * flags are returned: never the TURN URL, username, password or hash.
+   */
+  app.get('/api/admin/status', (_req, res) => {
+    res.json({
+      setup: getAdminSetupStatus(),
+      ...getExpressTurnStatus(),
+    });
+  });
+
   app.get(['/admin', '/admin/turn'], (req, res) => {
     res.setHeader(
       'Content-Security-Policy',
@@ -1135,6 +1093,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       'aiConnected', 'aiState', 'aiAudioReaching', 'aiLastResponseAt', 'aiReconnectAttempt',
       'reconnectAttempt', 'candidates', 'iceConfigLoaded', 'turnConfigured',
       'turnCredentialMode', 'relayCandidates', 'mediaFlowing', 'dtlsState',
+      'audioFlow', 'lastMediaAgoMs',
     ]);
     const out: Record<string, unknown> = {};
     for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {

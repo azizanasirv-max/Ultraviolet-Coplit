@@ -9,6 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { Browser, BrowserContext, Page, chromium } from 'playwright';
 import WebSocket from 'ws';
@@ -79,8 +80,23 @@ const waitFor = async <T>(fn: () => Promise<T | null>, predicate: (value: T) => 
 const openContext = async (browser: Browser): Promise<BrowserContext> => {
   const context = await browser.newContext({ permissions: ['microphone'] });
   await context.addInitScript(() => {
+    // tsx/esbuild annotates function names inside page.evaluate() bodies with a
+    // `__name()` helper. Define it so serialized test callbacks can run.
+    (window as any).__name = (fn: unknown) => fn;
     const Original = window.RTCPeerConnection;
     (window as any).__pcs = [];
+    // Registry of every microphone track handed to this page, so a test can
+    // prove that recovery/reconnect leaves exactly one live capture.
+    (window as any).__micTracks = [];
+    const mediaDevices = navigator.mediaDevices;
+    if (mediaDevices?.getUserMedia) {
+      const originalGetUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+      mediaDevices.getUserMedia = async (constraints?: MediaStreamConstraints) => {
+        const stream = await originalGetUserMedia(constraints);
+        (window as any).__micTracks.push(...stream.getAudioTracks());
+        return stream;
+      };
+    }
     const originalCreateOffer = (Original.prototype as any).createOffer as (
       this: any,
       ...args: any[]
@@ -1093,3 +1109,494 @@ test('relay-only ICE failure shows the customer a plain message after recovery i
   await salespersonContext.close();
   await customerContext.close();
 });
+
+// ---------------------------------------------------------------------------
+// Real audio energy, both directions, independent per browser instance
+//
+// Each browser captures a DIFFERENT tone as its microphone. That makes the two
+// directions distinguishable: if the salesperson's remote stream carries the
+// customer's tone (and not its own), the customer audio genuinely travelled over
+// WebRTC, and vice versa. Energy, not "a track exists", is the assertion.
+// ---------------------------------------------------------------------------
+
+const toneDir = path.join(os.tmpdir(), `uv-tones-${process.pid}`);
+
+/** Writes a 16-bit mono WAV tone that Chromium loops as the fake microphone. */
+const writeToneWav = (file: string, hz: number, sampleRate = 48000, seconds = 2): string => {
+  const frames = sampleRate * seconds;
+  const buffer = Buffer.alloc(44 + frames * 2);
+  buffer.write('RIFF', 0);
+  buffer.writeUInt32LE(36 + frames * 2, 4);
+  buffer.write('WAVE', 8);
+  buffer.write('fmt ', 12);
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20);
+  buffer.writeUInt16LE(1, 22);
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(sampleRate * 2, 28);
+  buffer.writeUInt16LE(2, 32);
+  buffer.writeUInt16LE(16, 34);
+  buffer.write('data', 36);
+  buffer.writeUInt32LE(frames * 2, 40);
+  for (let index = 0; index < frames; index += 1) {
+    buffer.writeInt16LE(
+      Math.round(Math.sin((2 * Math.PI * hz * index) / sampleRate) * 12000),
+      44 + index * 2
+    );
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, buffer);
+  return file;
+};
+
+const SALESPERSON_TONE_HZ = 440;
+const CUSTOMER_TONE_HZ = 1200;
+
+/** One browser instance whose fake microphone plays one specific tone. */
+const launchToneBrowser = (wav: string): Promise<Browser> =>
+  chromium.launch({
+    args: [
+      '--use-fake-device-for-media-stream',
+      '--use-fake-ui-for-media-stream',
+      `--use-file-for-fake-audio-capture=${wav}`,
+      '--autoplay-policy=no-user-gesture-required',
+      '--no-sandbox',
+    ],
+  });
+
+interface AudioProbe {
+  remote: { rms: number; peak: number; dominantHz: number; frames: number };
+  local: { rms: number; peak: number; dominantHz: number };
+  micTracks: Array<{ id: string; readyState: string; enabled: boolean; muted: boolean }>;
+  liveMicrophoneTracks: number;
+  element: { paused: boolean; muted: boolean; hasStream: boolean; tracks: number };
+  stats: {
+    inbound: { bytes: number; packets: number } | null;
+    outbound: { bytes: number; packets: number } | null;
+    pair: { localType: string | null; remoteType: string | null } | null;
+  };
+  openPcs: number;
+}
+
+/**
+ * Measures the decoded remote audio (the <audio> element's stream) and the
+ * local capture, plus the real RTP counters, inside one browser context.
+ */
+const probeAudio = (page: Page, durationMs = 2600): Promise<AudioProbe> =>
+  page.evaluate(async (duration) => {
+    const element = document.querySelector('[data-testid="remote-audio"]') as HTMLAudioElement | null;
+    const remote = (element?.srcObject as MediaStream | null) ?? null;
+    const pcs = ((window as any).__pcs || []).filter((pc: any) => pc.connectionState !== 'closed');
+    const pc = pcs[0];
+    const localTrack = pc
+      ?.getSenders()
+      .map((sender: any) => sender.track)
+      .find((track: any) => track && track.kind === 'audio') ?? null;
+
+    const context = new AudioContext();
+    await context.resume();
+    const buffer = new Float32Array(4096);
+
+    const measure = async (stream: MediaStream | null, withSpectrum: boolean) => {
+      if (!stream) return { rms: 0, peak: 0, dominantHz: 0 };
+      const source = context.createMediaStreamSource(stream);
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 4096;
+      analyser.smoothingTimeConstant = 0;
+      source.connect(analyser);
+      // Only frequencyBinCount (fftSize / 2) entries are ever written.
+      const spectrum = new Float32Array(analyser.frequencyBinCount);
+      const bins = new Float64Array(analyser.frequencyBinCount);
+      const binHz = context.sampleRate / analyser.fftSize;
+      let peak = 0;
+      let sumSq = 0;
+      let samples = 0;
+      const started = Date.now();
+      while (Date.now() - started < duration) {
+        analyser.getFloatTimeDomainData(buffer);
+        for (let index = 0; index < buffer.length; index += 1) {
+          peak = Math.max(peak, Math.abs(buffer[index]));
+          sumSq += buffer[index] * buffer[index];
+        }
+        samples += buffer.length;
+        if (withSpectrum) {
+          analyser.getFloatFrequencyData(spectrum);
+          for (let index = 0; index < spectrum.length; index += 1) {
+            bins[index] += Number.isFinite(spectrum[index]) ? Math.pow(10, spectrum[index] / 20) : 0;
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      }
+      let best = 0;
+      for (let index = 1; index < bins.length; index += 1) if (bins[index] > bins[best]) best = index;
+      source.disconnect();
+      analyser.disconnect();
+      return {
+        rms: Math.sqrt(sumSq / Math.max(1, samples)),
+        peak,
+        dominantHz: Math.round(best * binHz),
+      };
+    };
+
+    const remoteResult = await measure(remote, true);
+    const localResult = await measure(localTrack ? new MediaStream([localTrack]) : null, true);
+    await context.close();
+
+    const stats: AudioProbe['stats'] = { inbound: null, outbound: null, pair: null };
+    if (pc) {
+      const report = await pc.getStats();
+      const candidates = new Map<string, any>();
+      report.forEach((entry: any) => {
+        if (entry.type === 'local-candidate' || entry.type === 'remote-candidate') {
+          candidates.set(entry.id, entry);
+        }
+      });
+      report.forEach((entry: any) => {
+        if (entry.type === 'inbound-rtp' && entry.kind === 'audio') {
+          stats.inbound = { bytes: entry.bytesReceived, packets: entry.packetsReceived };
+        }
+        if (entry.type === 'outbound-rtp' && entry.kind === 'audio') {
+          stats.outbound = { bytes: entry.bytesSent, packets: entry.packetsSent };
+        }
+        if (entry.type === 'candidate-pair' && (entry.nominated || entry.selected) && entry.state === 'succeeded') {
+          stats.pair = {
+            localType: candidates.get(entry.localCandidateId)?.candidateType ?? null,
+            remoteType: candidates.get(entry.remoteCandidateId)?.candidateType ?? null,
+          };
+        }
+      });
+    }
+
+    const micTracks = ((window as any).__micTracks || []).map((track: MediaStreamTrack) => ({
+      id: track.id,
+      readyState: track.readyState,
+      enabled: track.enabled,
+      muted: track.muted,
+    }));
+
+    return {
+      remote: { ...remoteResult, frames: 1 },
+      local: localResult,
+      micTracks,
+      liveMicrophoneTracks: micTracks.filter((track: any) => track.readyState === 'live').length,
+      element: {
+        paused: element?.paused ?? true,
+        muted: element?.muted ?? true,
+        hasStream: Boolean(remote),
+        tracks: remote ? remote.getAudioTracks().length : 0,
+      },
+      stats,
+      openPcs: pcs.length,
+    };
+  }, durationMs);
+
+test('prototype2 participant audio is non-silent in both directions and independent of the AI path', async (t) => {
+  const salesWav = writeToneWav(path.join(toneDir, 'sales.wav'), SALESPERSON_TONE_HZ);
+  const customerWav = writeToneWav(path.join(toneDir, 'customer.wav'), CUSTOMER_TONE_HZ);
+
+  const server = await createPrototype2Server({
+    port: 0,
+    serveFrontend: true,
+    ultravoxFetch: fakeUltravoxFetch,
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  const salesBrowser = await launchToneBrowser(salesWav);
+  const customerBrowser = await launchToneBrowser(customerWav);
+  t.after(async () => {
+    await salesBrowser.close();
+    await customerBrowser.close();
+    await server.close();
+  });
+
+  const salespersonContext = await openContext(salesBrowser);
+  const salespersonPage = await salespersonContext.newPage();
+  const customerContext = await openContext(customerBrowser);
+  const customerPage = await customerContext.newPage();
+
+  // Which page asked the server to create an AI call. Only the customer device
+  // is allowed to; the salesperson microphone must never be forwarded to the AI.
+  const ultravoxRequests: Array<{ url: string; page: string }> = [];
+  for (const [page, label] of [
+    [salespersonPage, 'salesperson'],
+    [customerPage, 'customer'],
+  ] as Array<[Page, string]>) {
+    page.on('request', (request) => {
+      if (request.url().includes('/ultravox-call')) ultravoxRequests.push({ url: request.url(), page: label });
+    });
+  }
+
+  await salespersonPage.goto(`${base}/sales`, { waitUntil: 'domcontentloaded' });
+  const inviteUrl = await readInvitationAndOpenDashboard(salespersonPage);
+  await customerPage.goto(inviteUrl, { waitUntil: 'domcontentloaded' });
+  await customerPage.waitForSelector('[data-testid="customer-prejoin"]', { timeout: 20000 });
+
+  await salespersonPage.click('[data-testid="join-call"]');
+  await customerPage.click('[data-testid="join-call"]');
+
+  await waitFor(
+    () => snapshot(salespersonPage),
+    (value) => value.callState === 'connected' && value.mediaFlowing === true,
+    40000
+  );
+  await waitFor(
+    () => snapshot(customerPage),
+    (value) => value.callState === 'connected' && value.mediaFlowing === true,
+    40000
+  );
+
+  const near = (actual: number, expected: number, tolerance = 90) => Math.abs(actual - expected) <= tolerance;
+
+  await t.test('customer microphone reaches the salesperson as non-silent audio', async () => {
+    const probe = await probeAudio(salespersonPage);
+    assert.equal(probe.element.hasStream, true, 'the salesperson must have a remote stream');
+    assert.equal(probe.element.tracks, 1);
+    assert.equal(probe.element.paused, false, 'remote audio must actually be playing');
+    assert.equal(probe.element.muted, false);
+    assert.ok(probe.remote.rms > 0.004, `customer audio energy too low (rms ${probe.remote.rms})`);
+    assert.ok(probe.remote.peak > 0.02, `customer audio peak too low (peak ${probe.remote.peak})`);
+    assert.ok(
+      near(probe.remote.dominantHz, CUSTOMER_TONE_HZ),
+      `salesperson must receive the customer tone (${CUSTOMER_TONE_HZ} Hz), got ${probe.remote.dominantHz} Hz`
+    );
+    // The salesperson's own capture is the other tone: the two directions are
+    // not the same stream and nothing is duplicated.
+    assert.ok(
+      near(probe.local.dominantHz, SALESPERSON_TONE_HZ),
+      `salesperson local capture should be ${SALESPERSON_TONE_HZ} Hz, got ${probe.local.dominantHz} Hz`
+    );
+    assert.ok(probe.stats.inbound && probe.stats.inbound.bytes > 0, 'inbound RTP bytes must increase');
+    assert.ok(probe.stats.inbound && probe.stats.inbound.packets > 0, 'inbound RTP packets must arrive');
+    assert.equal(probe.openPcs, 1);
+  });
+
+  await t.test('salesperson microphone reaches the customer as non-silent audio', async () => {
+    const probe = await probeAudio(customerPage);
+    assert.equal(probe.element.hasStream, true, 'the customer must have a remote stream');
+    assert.equal(probe.element.paused, false);
+    assert.equal(probe.element.muted, false);
+    assert.ok(probe.remote.rms > 0.004, `salesperson audio energy too low (rms ${probe.remote.rms})`);
+    assert.ok(probe.remote.peak > 0.02, `salesperson audio peak too low (peak ${probe.remote.peak})`);
+    assert.ok(
+      near(probe.remote.dominantHz, SALESPERSON_TONE_HZ),
+      `customer must receive the salesperson tone (${SALESPERSON_TONE_HZ} Hz), got ${probe.remote.dominantHz} Hz`
+    );
+    assert.ok(
+      near(probe.local.dominantHz, CUSTOMER_TONE_HZ),
+      `customer local capture should be ${CUSTOMER_TONE_HZ} Hz, got ${probe.local.dominantHz} Hz`
+    );
+    assert.ok(probe.stats.inbound && probe.stats.inbound.bytes > 0);
+    assert.ok(probe.stats.outbound && probe.stats.outbound.bytes > 0);
+    assert.equal(probe.openPcs, 1);
+  });
+
+  await t.test('the AI path is separate: its capture is not the participant audio path', async () => {
+    // The customer device is the only one that may start an Ultravox session.
+    assert.equal(
+      ultravoxRequests.filter((entry) => entry.page === 'salesperson').length,
+      0,
+      'the salesperson device must never request an Ultravox call'
+    );
+    assert.ok(
+      ultravoxRequests.some((entry) => entry.page === 'customer'),
+      'the customer device must still request the AI call'
+    );
+
+    // The AI transport (LiveKit) opens its own microphone capture. Reproduce
+    // exactly that: a second capture while the call is live must carry audio,
+    // and closing it must not disturb the participant audio path.
+    const aiCapture = await customerPage.evaluate(async () => {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      const context = new AudioContext();
+      await context.resume();
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 4096;
+      context.createMediaStreamSource(stream).connect(analyser);
+      const buffer = new Float32Array(analyser.fftSize);
+      let peak = 0;
+      const started = Date.now();
+      while (Date.now() - started < 900) {
+        analyser.getFloatTimeDomainData(buffer);
+        for (let index = 0; index < buffer.length; index += 1) peak = Math.max(peak, Math.abs(buffer[index]));
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      }
+      const info = {
+        peak,
+        tracks: stream.getAudioTracks().map((track) => track.readyState),
+      };
+      // Exactly what UltravoxSession.leaveCall() does to its local track.
+      stream.getTracks().forEach((track) => track.stop());
+      await context.close();
+      return info;
+    });
+    assert.ok(aiCapture.peak > 0.02, 'the AI capture must receive the customer microphone');
+    assert.deepEqual(aiCapture.tracks, ['live']);
+
+    // An AI failure (this environment has no reachable Ultravox) must not end
+    // the human call: it stays connected and audio keeps flowing.
+    const customer = await waitFor(
+      () => snapshot(customerPage),
+      (value) => value.callState === 'connected' && value.mediaFlowing === true,
+      20000
+    );
+    assert.ok(['error', 'reconnecting', 'creating', 'connecting'].includes(customer.ai.state));
+
+    const salespersonAfterAiFailure = await waitFor(
+      () => snapshot(salespersonPage),
+      (value) => value.callState === 'connected' && value.mediaFlowing === true,
+      20000
+    );
+    assert.equal(salespersonAfterAiFailure.callState, 'connected');
+
+    // Audio in both directions survives the AI capture closing and the AI error.
+    const salesProbe = await probeAudio(salespersonPage);
+    assert.ok(salesProbe.remote.peak > 0.02, 'customer audio must continue after the AI capture closes');
+    assert.ok(near(salesProbe.remote.dominantHz, CUSTOMER_TONE_HZ), `got ${salesProbe.remote.dominantHz} Hz`);
+
+    const customerProbe = await probeAudio(customerPage);
+    assert.ok(customerProbe.remote.peak > 0.02, 'salesperson audio must continue after the AI error');
+    assert.ok(near(customerProbe.remote.dominantHz, SALESPERSON_TONE_HZ), `got ${customerProbe.remote.dominantHz} Hz`);
+  });
+
+  await t.test('reconnecting leaves one live microphone track and working audio', async () => {
+    await customerPage.click('[data-testid="reconnect"]');
+
+    await waitFor(
+      () => snapshot(customerPage),
+      (value) => value.callState === 'connected' && value.mediaFlowing === true,
+      45000
+    );
+    await waitFor(
+      () => snapshot(salespersonPage),
+      (value) => value.callState === 'connected' && value.mediaFlowing === true,
+      45000
+    );
+
+    const customerProbe = await probeAudio(customerPage);
+    assert.equal(customerProbe.openPcs, 1, 'exactly one peer connection may stay open');
+    assert.equal(
+      customerProbe.liveMicrophoneTracks,
+      1,
+      `a reconnect must not leave a stale capture: ${JSON.stringify(customerProbe.micTracks)}`
+    );
+    const liveTrack = customerProbe.micTracks.filter((track) => track.readyState === 'live')[0];
+    assert.ok(liveTrack, 'the customer must still hold exactly one live capture');
+    assert.equal(liveTrack.enabled, true, 'the microphone must not stay disabled');
+
+    const salesProbe = await probeAudio(salespersonPage);
+    assert.ok(salesProbe.remote.peak > 0.02, 'customer audio must flow again after the reconnect');
+    assert.ok(
+      near(salesProbe.remote.dominantHz, CUSTOMER_TONE_HZ),
+      `salesperson must still receive the customer tone, got ${salesProbe.remote.dominantHz} Hz`
+    );
+    assert.ok(
+      salesProbe.stats.inbound && salesProbe.stats.inbound.packets > 0,
+      'inbound RTP packets must arrive after the reconnect'
+    );
+    assert.equal(
+      salesProbe.liveMicrophoneTracks,
+      1,
+      `a reconnect must not leave a stale capture: ${JSON.stringify(salesProbe.micTracks)}`
+    );
+
+    const customerAudio = await snapshot(customerPage);
+    assert.ok(customerAudio.mediaFlowing, 'the customer must report working audio');
+    assert.equal(customerAudio.diagnostics.audioFlow, 'both');
+  });
+
+  await t.test('the customer never sees internal audio diagnostics or AI internals', async () => {
+    const text = (await customerPage.textContent('[data-testid="role-customer"]')) || '';
+    for (const token of [
+      'diagnostic',
+      'suggestion',
+      'rtp',
+      'ICE',
+      'TURN',
+      'candidate',
+      'Ultravox',
+      'blob:',
+      'Error:',
+    ]) {
+      assert.ok(!text.includes(token), `customer DOM leaked "${token}"`);
+    }
+    assert.equal(await customerPage.locator('[data-testid="diagnostics-panel"]').count(), 0);
+    assert.equal(await customerPage.locator('[data-testid="ai-suggestions"]').count(), 0);
+  });
+});
+
+test('main app exposes Admin Settings and no Standalone or Prototype 1 UI', async (t) => {
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const base = `http://127.0.0.1:${server.port}`;
+  const browser = await launchBrowser();
+  t.after(async () => {
+    await browser.close();
+    await server.close();
+  });
+
+  const context = await openContext(browser);
+  const page = await context.newPage();
+  await page.goto(`${base}/`, { waitUntil: 'domcontentloaded' });
+
+  // The admin entry point lives in the main app chrome.
+  await page.waitForSelector('[data-testid="admin-settings-open"]', { timeout: 20000 });
+  const shellText = (await page.textContent('body')) || '';
+  assert.ok(!shellText.includes('Prototype 1'), 'Prototype 1 must be removed');
+  assert.ok(!shellText.includes('Standalone'), 'the Standalone tab must be removed');
+  assert.ok(!shellText.includes('Prototype 2 (Live Sales Call)'), 'prototype tabs must be removed');
+
+  await t.test('setup, save TURN credentials and keep the secret out of storage', async () => {
+    await page.click('[data-testid="admin-settings-open"]');
+    await page.waitForSelector('[data-testid="admin-setup-form"]', { timeout: 10000 });
+
+    const setupPassword = 'Browser-Setup-2026!';
+    const turn = {
+      server: 'turn:free.expressturn.com:3478',
+      username: 'browser-turn-user',
+      password: 'browser-turn-secret',
+    };
+
+    await page.fill('[data-testid="admin-setup-password"]', setupPassword);
+    await page.fill('[data-testid="admin-setup-confirm"]', setupPassword);
+    await page.click('[data-testid="admin-setup-form"] button[type="submit"]');
+    await page.waitForSelector('[data-testid="admin-turn-form"]', { timeout: 20000 });
+
+    await page.fill('[data-testid="admin-turn-server"]', turn.server);
+    await page.fill('[data-testid="admin-turn-username"]', turn.username);
+    await page.fill('[data-testid="admin-turn-password"]', turn.password);
+    await page.click('[data-testid="admin-turn-save"]');
+
+    await page.waitForFunction(
+      () => {
+        const status = document.querySelector('[data-testid="admin-status"]');
+        return Boolean(status && /configured \(1 URL\)/.test(status.textContent || ''));
+      },
+      undefined,
+      { timeout: 20000 }
+    );
+
+    // Secrets are cleared from the form and never written to browser storage.
+    assert.equal(await page.inputValue('[data-testid="admin-turn-password"]'), '');
+    const stored = await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }));
+    for (const secret of [turn.password, turn.username, setupPassword]) {
+      assert.ok(!stored.includes(secret), `browser storage leaked ${secret}`);
+    }
+
+    // The server confirms the relay is usable, without returning the credentials.
+    const health = await (await fetch(`${base}/api/health`)).json() as any;
+    assert.equal(health.ice.configured, true);
+    assert.equal(health.hasTurn, true);
+  });
+
+  await t.test('signing out then back in keeps the saved configuration', async () => {
+    await page.click('[data-testid="admin-logout"]');
+    await page.waitForSelector('[data-testid="admin-login-form"]', { timeout: 10000 });
+    await page.fill('[data-testid="admin-login-password"]', 'Browser-Setup-2026!');
+    await page.click('[data-testid="admin-login-form"] button[type="submit"]');
+    await page.waitForSelector('[data-testid="admin-turn-form"]', { timeout: 20000 });
+    const status = (await page.textContent('[data-testid="admin-status"]')) || '';
+    assert.match(status, /configured \(1 URL\)/);
+    assert.doesNotMatch(status, /browser-turn-user|browser-turn-secret/);
+  });
+});
+

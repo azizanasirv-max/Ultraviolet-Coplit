@@ -1,4 +1,4 @@
-# Render Blueprint for Prototype 2.
+# Render Blueprint for Sales Copilot.
 #
 # Build/runtime strategy (single, reproducible): npm + committed package-lock.json.
 #   - `npm ci --include=dev` installs the exact locked tree, including build tools.

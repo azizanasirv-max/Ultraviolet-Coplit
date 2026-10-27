@@ -263,8 +263,9 @@ Setup (browser only; no environment variable):
 
 1. Deploy the service (no persistent disk, database, Render Shell or ExpressTURN
    Secret Key involved).
-2. Open `https://<service>/admin/turn`. The first visit shows **First-time
-   setup**. Create a setup password:
+2. Open the app's **Admin Settings** section (button in the top bar of `/` or
+   `/sales`), or `https://<service>/admin/turn` — both drive the same backend.
+   The first visit shows **First-time setup**. Create a setup password:
    * at least 12 characters, using at least three of lowercase, uppercase,
      numbers and symbols;
    * the server stores only a salted **scrypt** hash (N=16384, r=8, p=1) in
@@ -283,8 +284,16 @@ Setup (browser only; no environment variable):
    `ice.credentialMode: "static"` and `ice.provider: "expressturn"`.
 
 No `ADMIN_PASSWORD` (or any other environment variable) is required. If an
-older deployment still defines `ADMIN_PASSWORD`, it is ignored and can be
-removed.
+older deployment still defines `ADMIN_PASSWORD`, it is ignored and can be removed.
+
+**Is the deployed service running this flow?** Two credential-free checks:
+
+* `curl -s https://<service>/admin/turn | grep 'First-time setup'` returns the
+  setup form (no environment variable involved). A redirect or 404 means an
+  older build is deployed.
+* `curl -s -o /dev/null -w '%{http_code}' https://<service>/api/admin/turn-settings`
+  returns `401`; `.../api/health` shows only `ice.configured` /
+  `ice.credentialMode` (never a username or credential).
 
 **Restart / redeploy — safely reclaiming setup.** The setup-password hash and
 the ExpressTURN credentials live only in this server process's memory. A restart
@@ -349,7 +358,14 @@ Work from the server outward; do not assume TURN is the cause:
 4. Browser devtools console for the salesperson page shows the engine log
    (`ICE configuration attempt …`, `addIceCandidate failed`, etc.). The customer
    page never shows these.
-5. Server log: `[ice]` lines for provider/rstream failures and unexpected ICE
+5. `audio flow` reads `both` during a call. `outbound-only` means the peer is not
+   hearing this device; `inbound-only` means this device is not hearing the peer;
+   `none` with `pc connected` means no media path (typically no TURN). The engine
+   also logs `Peer connection is connected but no audio has arrived ...` and
+   starts a bounded ICE restart on its own after 8 s without any inbound RTP
+   (20 s if audio had been flowing and stopped). It never restarts ICE because a
+   background tab was throttled.
+6. Server log: `[ice]` lines for provider/rstream failures and unexpected ICE
    build errors (which now return a JSON 500 instead of crashing the process).
 
 Only relay candidates from a *confirmed working* TURN server prove the relay is

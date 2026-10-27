@@ -70,6 +70,12 @@ export interface CallDiagnostics {
   playbackError: string | null;
   hasTurn: boolean;
   iceTransportPolicy: 'all' | 'relay';
+  /** RTP is arriving right now (the only proof of working inbound audio). */
+  mediaFlowing: boolean;
+  /** Which RTP directions produced bytes in the last sample (diagnosis aid). */
+  audioFlow: 'both' | 'inbound-only' | 'outbound-only' | 'none';
+  /** Milliseconds since the last inbound RTP increase (null = never). */
+  lastMediaAgoMs: number | null;
 }
 
 export interface EngineSnapshot {
@@ -157,6 +163,12 @@ export interface CallEngineOptions {
   iceConfigRetryDelaysMs?: readonly number[];
   /** Test seam: how long a peer connection may stay unconnected before recovery. */
   connectWatchdogMs?: number;
+  /** Test seam: how often a connected call is checked for real audio. */
+  mediaFlowCheckMs?: number;
+  /** Test seam: grace for a connected call that has never delivered RTP. */
+  mediaFlowGraceMs?: number;
+  /** Test seam: allowed silence after audio was flowing. */
+  mediaStallMs?: number;
 }
 
 const RECONNECT_BASE_DELAY_MS = 800;
@@ -198,6 +210,23 @@ const ICE_RESTART_VERIFY_MS = 10000;
  * candidate is discarded). The watchdog starts the bounded recovery sequence.
  */
 const CONNECT_WATCHDOG_MS = 20000;
+/**
+ * A `connected` peer connection proves ICE+DTLS, not that audio is flowing. A
+ * call that connects but delivers no RTP (dead relay path, one-way NAT, blocked
+ * media port range) is silent for as long as nothing checks. This is how long a
+ * freshly connected call may deliver no inbound RTP before recovery starts, and
+ * how long media may stop mid-call before the same recovery runs.
+ */
+const MEDIA_FLOW_CHECK_MS = 4000;
+/** Grace for a freshly connected call that has never delivered any RTP. */
+const MEDIA_FLOW_GRACE_MS = 8000;
+/**
+ * Allowed silence before a call that WAS carrying audio is treated as broken.
+ * Kept generous: two people not talking for twenty seconds is not a fault.
+ */
+const MEDIA_STALL_MS = 20000;
+/** Inbound RTP this recent is reported as ``mediaFlowing`` in the snapshot. */
+const MEDIA_FLOW_FRESH_MS = 5000;
 /** A `disconnected` transport may recover on its own; only then is it broken. */
 const DISCONNECT_GRACE_MS = 4000;
 /** Actionable, credential-free terminal error shown to both participants. */
@@ -348,6 +377,13 @@ export class CallEngine {
   private negotiationAttempts = 0;
   private iceRestartAttempts = 0;
   private iceRestartInFlight = false;
+  /**
+   * True while a recovery was started because the call was connected but no
+   * audio was arriving. The ICE-restart budget must keep counting until audio
+   * is actually observed, otherwise a transport that reconnects silently would
+   * reset the budget forever.
+   */
+  private awaitingMediaAfterRecovery = false;
   /** True while an ICE-credential refresh is running as part of recovery. */
   private recoveryAttemptInFlight = false;
   private pendingIceRestartReason: string | null = null;
@@ -366,6 +402,9 @@ export class CallEngine {
   private iceRestartVerifyTimer: number | null = null;
   private disconnectGraceTimer: number | null = null;
   private connectWatchdog: number | null = null;
+  private mediaWatchdog: number | null = null;
+  /** Sender that carries this participant's microphone to the peer. */
+  private audioSender: RTCRtpSender | null = null;
 
   // Negotiation state
   private participantId: string | null = null;
@@ -441,6 +480,9 @@ export class CallEngine {
     playbackError: null,
     hasTurn: false,
     iceTransportPolicy: 'all',
+    mediaFlowing: false,
+    audioFlow: 'none',
+    lastMediaAgoMs: null,
   };
   private lastStats: { at: number; bytesSent: number; bytesReceived: number } | null = null;
 
@@ -499,7 +541,7 @@ export class CallEngine {
         this.diagnostics.selectedLocalType === 'none'
           ? 'none'
           : `${this.diagnostics.selectedLocalType} → ${this.diagnostics.selectedRemoteType}`,
-      mediaFlowing: this.lastMediaAt > 0 && Date.now() - this.lastMediaAt < 5000,
+      mediaFlowing: this.lastMediaAt > 0 && Date.now() - this.lastMediaAt < MEDIA_FLOW_FRESH_MS,
       diagnostics: { ...this.diagnostics, wsStatus: this.wsStatus },
       logs: this.logs,
     };
@@ -1045,6 +1087,7 @@ export class CallEngine {
 
     this.micPermission = 'requesting';
     this.emit();
+    const previous = this.localStream;
     try {
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error('Microphone access is not available in this browser context.');
@@ -1061,6 +1104,16 @@ export class CallEngine {
       if (track) track.enabled = !this.micMuted;
       this.micPermission = 'granted';
       this.watchLocalTrack(stream);
+      if (previous && previous !== stream) {
+        // Releasing the old capture is not optional: a second live capture of
+        // the same device keeps the microphone "in use", competes with the AI
+        // capture, and on some mobile browsers mutes the new track. It also
+        // leaves the microphone hot after a recovered call.
+        previous.getTracks().forEach((oldTrack) => {
+          if (!stream.getTracks().includes(oldTrack)) oldTrack.stop();
+        });
+        this.log('Stopped the previous microphone capture after re-acquiring it.');
+      }
       this.log(
         `Microphone captured (track ${track?.readyState ?? 'missing'}${track?.muted ? ', muted by OS' : ''}).`
       );
@@ -1179,12 +1232,7 @@ export class CallEngine {
         this.log('Microphone recovered; waiting for a peer connection to attach it to.');
         return;
       }
-      const senders = this.pc.getSenders().filter((sender) => sender.track?.kind === 'audio');
-      if (senders.length === 0) {
-        this.pc.addTrack(track, stream as MediaStream);
-      } else {
-        for (const sender of senders) await sender.replaceTrack(track);
-      }
+      await this.attachOutboundAudioTrack(track, stream as MediaStream);
       this.log('Outbound microphone track replaced after recovery.');
       if (this.options.role === 'salesperson') {
         void this.makeOffer({ reason: 'microphone recovery' });
@@ -1193,6 +1241,43 @@ export class CallEngine {
       this.log(`Microphone recovery failed: ${(err as Error)?.message || err}`);
     } finally {
       this.recoveryInFlight = false;
+    }
+  }
+
+  /**
+   * Attaches (or replaces) the microphone on the current peer connection.
+   *
+   * `replaceTrack` is used whenever a sender exists so no renegotiation is
+   * needed. A peer connection is always created with an audio sender (either
+   * from `addTrack` or from a sendrecv transceiver), so a microphone acquired
+   * after negotiation still reaches the peer instead of leaving a connected but
+   * silent call.
+   */
+  private async attachOutboundAudioTrack(
+    track: MediaStreamTrack,
+    stream: MediaStream
+  ): Promise<void> {
+    const pc = this.pc;
+    if (!pc) return;
+    const sender =
+      this.audioSender ??
+      pc.getSenders().find((candidate) => candidate.track?.kind === 'audio') ??
+      null;
+    if (sender) {
+      if (sender.track !== track) await sender.replaceTrack(track);
+      this.audioSender = sender;
+      return;
+    }
+    this.audioSender = pc.addTrack(track, stream);
+    if (this.options.role === 'salesperson') {
+      // A brand-new sender only exists when the m-line was never negotiated
+      // (no transceiver and no track at creation time). Renegotiate it.
+      void this.makeOffer({ reason: 'microphone attached' });
+    } else {
+      const sent = this.sendSignal({ type: 'ice_restart', reason: 'customer microphone attached' });
+      this.log(
+        `Asked the salesperson to renegotiate after attaching the microphone${sent ? '' : ': signaling is unavailable'}.`
+      );
     }
   }
 
@@ -1422,6 +1507,11 @@ export class CallEngine {
     this.connectWatchdog = null;
   }
 
+  private clearMediaWatchdog(): void {
+    if (this.mediaWatchdog !== null) window.clearTimeout(this.mediaWatchdog);
+    this.mediaWatchdog = null;
+  }
+
   /** Cancels every timer that belongs to the current peer connection. */
   private clearPeerTimers(): void {
     this.clearOfferWatchdog();
@@ -1430,6 +1520,7 @@ export class CallEngine {
     this.clearIceRestartVerifyTimer();
     this.clearDisconnectGraceTimer();
     this.clearConnectWatchdog();
+    this.clearMediaWatchdog();
   }
 
   /**
@@ -1446,6 +1537,7 @@ export class CallEngine {
     this.negotiationAttempts = 0;
     this.iceRestartAttempts = 0;
     this.iceRestartInFlight = false;
+    this.awaitingMediaAfterRecovery = false;
     this.recoveryAttemptInFlight = false;
     this.pendingIceRestartReason = null;
     this.pendingIceRestartForce = false;
@@ -1455,6 +1547,7 @@ export class CallEngine {
   private closePeerConnection(reason: string): void {
     this.pcGeneration += 1;
     this.clearPeerTimers();
+    this.audioSender = null;
     this.offerInFlight = false;
     this.answerInFlight = false;
     this.makingOffer = false;
@@ -1530,13 +1623,24 @@ export class CallEngine {
     );
 
     const stream = this.localStream;
-    const track = stream?.getAudioTracks()[0];
+    const track = stream && hasLiveAudioTrack(stream) ? stream.getAudioTracks()[0] : null;
     if (stream && track) {
-      pc.addTrack(track, stream);
+      this.audioSender = pc.addTrack(track, stream);
       track.enabled = !this.micMuted;
       this.log('Added local microphone track to the peer connection.');
     } else {
-      this.log('No live microphone track available at peer connection creation.');
+      // No capture is available yet (permission granted late, recovery in
+      // progress, or the track already ended). Negotiate a sendrecv audio
+      // m-line now so a track acquired later can be attached with
+      // replaceTrack() and actually reach the peer. Without it the call can
+      // connect while one direction carries no audio at all.
+      try {
+        this.audioSender = pc.addTransceiver('audio', { direction: 'sendrecv' }).sender;
+        this.log('Negotiated a sendrecv audio m-line; the microphone will attach when available.');
+      } catch (err) {
+        this.audioSender = null;
+        this.log(`Could not negotiate a sendrecv audio m-line: ${(err as Error)?.message || err}`);
+      }
     }
 
     pc.onicecandidate = (event) => {
@@ -1694,11 +1798,87 @@ export class CallEngine {
     this.pendingIceRestartReason = null;
     this.peerFailureConfirmed = false;
     this.negotiationAttempts = 0;
-    this.iceRestartAttempts = 0;
+    // A transport that reconnects is only a success if audio arrives again.
+    // While a media-triggered recovery is pending, the restart budget keeps
+    // counting until RTP is observed, so a silent path cannot loop forever.
+    if (!this.awaitingMediaAfterRecovery || this.mediaFlowingNow()) {
+      this.awaitingMediaAfterRecovery = false;
+      this.iceRestartAttempts = 0;
+    }
     this.lastError = null;
     this.callState = 'connected';
     this.emit();
     void this.resumePlayback();
+    const pc = this.pc;
+    // ICE+DTLS is not audio. Keep checking that RTP actually arrives.
+    if (pc) this.armMediaWatchdog(pc);
+  }
+
+  /** Inbound RTP arrived recently enough to count as working audio. */
+  private mediaFlowingNow(): boolean {
+    return this.lastMediaAt > 0 && Date.now() - this.lastMediaAt < MEDIA_FLOW_FRESH_MS;
+  }
+
+  /**
+   * A `connected` transport with no inbound RTP is a silent call. Nothing else
+   * in the state machine notices, because every failure event stays quiet while
+   * ICE believes the path is healthy. This watchdog turns that silence into a
+   * bounded recovery (with refreshed TURN credentials) instead of an endless
+   * "connected" UI with no audio.
+   */
+  private armMediaWatchdog(pc: RTCPeerConnection): void {
+    this.clearMediaWatchdog();
+    const generation = this.pcGeneration;
+    const checkMs = this.options.mediaFlowCheckMs ?? MEDIA_FLOW_CHECK_MS;
+    const graceMs = this.options.mediaFlowGraceMs ?? MEDIA_FLOW_GRACE_MS;
+    const stallMs = this.options.mediaStallMs ?? MEDIA_STALL_MS;
+    const schedule = () => {
+      this.mediaWatchdog = window.setTimeout(check, checkMs);
+    };
+    const check = () => {
+      this.mediaWatchdog = null;
+      if (this.pc !== pc || this.pcGeneration !== generation) return;
+      if (this.stopped || this.intentionalLeave || this.peerFailureConfirmed) return;
+      if (pc.connectionState !== 'connected') return;
+      if (this.isPageHidden()) {
+        // Background tabs throttle timers: a missed sample is not evidence of
+        // lost media, so never restart ICE because of it.
+        schedule();
+        return;
+      }
+      const sinceLastMedia = this.lastMediaAt > 0 ? Date.now() - this.lastMediaAt : null;
+      // Never-any-audio and audio-that-stopped have different deadlines: a long
+      // pause in conversation is normal, no audio at all from the start is not.
+      const deadline = sinceLastMedia === null ? graceMs : stallMs;
+      if (sinceLastMedia !== null && sinceLastMedia < deadline) {
+        if (this.awaitingMediaAfterRecovery) {
+          this.awaitingMediaAfterRecovery = false;
+          this.iceRestartAttempts = 0;
+          this.log('Audio is flowing again after recovery.');
+          this.emit();
+        }
+        schedule();
+        return;
+      }
+      this.log(
+        `Peer connection is connected but no audio has arrived for ${
+          sinceLastMedia === null ? 'the whole call' : `${Math.round(sinceLastMedia / 1000)}s`
+        }; starting recovery.`
+      );
+      this.callState = 'reconnecting';
+      this.emit();
+      // Forced: a connected transport would otherwise be treated as healthy by
+      // runRecoveryAttempt() and no ICE restart (or TURN credential refresh)
+      // would ever run.
+      this.awaitingMediaAfterRecovery = true;
+      this.requestIceRecovery('connected but no incoming audio', true);
+    };
+    schedule();
+  }
+
+  private isPageHidden(): boolean {
+    const doc = (globalThis as { document?: Document }).document;
+    return Boolean(doc && typeof doc.visibilityState === 'string' && doc.visibilityState !== 'visible');
   }
 
   private startDisconnectGrace(): void {
@@ -1857,12 +2037,21 @@ export class CallEngine {
     const pc = this.pc;
     if (!pc) return;
     const generation = this.pcGeneration;
+    const startedAt = Date.now();
     const verifyMs = this.options.iceRestartVerifyMs ?? ICE_RESTART_VERIFY_MS;
     this.iceRestartVerifyTimer = window.setTimeout(() => {
       this.iceRestartVerifyTimer = null;
       if (this.pc !== pc || this.pcGeneration !== generation) return;
       if (this.stopped || this.intentionalLeave || this.peerFailureConfirmed) return;
       if (this.isPeerConnected()) {
+        // A restart that reconnects but still carries no audio has not fixed
+        // anything: keep counting the attempt instead of resetting the budget.
+        if (this.awaitingMediaAfterRecovery && this.lastMediaAt < startedAt) {
+          this.iceRestartInFlight = false;
+          this.log(`Recovery attempt restored the transport but not audio (${reason}).`);
+          this.requestIceRecovery('ICE restart restored no audio', true);
+          return;
+        }
         this.handlePeerConnected();
         return;
       }
@@ -1884,6 +2073,7 @@ export class CallEngine {
     this.clearPeerTimers();
     this.iceRestartInFlight = false;
     this.recoveryAttemptInFlight = false;
+    this.awaitingMediaAfterRecovery = false;
     this.pendingIceRestartReason = null;
     this.pendingIceRestartForce = false;
     this.log(
@@ -3196,6 +3386,16 @@ export class CallEngine {
       this.lastStats = null;
     }
 
+    const mediaAge = this.lastMediaAt > 0 ? Date.now() - this.lastMediaAt : null;
+    next.lastMediaAgoMs = mediaAge;
+    next.mediaFlowing = mediaAge !== null && mediaAge < MEDIA_FLOW_FRESH_MS;
+    // Which directions are actually carrying audio right now. A connected call
+    // with "outbound-only" means the peer cannot hear this participant, and
+    // "inbound-only" means this participant cannot hear the peer.
+    const sending = next.sendBitrateKbps > 0;
+    const receiving = next.receiveBitrateKbps > 0;
+    next.audioFlow = sending && receiving ? 'both' : receiving ? 'inbound-only' : sending ? 'outbound-only' : 'none';
+
     this.diagnostics = next;
     this.dtlsState = next.dtlsState;
     this.emit();
@@ -3238,7 +3438,9 @@ export class CallEngine {
         turnConfigured: this.iceConfig.turn.configured,
         turnCredentialMode: this.iceConfig.turn.credentialMode,
         relayCandidates: this.candidateTypes.relay,
-        mediaFlowing: this.lastMediaAt > 0 && Date.now() - this.lastMediaAt < 5000,
+        mediaFlowing: this.lastMediaAt > 0 && Date.now() - this.lastMediaAt < MEDIA_FLOW_FRESH_MS,
+        audioFlow: this.diagnostics.audioFlow,
+        lastMediaAgoMs: this.diagnostics.lastMediaAgoMs,
         dtlsState: this.dtlsState,
       },
     });
