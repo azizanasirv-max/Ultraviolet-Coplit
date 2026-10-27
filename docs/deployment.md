@@ -283,8 +283,16 @@ Setup (browser only; no environment variable):
    `ice.credentialMode: "static"` and `ice.provider: "expressturn"`.
 
 No `ADMIN_PASSWORD` (or any other environment variable) is required. If an
-older deployment still defines `ADMIN_PASSWORD`, it is ignored and can be
-removed.
+older deployment still defines `ADMIN_PASSWORD`, it is ignored and can be removed.
+
+**Is the deployed service running this flow?** Two credential-free checks:
+
+* `curl -s https://<service>/admin/turn | grep 'First-time setup'` returns the
+  setup form (no environment variable involved). A redirect or 404 means an
+  older build is deployed.
+* `curl -s -o /dev/null -w '%{http_code}' https://<service>/api/admin/turn-settings`
+  returns `401`; `.../api/health` shows only `ice.configured` /
+  `ice.credentialMode` (never a username or credential).
 
 **Restart / redeploy — safely reclaiming setup.** The setup-password hash and
 the ExpressTURN credentials live only in this server process's memory. A restart
