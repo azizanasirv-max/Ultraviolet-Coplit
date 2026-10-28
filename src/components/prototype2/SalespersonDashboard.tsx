@@ -4,6 +4,11 @@ import {
   PhoneOff, RefreshCw, Sparkles, Volume2, VolumeX, Activity, UserRound,
 } from 'lucide-react';
 import { CallEngine, EngineSnapshot, ParticipantRole } from '../../lib/callEngine';
+import {
+  CustomerAudioReport,
+  describeCustomerAudio,
+  formatAudioLevel,
+} from '../../lib/audioDiagnostics';
 import { aiStateLabel, aiTone, AiLifecycleState } from '../../lib/aiStatus';
 import {
   ApiError, CreatedSession, SessionDiagnosticsResponse, SessionPublicState,
@@ -30,8 +35,8 @@ const callStateLabel = (snapshot: EngineSnapshot | null): { label: string; tone:
   switch (state) {
     case 'connected':
       return snapshot?.mediaFlowing
-        ? { label: 'Audio flowing', tone: 'emerald' }
-        : { label: 'Connected — waiting for media', tone: 'amber' };
+        ? { label: 'Transport connected — audio packets arriving', tone: 'amber' }
+        : { label: 'Connected — waiting for audio packets', tone: 'amber' };
     case 'disconnected': return { label: 'Customer disconnected', tone: 'red' };
     case 'connecting': return { label: 'Connecting audio', tone: 'amber' };
     case 'waiting': return { label: 'Waiting for customer', tone: 'amber' };
@@ -242,8 +247,22 @@ export const SalespersonDashboard: React.FC = () => {
     engine.attachAudioElement(audioRef.current);
     engineRef.current = engine;
     setEngineStarted(true);
-    await engine.start();
+    await engine.start().then(() => {
+      // React may have remounted the element during the async start: point the
+      // engine at the element that is actually in the DOM now.
+      if (mountedRef.current) engine.attachAudioElement(audioRef.current);
+    });
   };
+
+  /**
+   * Keeps the engine bound to the element that is really mounted. Without this,
+   * a remount leaves the old, detached element playing while the visible one
+   * stays silent.
+   */
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (engine) engine.attachAudioElement(audioRef.current);
+  }, [view, engineStarted]);
 
   const leaveCall = async () => {
     await stopEngine('salesperson left the call');
@@ -363,7 +382,37 @@ export const SalespersonDashboard: React.FC = () => {
     }
   };
 
-  const callState = callStateLabel(snapshot);
+  /**
+   * What the salesperson can actually hear from the customer.
+   *
+   * Deliberately derived from measurements (packets, decoded level, playback
+   * state), never from `connectionState === 'connected'`. A connected transport
+   * with no packets, a silent microphone or a blocked audio element all look
+   * identical to ICE and RTP counters.
+   */
+  const customerAudio: CustomerAudioReport = useMemo(
+    () =>
+      describeCustomerAudio({
+        customerConnected: Boolean(sessionState?.customerConnected),
+        callState: snapshot?.callState ?? 'idle',
+        pcState: snapshot?.diagnostics.pcState ?? 'none',
+        inboundPackets: snapshot?.diagnostics.inboundPackets ?? 0,
+        inboundBytes: snapshot?.diagnostics.bytesReceived ?? 0,
+        inboundAudioLevel: snapshot?.diagnostics.inboundAudioLevel ?? null,
+        soundDetected: Boolean(snapshot?.inboundSoundDetected),
+        playbackBlocked: Boolean(snapshot?.playbackBlocked),
+        playbackState: snapshot?.playbackState ?? 'no_track',
+        remoteTrackState: snapshot?.diagnostics.remoteTrackState ?? 'none',
+        speakerMuted: Boolean(snapshot?.speakerMuted),
+      }),
+    [snapshot, sessionState?.customerConnected]
+  );
+  // The headline never claims working audio unless sound is measurable and the
+  // browser is really playing it.
+  const callState =
+    engineStarted && snapshot?.callState === 'connected'
+      ? { label: customerAudio.label, tone: customerAudio.tone as StatusTone }
+      : callStateLabel(snapshot);
   const micLive = snapshot?.micPermission === 'granted' && snapshot.localTrackState === 'live';
   const latestSuggestion = useMemo(
     () => (snapshot?.suggestions.length ? snapshot.suggestions[snapshot.suggestions.length - 1] : null),
@@ -602,9 +651,11 @@ export const SalespersonDashboard: React.FC = () => {
             <Banner
               tone="amber"
               title="Customer audio is blocked by the browser"
+              testId="playback-blocked"
               action={
                 <button
                   onClick={() => void engineRef.current?.resumePlayback()}
+                  data-testid="enable-audio"
                   className="px-3 py-1 rounded-lg bg-amber-500 text-slate-950 font-semibold"
                 >
                   Enable audio
@@ -612,6 +663,30 @@ export const SalespersonDashboard: React.FC = () => {
               }
             >
               A user gesture is required before audio can play.
+            </Banner>
+          ) : null}
+          {engineStarted && customerAudio.warning && !snapshot?.playbackBlocked ? (
+            <Banner
+              tone={customerAudio.state === 'playback_blocked' ? 'amber' : 'red'}
+              title={customerAudio.warning.title}
+              testId="customer-audio-warning"
+              action={
+                <button
+                  onClick={() => {
+                    if (customerAudio.warning?.action === 'enable_audio') {
+                      void engineRef.current?.resumePlayback();
+                    } else {
+                      void restartCall();
+                    }
+                  }}
+                  data-testid="customer-audio-warning-action"
+                  className="px-3 py-1 rounded-lg bg-amber-500 text-slate-950 font-semibold"
+                >
+                  {customerAudio.warning.actionLabel}
+                </button>
+              }
+            >
+              {customerAudio.warning.detail}
             </Banner>
           ) : null}
           {snapshot?.lastError ? (
@@ -652,6 +727,84 @@ export const SalespersonDashboard: React.FC = () => {
                 ? ` · microphone ${micLive ? 'live' : 'ready'}${snapshot.micMuted ? ' (muted)' : ''}`
                 : ''}
             </p>
+
+            {/* Every step of the inbound path, measured separately. "Connected"
+                alone can never be presented as working audio again. */}
+            {engineStarted ? (
+              <div
+                className="w-full max-w-sm space-y-0.5 border-t border-slate-800 pt-2"
+                data-testid="customer-audio-status"
+              >
+                <StatusLine
+                  label="Customer"
+                  value={sessionState?.customerConnected ? 'connected' : 'not connected'}
+                  tone={sessionState?.customerConnected ? 'emerald' : 'amber'}
+                  testId="audio-customer"
+                />
+                <StatusLine
+                  label="Audio transport"
+                  value={snapshot?.diagnostics.pcState === 'connected' ? 'connected' : 'not connected'}
+                  tone={snapshot?.diagnostics.pcState === 'connected' ? 'emerald' : 'amber'}
+                  detail={snapshot ? `ice ${snapshot.diagnostics.iceState}` : undefined}
+                  testId="audio-transport"
+                />
+                <StatusLine
+                  label="Audio packets"
+                  value={
+                    customerAudio.receivingPackets
+                      ? `${snapshot?.diagnostics.inboundPackets ?? 0} received`
+                      : 'none'
+                  }
+                  tone={customerAudio.receivingPackets ? 'emerald' : 'amber'}
+                  detail={
+                    snapshot
+                      ? `remote track ${snapshot.diagnostics.remoteTrackState} · ${
+                          snapshot.diagnostics.bytesReceived
+                        } B in`
+                      : undefined
+                  }
+                  testId="audio-packets"
+                />
+                <StatusLine
+                  label="Measured sound"
+                  value={
+                    snapshot?.diagnostics.inboundAudioLevel === null ||
+                    snapshot?.diagnostics.inboundAudioLevel === undefined
+                      ? 'not measurable'
+                      : customerAudio.audibleSound
+                        ? 'audible'
+                        : 'silent'
+                  }
+                  tone={
+                    customerAudio.audibleSound
+                      ? 'emerald'
+                      : snapshot?.diagnostics.inboundAudioLevel === null ? 'slate' : 'amber'
+                  }
+                  detail={formatAudioLevel(snapshot?.diagnostics.inboundAudioLevel)}
+                  detailTestId="audio-level"
+                  testId="audio-sound"
+                />
+                <StatusLine
+                  label="Browser playback"
+                  value={
+                    snapshot?.speakerMuted
+                      ? 'muted by you'
+                      : customerAudio.playbackWorking
+                        ? 'playing'
+                        : snapshot?.playbackState ?? 'idle'
+                  }
+                  tone={
+                    snapshot?.speakerMuted
+                      ? 'slate'
+                      : customerAudio.playbackWorking
+                        ? 'emerald'
+                        : 'red'
+                  }
+                  detail={snapshot?.diagnostics.playbackError ?? undefined}
+                  testId="audio-playback"
+                />
+              </div>
+            ) : null}
 
 
             <div className="flex flex-wrap justify-center gap-2 pt-1">
@@ -795,13 +948,49 @@ export const SalespersonDashboard: React.FC = () => {
           <div className="grid gap-4 md:grid-cols-2">
             <Panel title="Customer speech" icon={<UserRound className="w-3.5 h-3.5" />}>
               <div className="space-y-2" data-testid="customer-speech">
-                {snapshot?.customerSpeech ? (
+                {snapshot?.customerTranscript?.segments.length ? (
+                  <>
+                    <ul className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                      {snapshot.customerTranscript.segments.map((segment) => (
+                        <li
+                          key={segment.ordinal}
+                          data-testid="customer-transcript-segment"
+                          data-ordinal={segment.ordinal}
+                          data-final={segment.isFinal ? 'true' : 'false'}
+                          className={
+                            segment.isFinal
+                              ? 'text-sm text-slate-100 leading-relaxed'
+                              : 'text-sm text-slate-300/90 leading-relaxed'
+                          }
+                        >
+                          {segment.isFinal ? null : (
+                            <span className="mr-1.5 align-middle text-[9px] uppercase tracking-wide font-semibold text-cyan-300/80">
+                              live
+                            </span>
+                          )}
+                          <span className="whitespace-pre-wrap">{segment.text}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    {!aiView.connected ? (
+                      <p className="text-[11px] text-amber-300" data-testid="transcript-paused">
+                        Live transcription is paused while the AI session is
+                        {' '}
+                        {aiView.reconnecting ? 'reconnecting' : 'unavailable'}. The customer call audio is unaffected.
+                      </p>
+                    ) : null}
+                  </>
+                ) : snapshot?.customerSpeech ? (
                   <p className="text-sm text-slate-100 leading-relaxed">{snapshot.customerSpeech}</p>
                 ) : (
-                  <p className="text-xs text-slate-500">
-                    {sessionState?.customerConnected
-                      ? 'Waiting for the customer to speak.'
-                      : 'Customer speech appears here once the customer joins.'}
+                  <p className="text-xs text-slate-500" data-testid="customer-transcript-status">
+                    {!sessionState?.customerConnected
+                      ? 'Customer speech appears here once the customer joins.'
+                      : !aiView.connected
+                        ? aiView.reconnecting
+                          ? 'Connecting the AI session before live transcription starts. The customer call audio is unaffected.'
+                          : 'Live transcription is unavailable for this call. The customer call audio is unaffected.'
+                        : 'Waiting for the customer to speak.'}
                   </p>
                 )}
               </div>
@@ -857,6 +1046,17 @@ export const SalespersonDashboard: React.FC = () => {
                       ['remote', snapshot?.diagnostics.remoteTrackState ?? 'none'],
                       ['rtp out', `${snapshot?.diagnostics.bytesSent ?? 0} B`],
                       ['rtp in', `${snapshot?.diagnostics.bytesReceived ?? 0} B`],
+                      ['rtp packets in', String(snapshot?.diagnostics.inboundPackets ?? 0)],
+                      ['rtp lost / jitter', `${snapshot?.diagnostics.inboundPacketsLost ?? 0} / ${Math.round((snapshot?.diagnostics.inboundJitter ?? 0) * 1000)}ms`],
+                      ['inbound level', formatAudioLevel(snapshot?.diagnostics.inboundAudioLevel)],
+                      ['mic level', formatAudioLevel(snapshot?.diagnostics.localAudioLevel)],
+                      ['mic processing', snapshot?.diagnostics.microphoneProcessing ?? 'not measured'],
+                      ['mic captures', String(snapshot?.diagnostics.micCaptures ?? 0)],
+                      ['sound last', snapshot?.diagnostics.lastSoundAgoMs === null || snapshot?.diagnostics.lastSoundAgoMs === undefined
+                        ? 'never'
+                        : `${Math.round(snapshot.diagnostics.lastSoundAgoMs / 1000)}s ago`],
+                      ['playback', `${snapshot?.playbackState ?? 'idle'}${snapshot?.diagnostics.playbackError ? ` (${snapshot.diagnostics.playbackError})` : ''}`],
+                      ['audio direction', snapshot?.diagnostics.audioDirection ?? 'unknown'],
                       ['audio flow', snapshot?.diagnostics.audioFlow ?? 'none'],
                       [
                         'audio last in',
@@ -907,6 +1107,35 @@ export const SalespersonDashboard: React.FC = () => {
                   ) : (
                     <p className="text-[11px] text-slate-500">Loading server diagnostics...</p>
                   )}
+                  {serverDiagnostics
+                    ? serverDiagnostics.diagnostics.participants
+                        .filter((participant) => participant.diagnostics)
+                        .map((participant) => {
+                          const reported = participant.diagnostics as Record<string, unknown>;
+                          const text = (value: unknown) =>
+                            value === null || value === undefined ? 'n/a' : String(value);
+                          const level = (value: unknown) =>
+                            formatAudioLevel(typeof value === 'number' ? value : null);
+                          return (
+                            <div key={participant.participantId} className="pt-1 space-y-1">
+                              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">
+                                {participant.role} device (reported by that browser)
+                              </p>
+                              <DiagGrid
+                                rows={[
+                                  ['mic', text(reported.localTrackState)],
+                                  ['mic level', level(reported.localAudioLevel)],
+                                  ['remote track', text(reported.remoteTrackState)],
+                                  ['rtp in', `${text(reported.inboundPackets)} pkt / ${text(reported.bytesReceived)} B`],
+                                  ['inbound level', level(reported.inboundAudioLevel)],
+                                  ['playback', text(reported.playbackState)],
+                                  ['direction', text(reported.audioDirection)],
+                                ]}
+                              />
+                            </div>
+                          );
+                        })
+                    : null}
                   <button
                     onClick={() => void endSession()}
                     className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold"

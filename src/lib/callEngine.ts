@@ -21,7 +21,27 @@ import {
   isLiveAiStatus,
   sanitizeAiDetail,
 } from './aiStatus';
+import {
+  applyCustomerTranscriptEvent,
+  bindCustomerTranscriptSession,
+  createCustomerTranscriptState,
+  CustomerTranscriptState,
+  latestFinalCustomerTranscriptSegment,
+} from './customerTranscript';
 import { ApiError, getHealth, getIceConfig, IceConfigResponse } from './sessionApi';
+import {
+  INBOUND_SOUND_RMS_THRESHOLD,
+  PlaybackState,
+  SOUND_FRESH_MS,
+} from './audioDiagnostics';
+import {
+  AppliedMicrophoneProcessing,
+  buildMicrophoneConstraints,
+  describeMicrophoneProcessing,
+  isCapturePublishable,
+  readAppliedMicrophoneProcessing,
+} from './microphone';
+
 
 export type ParticipantRole = 'customer' | 'salesperson';
 export type WsStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
@@ -58,6 +78,10 @@ export interface CallDiagnostics {
   candidates: { host: number; srflx: number; prflx: number; relay: number };
   bytesSent: number;
   bytesReceived: number;
+  /** Inbound RTP audio packets received (proof that RTP is arriving). */
+  inboundPackets: number;
+  inboundPacketsLost: number;
+  inboundJitter: number;
   sendBitrateKbps: number;
   receiveBitrateKbps: number;
   localSenderCount: number;
@@ -68,10 +92,32 @@ export interface CallDiagnostics {
   audioElementMuted: boolean | null;
   audioElementVolume: number | null;
   playbackError: string | null;
+  /** Measured browser playback state, not just "a track exists". */
+  playbackState: PlaybackState;
+  /** Measured RMS of the decoded inbound audio (null = not measurable here). */
+  inboundAudioLevel: number | null;
+  /** Measured RMS of this participant's own microphone (null = not measurable). */
+  localAudioLevel: number | null;
+  /**
+   * Processing the browser reports it applied to this participant's microphone
+   * (`aec on · ns on · agc off · 1ch · 48000 Hz`). "unmeasured" when the
+   * browser does not report it — never assumed. Diagnostics only.
+   */
+  microphoneProcessing: string;
+  /** Reported echo-cancellation state of the capture (null = not reported). */
+  echoCancellationActive: boolean | null;
+  /** getUserMedia captures this engine opened (proves no repeated re-open). */
+  micCaptures: number;
+  /** Milliseconds since measured inbound sound (null = never). */
+  lastSoundAgoMs: number | null;
+  /** Negotiated direction of this participant's audio transceiver. */
+  audioDirection: string;
   hasTurn: boolean;
   iceTransportPolicy: 'all' | 'relay';
   /** RTP is arriving right now (the only proof of working inbound audio). */
   mediaFlowing: boolean;
+  /** Inbound RTP carried measurable sound recently (the only proof of audible audio). */
+  inboundSoundDetected: boolean;
   /** Which RTP directions produced bytes in the last sample (diagnosis aid). */
   audioFlow: 'both' | 'inbound-only' | 'outbound-only' | 'none';
   /** Milliseconds since the last inbound RTP increase (null = never). */
@@ -104,7 +150,14 @@ export interface EngineSnapshot {
   /** Salesperson only: when they asked the customer device to restart the AI. */
   aiReconnectRequestedAt: number | null;
   suggestions: SuggestionCard[];
+  /** Latest *final* customer utterance (compatibility single-line field). */
   customerSpeech: string;
+  /**
+   * Salesperson only: customer speech as ordered segments, exactly one entry per
+   * Ultravox ordinal. Partial and final updates replace the same ordinal; the
+   * text is never merged, translated or completed.
+   */
+  customerTranscript: CustomerTranscriptState;
   /**
    * Salesperson only: browser speech-recognition state for salesperson captions.
    * 'unsupported' means the browser has no SpeechRecognition implementation; the
@@ -127,6 +180,10 @@ export interface EngineSnapshot {
   selectedPair: string;
   /** RTP actually arriving within the last few seconds (not just "connected"). */
   mediaFlowing: boolean;
+  /** Inbound audio carried measurable sound recently (not just RTP packets). */
+  inboundSoundDetected: boolean;
+  /** Measured browser playback state of the remote audio element. */
+  playbackState: PlaybackState;
   diagnostics: CallDiagnostics;
   logs: string[];
 }
@@ -227,6 +284,35 @@ const MEDIA_FLOW_GRACE_MS = 8000;
 const MEDIA_STALL_MS = 20000;
 /** Inbound RTP this recent is reported as ``mediaFlowing`` in the snapshot. */
 const MEDIA_FLOW_FRESH_MS = 5000;
+/**
+ * A paused remote-audio element is retried at most this often. Autoplay
+ * rejection is not a call failure, so it must never spin in a tight loop.
+ */
+const PLAYBACK_RETRY_MS = 5000;
+/**
+ * A negotiated audio direction that cannot carry one side's microphone is
+ * repaired with at most this many renegotiations before a manual reconnect is
+ * required. Bounded so a peer that keeps answering `recvonly` cannot loop.
+ */
+const MAX_DIRECTION_REPAIR_ATTEMPTS = 2;
+/** Minimum spacing between customer-initiated renegotiation requests. */
+const RENEGOTIATE_REQUEST_INTERVAL_MS = 10000;
+/**
+ * How often a dead outbound capture is re-acquired per incident. `track.stop()`
+ * and some OS-level revocations end a capture *without* firing `ended`, so the
+ * track state must be checked instead of trusted to emit an event.
+ *
+ * Every recovery path shares this budget: the `mute` timer, the `ended` event
+ * and the periodic supervisor used to be independent, so a device that muted
+ * every new capture could re-open the microphone indefinitely (a click and a
+ * second processing pipeline per attempt, and a degraded AI capture).
+ */
+const MAX_LOCAL_MIC_RECOVERY_ATTEMPTS = 2;
+/**
+ * A capture that stays publishable this long proves that a recovery worked, so
+ * the per-incident budget is released again.
+ */
+const MIC_RECOVERY_HEALTHY_MS = 15000;
 /** A `disconnected` transport may recover on its own; only then is it broken. */
 const DISCONNECT_GRACE_MS = 4000;
 /** Actionable, credential-free terminal error shown to both participants. */
@@ -344,16 +430,43 @@ const silentClipUrl = (): string => {
 export class CallEngine {
   private readonly options: CallEngineOptions;
   private readonly apiBase: string;
-  private readonly silentClip: string;
+  private silentClip: string;
 
   // Media / signaling objects
   private ws: WebSocket | null = null;
   private pc: RTCPeerConnection | null = null;
   private localStream: MediaStream | null = null;
+  /**
+   * ONE MediaStream holds the remote audio, for the lifetime of the call.
+   * Replacing `srcObject` on every `ontrack` reloads the media element, which
+   * re-triggers the autoplay policy and can leave a healthy call silent or
+   * playing twice.
+   */
   private remoteStream: MediaStream | null = null;
+  private remoteTrack: MediaStreamTrack | null = null;
   private audioElement: HTMLAudioElement | null = null;
   private ultravox: UltravoxSession | null = null;
   private readonly createAiSession: () => UltravoxSession;
+
+  // Audio measurement (never used for publishing: measuring cannot create a
+  // feedback loop or a second audio path).
+  private audioContext: AudioContext | null = null;
+  private inboundAnalyser: AnalyserNode | null = null;
+  private inboundAnalyserSource: MediaStreamAudioSourceNode | null = null;
+  private inboundAnalyserTrackId: string | null = null;
+  private outboundAnalyser: AnalyserNode | null = null;
+  private outboundAnalyserSource: MediaStreamAudioSourceNode | null = null;
+  private outboundAnalyserTrackId: string | null = null;
+  private analyserBuffer: Float32Array<ArrayBuffer> | null = null;
+  /** Last time the inbound stream carried measurable sound. */
+  private lastInboundSoundAt = 0;
+  /** Last measured RMS values (null = not measurable in this environment). */
+  private inboundAudioLevel: number | null = null;
+  private localAudioLevel: number | null = null;
+  /** Bumped per play() call so a stale promise cannot overwrite newer state. */
+  private playAttempt = 0;
+  private lastPlayAttemptAt = 0;
+  private playbackState: PlaybackState = 'no_track';
 
   // Lifecycle flags
   private started = false;
@@ -388,6 +501,24 @@ export class CallEngine {
   private recoveryAttemptInFlight = false;
   private pendingIceRestartReason: string | null = null;
   private pendingIceRestartForce = false;
+  /** Bounded, per-connection budget for audio-direction renegotiations. */
+  private directionRepairAttempts = 0;
+  private lastRenegotiateRequestAt = 0;
+  /** Bounded re-acquires of a capture the browser ended without an event. */
+  private localMicRecoveryAttempts = 0;
+  /**
+   * Total microphone captures this engine opened. Exposed in diagnostics so
+   * "the audio keeps clicking" can be told apart from "the engine keeps
+   * reopening the microphone": each open is a device click and a new processing
+   * pipeline (and a new capture competing with the customer's AI capture).
+   */
+  private micCaptures = 0;
+  /** What the browser reports about the current capture (never assumed). */
+  private micProcessing: AppliedMicrophoneProcessing = readAppliedMicrophoneProcessing(null);
+  /** When the current capture last became publishable (resets the mic budget). */
+  private captureHealthySince: number | null = null;
+  /** Removers for the listeners attached to the current capture's tracks. */
+  private localTrackCleanups: Array<() => void> = [];
 
   // Timers
   private reconnectTimer: number | null = null;
@@ -446,6 +577,13 @@ export class CallEngine {
   private aiReconnectRequestedAt: number | null = null;
   private suggestions: SuggestionCard[] = [];
   private customerSpeech = '';
+  private customerTranscript = createCustomerTranscriptState();
+  /**
+   * Per-generation record of what was already forwarded to the salesperson.
+   * `session.transcripts` re-emits the whole sparse array on every update, so
+   * without this every new partial would re-send every earlier final segment.
+   */
+  private forwardedTranscripts = new Map<string, { text: string; isFinal: boolean }>();
   private captionStatus: EngineSnapshot['captionStatus'] = 'off';
   private salespersonCaption = '';
   private recognition: any = null;
@@ -478,9 +616,21 @@ export class CallEngine {
     audioElementMuted: null,
     audioElementVolume: null,
     playbackError: null,
+    playbackState: 'no_track',
+    inboundAudioLevel: null,
+    localAudioLevel: null,
+    microphoneProcessing: describeMicrophoneProcessing(readAppliedMicrophoneProcessing(null)).summary,
+    echoCancellationActive: null,
+    micCaptures: 0,
+    lastSoundAgoMs: null,
+    audioDirection: 'unknown',
+    inboundPackets: 0,
+    inboundPacketsLost: 0,
+    inboundJitter: 0,
     hasTurn: false,
     iceTransportPolicy: 'all',
     mediaFlowing: false,
+    inboundSoundDetected: false,
     audioFlow: 'none',
     lastMediaAgoMs: null,
   };
@@ -525,6 +675,7 @@ export class CallEngine {
       aiReconnectRequestedAt: this.aiReconnectRequestedAt,
       suggestions: this.suggestions,
       customerSpeech: this.customerSpeech,
+      customerTranscript: this.customerTranscript,
       captionStatus: this.captionStatus,
       salespersonCaption: this.salespersonCaption,
       reconnectAttempt: this.reconnectAttempt,
@@ -542,6 +693,8 @@ export class CallEngine {
           ? 'none'
           : `${this.diagnostics.selectedLocalType} → ${this.diagnostics.selectedRemoteType}`,
       mediaFlowing: this.lastMediaAt > 0 && Date.now() - this.lastMediaAt < MEDIA_FLOW_FRESH_MS,
+      inboundSoundDetected: this.soundDetectedNow(),
+      playbackState: this.playbackState,
       diagnostics: { ...this.diagnostics, wsStatus: this.wsStatus },
       logs: this.logs,
     };
@@ -588,13 +741,36 @@ export class CallEngine {
     this.emit();
   }
 
+  /**
+   * Points the engine at the remote-audio element.
+   *
+   * Called on mount and again whenever the element instance changes (a view
+   * switch or a remount). The previous element is detached first so a stale
+   * element can never keep playing the same stream twice.
+   */
   attachAudioElement(element: HTMLAudioElement | null): void {
+    if (this.audioElement && this.audioElement !== element) {
+      try {
+        this.audioElement.pause();
+        this.audioElement.srcObject = null;
+      } catch {
+        // A detached element can throw; nothing to clean up.
+      }
+    }
     this.audioElement = element;
-    if (element && this.remoteStream) this.attachRemoteStream(this.remoteStream);
+    if (element && this.remoteStream) {
+      this.log('Remote audio element attached; re-attaching the live stream.');
+      this.attachRemoteStream(this.remoteStream);
+    }
   }
 
   // -------------------------------------------------------------------------
-  // Audio playback (autoplay unlock + remote stream attachment)
+  // Audio playback (autoplay unlock + supervised playback)
+  //
+  // `peer.connectionState === 'connected'` says nothing about whether the
+  // browser is playing the remote track. Every failure mode is measured here:
+  // a rejected play() (autoplay policy), an element paused by a reload, an
+  // element swapped by React, or a user-muted speaker.
   // -------------------------------------------------------------------------
 
   /** Must be called from a user gesture (the Join click). */
@@ -603,93 +779,413 @@ export class CallEngine {
     if (!element) return false;
     element.muted = this.speakerMuted;
     element.volume = 1;
-    try {
-      if (!element.srcObject) {
-        element.src = this.silentClip;
-        element.loop = true;
-        element.load();
-      }
-      await element.play();
-      this.audioUnlocked = true;
-      this.playbackError = null;
-      this.playbackBlocked = false;
-      this.log('Remote audio element unlocked by user gesture.');
-      return true;
-    } catch (err) {
-      const error = err as Error;
-      this.audioUnlocked = false;
-      this.playbackBlocked = true;
-      this.playbackError = `${error?.name || 'Error'}: ${error?.message || error}`;
-      this.log(`Remote audio unlock rejected: ${this.playbackError}`);
-      return false;
+    if (!element.srcObject && !element.hasAttribute('src') && this.silentClip) {
+      // Prime the element inside the gesture: a silent, looping clip keeps the
+      // media element "started" so a later srcObject attach is allowed.
+      element.src = this.silentClip;
+      element.loop = true;
+      element.load();
     }
+    const played = await this.playRemoteAudio('unlock');
+    if (played) this.log('Remote audio element unlocked by user gesture.');
+    return played;
   }
 
   /** Retries playback after a blocked autoplay attempt (tap anywhere). */
   async resumePlayback(): Promise<boolean> {
-    const element = this.audioElement;
-    if (!element) return false;
-    if (element.srcObject) {
-      element.muted = this.speakerMuted;
-      try {
-        await element.play();
-        this.playbackBlocked = false;
-        this.playbackError = null;
-        this.audioUnlocked = true;
-        this.log('Remote audio resumed after user interaction.');
-        this.emit();
-        return true;
-      } catch (err) {
-        const error = err as Error;
-        this.playbackBlocked = true;
-        this.playbackError = `${error?.name || 'Error'}: ${error?.message || error}`;
-        this.log(`Remote audio resume failed: ${this.playbackError}`);
-        this.emit();
-        return false;
-      }
-    }
-    return this.unlockAudio();
+    if (!this.audioElement) return false;
+    if (!this.audioElement.srcObject) return this.unlockAudio();
+    const played = await this.playRemoteAudio('resume');
+    if (played) this.log('Remote audio resumed after user interaction.');
+    else this.log(`Remote audio resume failed: ${this.playbackError ?? 'unknown error'}`);
+    return played;
   }
 
+  /**
+   * Single code path for `element.play()`.
+   *
+   * A play() promise that resolves after a newer attempt started must not
+   * overwrite the newer state, which is why every call carries a token.
+   */
+  private async playRemoteAudio(reason: string): Promise<boolean> {
+    const element = this.audioElement;
+    if (!element) {
+      this.playbackState = 'no_track';
+      return false;
+    }
+    if (!element.srcObject && !element.hasAttribute('src')) {
+      this.playbackState = 'no_track';
+      return false;
+    }
+    const attempt = (this.playAttempt += 1);
+    this.lastPlayAttemptAt = Date.now();
+    element.muted = this.speakerMuted;
+    let result: Promise<void> | undefined;
+    try {
+      result = element.play();
+    } catch (err) {
+      this.markPlaybackFailed(err as Error, reason, attempt);
+      return false;
+    }
+    if (!result || typeof result.then !== 'function') {
+      // Very old implementations return undefined; the element holds the truth.
+      return this.settlePlaybackFromElement(reason, attempt);
+    }
+    try {
+      await result;
+    } catch (err) {
+      if (attempt !== this.playAttempt) return false;
+      this.markPlaybackFailed(err as Error, reason, attempt);
+      return false;
+    }
+    if (attempt !== this.playAttempt) return false;
+    return this.settlePlaybackFromElement(reason, attempt);
+  }
+
+  /** Reads the element itself: a resolved play() can still leave it paused. */
+  private settlePlaybackFromElement(reason: string, attempt: number): boolean {
+    const element = this.audioElement;
+    if (!element || attempt !== this.playAttempt) return false;
+    if (element.paused) {
+      this.playbackState = 'paused';
+      this.playbackBlocked = !this.speakerMuted;
+      if (this.playbackBlocked) {
+        this.playbackError = 'NotAllowedError: playback did not start (autoplay policy).';
+        this.log(`Remote audio is still paused after play() [${reason}]; a user gesture is required.`);
+        this.emit();
+      }
+      return false;
+    }
+    const wasBlocked = this.playbackBlocked || this.playbackState !== 'playing';
+    this.playbackState = 'playing';
+    this.playbackBlocked = false;
+    this.playbackError = null;
+    this.audioUnlocked = true;
+    if (wasBlocked) {
+      this.log(`Remote audio is playing [${reason}].`);
+      this.emit();
+    }
+    return true;
+  }
+
+  private markPlaybackFailed(err: Error, reason: string, attempt: number): void {
+    if (attempt !== this.playAttempt) return;
+    const name = err?.name || 'Error';
+    const message = err?.message || String(err);
+    if (name === 'AbortError') {
+      // play() was interrupted by a newer attach/load: not a playback policy
+      // failure, so it must not raise a user-visible warning.
+      this.log(`Remote audio play() superseded [${reason}].`);
+      return;
+    }
+    this.playbackState = 'blocked';
+    this.playbackBlocked = true;
+    this.audioUnlocked = false;
+    this.playbackError = `${name}: ${message}`;
+    this.log(`Remote audio playback blocked [${reason}]: ${this.playbackError}`);
+    this.emit();
+  }
+
+  /**
+   * Attaches (or re-uses) the remote stream on the audio element.
+   *
+   * The stream object is stable for the whole call, so a replaced remote track
+   * never reloads the element and never produces a second playback path.
+   */
   private attachRemoteStream(stream: MediaStream): void {
     const element = this.audioElement;
     if (!element) {
-      this.log('Remote audio element is not mounted yet; stream will attach on mount.');
+      this.log('Remote audio element is not mounted yet; the stream will attach on mount.');
+      return;
+    }
+    if (element.srcObject === stream && !element.paused && this.playbackState === 'playing') {
+      // Already the one and only playback path: a repeated ontrack, a presence
+      // refresh or a re-attach must not restart playback (each restart is an
+      // audible gap and a chance for a second decoded path).
       return;
     }
     element.muted = this.speakerMuted;
     element.volume = 1;
     element.loop = false;
-    if (element.src) {
-      element.pause();
-      element.removeAttribute('src');
-      element.load();
+    if (element.srcObject !== stream) {
+      // Only the silent priming clip is cleared; a live srcObject is replaced in
+      // place below without destroying the element's playback permission.
+      if (element.hasAttribute('src')) {
+        element.pause();
+        element.removeAttribute('src');
+        element.load();
+      }
+      element.srcObject = stream;
     }
-    element.srcObject = stream;
-    element
-      .play()
-      .then(() => {
+    void this.playRemoteAudio('remote stream attached');
+  }
+
+  /**
+   * Frees the object URL used to prime the media element inside the join
+   * gesture. It is a blob, so leaving it alive after the call leaks a resource
+   * and keeps the element able to loop a silent clip.
+   */
+  private releaseSilentClip(): void {
+    if (!this.silentClip) return;
+    try {
+      URL.revokeObjectURL(this.silentClip);
+    } catch {
+      // Already revoked or unsupported.
+    }
+    this.silentClip = '';
+  }
+
+  /**
+   * Removes the only playback path.
+   *
+   * Without this a closed call leaves the element holding a dead stream (and the
+   * silent priming clip looping). A reconnect that created a second stream would
+   * then have two paths into the same output device.
+   */
+  private detachPlayback(reason: string): void {
+    // Any play() promise still in flight belongs to the old path.
+    this.playAttempt += 1;
+    this.playbackState = 'no_track';
+    this.playbackBlocked = false;
+    this.playbackError = null;
+    const element = this.audioElement;
+    if (!element) return;
+    if (element.srcObject === null && element.paused && !element.hasAttribute('src')) {
+      // Nothing was attached: no log spam, and no state change to report.
+      return;
+    }
+    try {
+      if (!element.paused) element.pause();
+      if (element.srcObject !== null) element.srcObject = null;
+      if (typeof element.hasAttribute === 'function' && element.hasAttribute('src')) {
+        element.removeAttribute('src');
+        if (typeof element.load === 'function') element.load();
+      }
+      element.loop = false;
+    } catch {
+      // A detached element can throw; there is nothing left to release.
+    }
+    this.log(`Detached the remote audio playback path (${reason}).`);
+  }
+
+  /**
+   * Detects an outbound capture that died without firing `ended`.
+   *
+   * `MediaStreamTrack.stop()` (and some OS-level revocations) leave the track
+   * `ended` with no event, so a connected call would publish nothing at all
+   * while every counter on the other side still looks healthy. The capture is
+   * re-acquired a bounded number of times per incident.
+   */
+  private superviseOutboundAudio(): void {
+    if (this.stopped || this.intentionalLeave || this.micMuted) return;
+    if (this.micPermission !== 'granted' || this.recoveryInFlight) return;
+    const pc = this.pc;
+    if (!pc || (pc.connectionState !== 'connected' && pc.connectionState !== 'connecting')) return;
+    const track = this.localStream?.getAudioTracks()[0] ?? null;
+    if (isCapturePublishable(track, this.micMuted)) {
+      // A capture that stays publishable proves the last recovery worked, so the
+      // per-incident budget is released (and a later, genuine failure gets its
+      // own bounded attempts instead of inheriting an exhausted budget).
+      if (this.captureHealthySince === null) this.captureHealthySince = Date.now();
+      else if (Date.now() - this.captureHealthySince >= MIC_RECOVERY_HEALTHY_MS) {
+        this.localMicRecoveryAttempts = 0;
+      }
+      return;
+    }
+    // recoverLocalTrack() owns the budget, the single-flight gate and the
+    // healthy-capture check: incrementing here would consume two attempts per
+    // recovery and could still re-open a capture that is fine.
+    this.log(
+      `Outbound microphone track is ${track ? `${track.readyState}${track.muted ? '/muted' : ''}` : 'missing'}; requesting recovery.`
+    );
+    void this.recoverLocalTrack(track ? 'track ended without an event' : 'track missing');
+  }
+
+  /** Periodic supervision: never leave a live stream silently paused. */
+  private supervisePlayback(): void {
+    const element = this.audioElement;
+    if (!element || !element.srcObject) {
+      if (this.playbackState !== 'no_track') this.playbackState = 'no_track';
+      return;
+    }
+    if (this.speakerMuted) {
+      if (!element.paused) this.playbackState = 'playing';
+      return;
+    }
+    if (!element.paused) {
+      if (this.playbackState !== 'playing') {
+        this.playbackState = 'playing';
         this.playbackBlocked = false;
         this.playbackError = null;
-        this.log('Playing remote audio stream live.');
-        this.emit();
-      })
-      .catch((err: Error) => {
-        this.playbackBlocked = true;
-        this.playbackError = `${err?.name || 'Error'}: ${err?.message || err}`;
-        this.log(`Remote audio playback blocked: ${this.playbackError}`);
-        this.emit();
-      });
+      }
+      return;
+    }
+    // Paused while it should be playing. Retry, but throttled so a browser that
+    // keeps rejecting the gesture is not hammered with play() calls.
+    if (Date.now() - this.lastPlayAttemptAt < PLAYBACK_RETRY_MS) {
+      this.playbackState = this.playbackBlocked ? 'blocked' : 'paused';
+      return;
+    }
+    this.log('Remote audio element is paused while a live stream is attached; retrying playback.');
+    void this.playRemoteAudio('playback supervision');
   }
 
   setSpeakerMuted(muted: boolean): void {
     this.speakerMuted = muted;
-    if (this.audioElement) this.audioElement.muted = muted;
+    if (this.audioElement) {
+      this.audioElement.muted = muted;
+      if (!muted) void this.playRemoteAudio('speaker unmuted');
+    }
     this.log(
       muted
         ? `${this.options.role === 'customer' ? 'Salesperson' : 'Customer'} audio playback muted locally.`
         : `${this.options.role === 'customer' ? 'Salesperson' : 'Customer'} audio playback unmuted.`
     );
+  }
+
+  // -------------------------------------------------------------------------
+  // Audio measurement
+  //
+  // Everything below only *reads* audio: an AnalyserNode is never connected to
+  // a destination, so measuring the inbound stream cannot create a feedback
+  // loop, a second playback path or extra load on the capture device.
+  // -------------------------------------------------------------------------
+
+  /** True when inbound audio carried measurable sound recently. */
+  private soundDetectedNow(): boolean {
+    return this.lastInboundSoundAt > 0 && Date.now() - this.lastInboundSoundAt < SOUND_FRESH_MS;
+  }
+
+  private ensureAudioContext(): AudioContext | null {
+    if (this.audioContext) return this.audioContext;
+    const Ctor =
+      (globalThis as { AudioContext?: typeof AudioContext }).AudioContext ??
+      (globalThis as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext ??
+      null;
+    if (!Ctor) return null;
+    try {
+      this.audioContext = new Ctor();
+    } catch {
+      this.audioContext = null;
+    }
+    return this.audioContext;
+  }
+
+  private detachInboundAnalyser(): void {
+    try {
+      this.inboundAnalyserSource?.disconnect();
+      this.inboundAnalyser?.disconnect();
+    } catch {
+      // Already gone.
+    }
+    this.inboundAnalyserSource = null;
+    this.inboundAnalyser = null;
+    this.inboundAnalyserTrackId = null;
+    this.inboundAudioLevel = null;
+    this.lastInboundSoundAt = 0;
+  }
+
+  private detachOutboundAnalyser(): void {
+    try {
+      this.outboundAnalyserSource?.disconnect();
+      this.outboundAnalyser?.disconnect();
+    } catch {
+      // Already gone.
+    }
+    this.outboundAnalyserSource = null;
+    this.outboundAnalyser = null;
+    this.outboundAnalyserTrackId = null;
+    this.localAudioLevel = null;
+  }
+
+  /** Attaches a read-only analyser to the inbound (remote) audio track. */
+  private attachInboundAnalyser(track: MediaStreamTrack | null): void {
+    this.detachInboundAnalyser();
+    if (!track) return;
+    const context = this.ensureAudioContext();
+    if (!context) return;
+    try {
+      const source = context.createMediaStreamSource(new MediaStream([track]));
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.2;
+      source.connect(analyser);
+      this.inboundAnalyserSource = source;
+      this.inboundAnalyser = analyser;
+      this.inboundAnalyserTrackId = track.id;
+      const resumed = context.resume();
+      if (resumed && typeof resumed.catch === 'function') void resumed.catch(() => undefined);
+    } catch (err) {
+      this.log(`Inbound audio measurement unavailable: ${(err as Error)?.message || err}`);
+    }
+  }
+
+  /** Attaches a read-only analyser to this participant's own microphone. */
+  private attachOutboundAnalyser(track: MediaStreamTrack | null): void {
+    this.detachOutboundAnalyser();
+    if (!track) return;
+    const context = this.ensureAudioContext();
+    if (!context) return;
+    try {
+      const source = context.createMediaStreamSource(new MediaStream([track]));
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.2;
+      source.connect(analyser);
+      this.outboundAnalyserSource = source;
+      this.outboundAnalyser = analyser;
+      this.outboundAnalyserTrackId = track.id;
+    } catch (err) {
+      this.log(`Microphone level measurement unavailable: ${(err as Error)?.message || err}`);
+    }
+  }
+
+  private analyserRms(analyser: AnalyserNode | null): number | null {
+    if (!analyser) return null;
+    try {
+      const size = analyser.fftSize;
+      if (!this.analyserBuffer || this.analyserBuffer.length !== size) {
+        if (typeof analyser.getFloatTimeDomainData !== 'function') return null;
+        this.analyserBuffer = new Float32Array(size);
+      }
+      analyser.getFloatTimeDomainData(this.analyserBuffer);
+      let sumSquares = 0;
+      for (let index = 0; index < this.analyserBuffer.length; index += 1) {
+        const value = this.analyserBuffer[index];
+        sumSquares += value * value;
+      }
+      const rms = Math.sqrt(sumSquares / this.analyserBuffer.length);
+      return Number.isFinite(rms) ? rms : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Samples both levels and stamps the "sound was audible" clock. */
+  private sampleAudioLevels(): void {
+    const inbound = this.analyserRms(this.inboundAnalyser);
+    if (inbound !== null) {
+      this.inboundAudioLevel = inbound;
+      if (inbound >= INBOUND_SOUND_RMS_THRESHOLD) this.lastInboundSoundAt = Date.now();
+    }
+    const outbound = this.analyserRms(this.outboundAnalyser);
+    if (outbound !== null) this.localAudioLevel = outbound;
+  }
+
+  private releaseAudioMeasurement(): void {
+    this.detachInboundAnalyser();
+    this.detachOutboundAnalyser();
+    const context = this.audioContext;
+    this.audioContext = null;
+    this.analyserBuffer = null;
+    if (context) {
+      try {
+        const closed = context.close();
+        if (closed && typeof closed.catch === 'function') void closed.catch(() => undefined);
+      } catch {
+        // Already closed.
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -888,13 +1384,21 @@ export class CallEngine {
     this.stopCaptions();
     this.closePeerConnection(`stop: ${reason}`);
     this.resetPeerRecoveryState('call stopped');
+    this.resetCustomerTranscript('call stopped');
+    this.forwardedTranscripts.clear();
+    this.suggestions = [];
     this.releaseLocalMedia(reason);
+    this.releaseAudioMeasurement();
+    // Idempotent: closePeerConnection already detached the playback path.
+    this.detachPlayback(`call stopped: ${reason}`);
+    this.releaseSilentClip();
 
     this.participantId = null;
     this.peerParticipantId = null;
     this.peerRole = null;
     this.participants = [];
     this.remoteTrackState = 'none';
+    this.playbackState = 'no_track';
     this.wsStatus = 'disconnected';
     this.callState = 'ended';
     this.log(`Call stopped (${reason}).`);
@@ -1093,17 +1597,21 @@ export class CallEngine {
         throw new Error('Microphone access is not available in this browser context.');
       }
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
+        // AEC on, NS on, AGC off, mono — one documented policy for the human
+        // path (see src/lib/microphone.ts for the reasoning and trade-offs).
+        audio: buildMicrophoneConstraints(),
       });
+      this.micCaptures += 1;
       this.localStream = stream;
       const track = stream.getAudioTracks()[0];
       if (track) track.enabled = !this.micMuted;
       this.micPermission = 'granted';
+      this.recordMicrophoneProcessing(track ?? null);
       this.watchLocalTrack(stream);
+      // Measure the microphone this participant publishes: a track can be
+      // `live` and `enabled` yet carry nothing (another capture on the same
+      // device holds it), which is invisible over RTP.
+      this.attachOutboundAnalyser(track);
       if (previous && previous !== stream) {
         // Releasing the old capture is not optional: a second live capture of
         // the same device keeps the microphone "in use", competes with the AI
@@ -1131,6 +1639,36 @@ export class CallEngine {
       this.log(`Microphone error: ${error?.name || 'Error'} - ${error?.message || error}`);
       return null;
     }
+  }
+
+  /**
+   * Records what the browser actually applied to the capture.
+   *
+   * The three processing requests used to be taken on faith. A browser or
+   * platform that silently drops echo cancellation is exactly how a call ends up
+   * with echo/feedback while every transport counter stays healthy, so the
+   * applied state is measured and reported instead of assumed.
+   */
+  private recordMicrophoneProcessing(track: MediaStreamTrack | null): void {
+    let settings: Record<string, unknown> | null = null;
+    try {
+      if (track && typeof track.getSettings === 'function') {
+        settings = track.getSettings() as unknown as Record<string, unknown>;
+      }
+    } catch {
+      // Some environments expose getSettings() but throw for a fake track.
+      settings = null;
+    }
+    this.micProcessing = readAppliedMicrophoneProcessing(settings);
+    const report = describeMicrophoneProcessing(this.micProcessing);
+    this.diagnostics = {
+      ...this.diagnostics,
+      microphoneProcessing: report.summary,
+      echoCancellationActive: report.echoCancellationActive,
+      micCaptures: this.micCaptures,
+    };
+    this.log(`Microphone processing: ${report.summary}.`);
+    for (const warning of report.warnings) this.log(`Microphone note: ${warning}`);
   }
 
   setMicMuted(muted: boolean): void {
@@ -1183,11 +1721,37 @@ export class CallEngine {
     );
   }
 
+  /** Removes every listener attached to the current capture's tracks. */
+  private clearLocalTrackWatchers(): void {
+    const cleanups = this.localTrackCleanups;
+    this.localTrackCleanups = [];
+    for (const cleanup of cleanups) {
+      try {
+        cleanup();
+      } catch {
+        // A track from a closed stream can throw; nothing is left to release.
+      }
+    }
+    if (this.micRecoveryTimer !== null) {
+      window.clearTimeout(this.micRecoveryTimer);
+      this.micRecoveryTimer = null;
+    }
+  }
+
+  /**
+   * Watches one capture for the two ways a browser silently stops publishing.
+   *
+   * Listeners are stored so they can be removed: a replaced capture must not
+   * keep dispatching `mute`/`ended` into the engine, which would otherwise start
+   * a recovery for a track that is no longer in use.
+   */
   private watchLocalTrack(stream: MediaStream): void {
+    this.clearLocalTrackWatchers();
     stream.getAudioTracks().forEach((track) => {
-      track.addEventListener('mute', () => {
+      const onMute = () => {
         this.log('Local microphone track muted by the browser.');
         this.emit();
+        this.captureHealthySince = null;
         if (this.micRecoveryTimer !== null) window.clearTimeout(this.micRecoveryTimer);
         this.micRecoveryTimer = window.setTimeout(() => {
           this.micRecoveryTimer = null;
@@ -1195,33 +1759,85 @@ export class CallEngine {
             void this.recoverLocalTrack('track muted by the browser');
           }
         }, 2500);
-      });
-      track.addEventListener('unmute', () => {
+      };
+      const onUnmute = () => {
         this.log('Local microphone track unmuted.');
+        this.captureHealthySince = Date.now();
         this.emit();
         if (this.micRecoveryTimer !== null) {
           window.clearTimeout(this.micRecoveryTimer);
           this.micRecoveryTimer = null;
         }
-      });
-      track.addEventListener('ended', () => {
+      };
+      const onEnded = () => {
         this.log('Local microphone track ended by the browser.');
+        this.captureHealthySince = null;
         this.emit();
+        // One incident, one recovery: a pending mute recovery for the same track
+        // must not queue a second capture.
+        if (this.micRecoveryTimer !== null) {
+          window.clearTimeout(this.micRecoveryTimer);
+          this.micRecoveryTimer = null;
+        }
         if (!this.micMuted) void this.recoverLocalTrack('track ended');
-      });
+      };
+      try {
+        track.addEventListener('mute', onMute);
+        track.addEventListener('unmute', onUnmute);
+        track.addEventListener('ended', onEnded);
+        this.localTrackCleanups.push(() => {
+          track.removeEventListener('mute', onMute);
+          track.removeEventListener('unmute', onUnmute);
+          track.removeEventListener('ended', onEnded);
+        });
+      } catch {
+        // A track without listener support cannot be supervised; nothing to do.
+      }
     });
   }
 
   /**
-   * Mobile browsers can end/mute the microphone track when a second capture
-   * starts (the customer device also runs the Ultravox AI session). Reacquire
-   * and replace the outbound track instead of silently going dead.
+   * Replaces a capture the browser has muted or ended.
+   *
+   * This is intentionally idempotent and bounded:
+   *   - a capture that is still publishable is never replaced (each
+   *     `getUserMedia` of a live device is a click, a new processing pipeline
+   *     and a competitor for the customer's AI capture),
+   *   - the dead capture is released *before* the new one is opened so two
+   *     captures of the same device never overlap,
+   *   - every path (mute timer, ended event, supervisor) shares one budget that
+   *     is only released once the new capture has stayed healthy.
    */
   private async recoverLocalTrack(reason: string): Promise<void> {
     if (this.recoveryInFlight) return;
+    if (this.stopped || this.intentionalLeave) return;
+
+    const current = this.localStream?.getAudioTracks()[0] ?? null;
+    if (isCapturePublishable(current, this.micMuted)) {
+      this.log(`Microphone recovery skipped: the capture is already healthy (${reason}).`);
+      return;
+    }
+    if (this.localMicRecoveryAttempts >= MAX_LOCAL_MIC_RECOVERY_ATTEMPTS) {
+      this.log(
+        `Microphone recovery budget exhausted (${MAX_LOCAL_MIC_RECOVERY_ATTEMPTS} attempts); ` +
+          `keeping the call as it is (${reason}).`
+      );
+      return;
+    }
+
+    this.localMicRecoveryAttempts += 1;
     this.recoveryInFlight = true;
+    this.captureHealthySince = null;
     try {
-      this.log(`Recovering local microphone track (${reason})...`);
+      this.log(
+        `Recovering local microphone track (${reason}), attempt ` +
+          `${this.localMicRecoveryAttempts}/${MAX_LOCAL_MIC_RECOVERY_ATTEMPTS}...`
+      );
+      // Free the dead capture first: a second simultaneous capture of the same
+      // device is exactly what mutes the replacement on mobile browsers.
+      if (current && !isCapturePublishable(current, this.micMuted)) {
+        this.releaseCaptureTrack(current, `replaced capture (${reason})`);
+      }
       const stream = await this.ensureLocalStream(true);
       const track = stream?.getAudioTracks()[0];
       if (!track) {
@@ -1233,6 +1849,7 @@ export class CallEngine {
         return;
       }
       await this.attachOutboundAudioTrack(track, stream as MediaStream);
+      if (isCapturePublishable(track, this.micMuted)) this.captureHealthySince = Date.now();
       this.log('Outbound microphone track replaced after recovery.');
       if (this.options.role === 'salesperson') {
         void this.makeOffer({ reason: 'microphone recovery' });
@@ -1259,6 +1876,7 @@ export class CallEngine {
   ): Promise<void> {
     const pc = this.pc;
     if (!pc) return;
+    if (this.outboundAnalyserTrackId !== track.id) this.attachOutboundAnalyser(track);
     const sender =
       this.audioSender ??
       pc.getSenders().find((candidate) => candidate.track?.kind === 'audio') ??
@@ -1266,6 +1884,8 @@ export class CallEngine {
     if (sender) {
       if (sender.track !== track) await sender.replaceTrack(track);
       this.audioSender = sender;
+      // A replaced track on a transceiver that may not send is still silent.
+      void this.checkAudioDirection('microphone attached');
       return;
     }
     this.audioSender = pc.addTrack(track, stream);
@@ -1274,23 +1894,50 @@ export class CallEngine {
       // (no transceiver and no track at creation time). Renegotiate it.
       void this.makeOffer({ reason: 'microphone attached' });
     } else {
-      const sent = this.sendSignal({ type: 'ice_restart', reason: 'customer microphone attached' });
+      // The answerer cannot offer: a plain renegotiation is what an added
+      // m-line needs (an ICE restart would rebuild the transport for nothing).
+      const sent = this.sendSignal({ type: 'renegotiate', reason: 'customer microphone attached' });
       this.log(
         `Asked the salesperson to renegotiate after attaching the microphone${sent ? '' : ': signaling is unavailable'}.`
       );
     }
   }
 
+  /**
+   * Stops one capture track and drops the watchers of its stream.
+   *
+   * The old capture must go away entirely: a stopped track that keeps a `mute`
+   * listener can start a recovery for a capture that is no longer published, and
+   * a live second capture of the same device keeps the microphone "in use" (it
+   * competes with the customer's AI capture and mutes the replacement on some
+   * mobile browsers).
+   */
+  private releaseCaptureTrack(track: MediaStreamTrack, reason: string): void {
+    this.clearLocalTrackWatchers();
+    try {
+      track.stop();
+    } catch {
+      // Already ended.
+    }
+    this.log(`Stopped the previous microphone capture (${reason}).`);
+  }
+
   private releaseLocalMedia(reason: string): void {
+    this.detachOutboundAnalyser();
+    this.clearLocalTrackWatchers();
     if (this.localStream) {
-      this.localStream.getTracks().forEach((track) => track.stop());
+      const stream = this.localStream;
       this.localStream = null;
+      for (const track of stream.getTracks()) {
+        try {
+          track.stop();
+        } catch {
+          // Already ended.
+        }
+      }
       this.log(`Released microphone tracks (${reason}).`);
     }
-    if (this.micRecoveryTimer !== null) {
-      window.clearTimeout(this.micRecoveryTimer);
-      this.micRecoveryTimer = null;
-    }
+    this.captureHealthySince = null;
   }
 
   // -------------------------------------------------------------------------
@@ -1541,6 +2188,9 @@ export class CallEngine {
     this.recoveryAttemptInFlight = false;
     this.pendingIceRestartReason = null;
     this.pendingIceRestartForce = false;
+    this.directionRepairAttempts = 0;
+    this.lastRenegotiateRequestAt = 0;
+    this.localMicRecoveryAttempts = 0;
     if (reason) this.log(`Peer recovery state reset (${reason}).`);
   }
 
@@ -1578,7 +2228,14 @@ export class CallEngine {
       }
       this.log(`Closed peer connection (${reason}).`);
     }
+    // The element must not keep the stream of a closed connection: a reconnect
+    // builds a new MediaStream, and an element still holding the old one would
+    // be a second (dead) playback path.
+    this.detachPlayback(`peer connection closed: ${reason}`);
     this.remoteStream = null;
+    this.remoteTrack = null;
+    this.detachInboundAnalyser();
+    this.playbackState = 'no_track';
     this.pendingIce = [];
     this.lastRemoteOfferSdp = null;
     this.remoteTrackState = 'none';
@@ -1592,6 +2249,12 @@ export class CallEngine {
       localSenderCount: 0,
       bytesSent: 0,
       bytesReceived: 0,
+      inboundPackets: 0,
+      inboundPacketsLost: 0,
+      inboundJitter: 0,
+      playbackState: 'no_track',
+      lastSoundAgoMs: null,
+      audioDirection: 'unknown',
     };
     this.lastStats = null;
   }
@@ -1714,40 +2377,113 @@ export class CallEngine {
 
     pc.ontrack = (event) => {
       if (this.pc !== pc || this.pcGeneration !== generation) return;
+      if (event.track.kind !== 'audio') {
+        this.log(`Ignoring remote ${event.track.kind} track: only audio is part of this call.`);
+        return;
+      }
       this.log(`Received remote ${event.track.kind} track from ${peer.role}.`);
-      const remote = event.streams[0] ?? new MediaStream([event.track]);
-      this.remoteStream = remote;
-      this.remoteTrackState = 'live';
-      this.attachRemoteStream(remote);
-      this.emit();
-
-      // A replaced track from an older peer connection must not change the
-      // current connection's state.
-      const isStale = () => this.pc !== pc || this.pcGeneration !== generation;
-      event.track.onmute = () => {
-        if (isStale()) return;
-        this.remoteTrackState = 'live';
-        this.log('Remote audio track muted (no media arriving yet).');
-        this.emit();
-      };
-      event.track.onunmute = () => {
-        if (isStale()) return;
-        this.remoteTrackState = 'live';
-        this.log('Remote audio track unmuted (media arriving).');
-        this.emit();
-      };
-      event.track.onended = () => {
-        if (isStale()) return;
-        this.remoteTrackState = 'ended';
-        this.log('Remote audio track ended.');
-        this.emit();
-      };
+      this.adoptRemoteAudioTrack(event.track, pc, generation);
     };
 
     // A fresh peer connection means a fresh negotiation is starting. This is
     // deliberately not "connected" until ICE and DTLS report connected.
     this.callState = 'connecting';
     this.armConnectWatchdog(pc);
+  }
+
+  /**
+   * Adopts the remote audio track into the single, stable remote stream.
+   *
+   * Called from `ontrack` and, as a fallback, from the connected watchdog: some
+   * browsers deliver a receiver without ever firing `ontrack` for it (a remote
+   * track added during an ICE restart, or a renegotiation that reused a
+   * receiver). Without this fallback this participant would sit on a connected
+   * call with no audio element attached and no way to hear the other side.
+   */
+  private adoptRemoteAudioTrack(
+    track: MediaStreamTrack,
+    pc: RTCPeerConnection,
+    generation: number
+  ): void {
+    const isStale = () => this.pc !== pc || this.pcGeneration !== generation;
+    const previous = this.remoteTrack;
+
+    if (previous === track && this.remoteStream?.getAudioTracks().includes(track)) {
+      // The same track arriving again (a second `ontrack` for one m-line, the
+      // receiver fallback, a re-emitted event) must not rebuild anything: a new
+      // analyser would reset the measured sound clock and a fresh play() would
+      // restart the one playback path.
+      if (this.audioElement && this.audioElement.srcObject !== this.remoteStream) {
+        this.attachRemoteStream(this.remoteStream as MediaStream);
+      }
+      return;
+    }
+
+    if (previous && previous !== track) {
+      previous.onmute = null;
+      previous.onunmute = null;
+      previous.onended = null;
+    }
+
+    // One stream for the whole call: a replaced track is swapped in place, so
+    // the element is never reloaded and can never play twice.
+    const stream = this.remoteStream ?? new MediaStream();
+    for (const existing of stream.getAudioTracks()) {
+      if (existing !== track) {
+        try {
+          stream.removeTrack(existing);
+        } catch {
+          // Already detached.
+        }
+      }
+    }
+    if (!stream.getAudioTracks().includes(track)) stream.addTrack(track);
+    this.remoteStream = stream;
+    this.remoteTrack = track;
+    this.remoteTrackState = track.readyState === 'ended' ? 'ended' : 'live';
+    this.attachInboundAnalyser(track);
+    this.attachRemoteStream(stream);
+    this.emit();
+
+    track.onmute = () => {
+      if (isStale() || this.remoteTrack !== track) return;
+      this.remoteTrackState = 'live';
+      this.log('Remote audio track muted (no media arriving yet).');
+      this.emit();
+    };
+    track.onunmute = () => {
+      if (isStale() || this.remoteTrack !== track) return;
+      this.remoteTrackState = 'live';
+      this.log('Remote audio track unmuted (media arriving).');
+      void this.playRemoteAudio('remote track unmuted');
+      this.emit();
+    };
+    track.onended = () => {
+      if (isStale() || this.remoteTrack !== track) return;
+      this.remoteTrackState = 'ended';
+      this.detachInboundAnalyser();
+      this.playbackState = 'no_track';
+      this.log('Remote audio track ended; waiting for a replacement track.');
+      this.emit();
+    };
+  }
+
+  /**
+   * Fallback when `ontrack` never fired for an available remote audio track.
+   * Never creates a second audio path: an already adopted track is a no-op.
+   */
+  private recoverMissingRemoteTrack(pc: RTCPeerConnection): boolean {
+    const receivers = typeof pc.getReceivers === 'function' ? pc.getReceivers() : [];
+    const receiver = receivers.find(
+      (candidate) => candidate.track?.kind === 'audio' && candidate.track.readyState === 'live'
+    );
+    if (!receiver?.track) return false;
+    if (this.remoteTrack === receiver.track && this.remoteStream?.getAudioTracks().includes(receiver.track)) {
+      return true;
+    }
+    this.log('Remote audio track was not delivered by ontrack; attaching it from the receiver.');
+    this.adoptRemoteAudioTrack(receiver.track, pc, this.pcGeneration);
+    return true;
   }
 
   /**
@@ -1808,15 +2544,111 @@ export class CallEngine {
     this.lastError = null;
     this.callState = 'connected';
     this.emit();
-    void this.resumePlayback();
     const pc = this.pc;
-    // ICE+DTLS is not audio. Keep checking that RTP actually arrives.
-    if (pc) this.armMediaWatchdog(pc);
+    if (pc) {
+      // An available receiver is audio this side must hear: adopt it even if
+      // `ontrack` never fired, and make sure the browser is really playing.
+      this.recoverMissingRemoteTrack(pc);
+      this.supervisePlayback();
+      if (!this.audioUnlocked) void this.resumePlayback();
+      // ICE+DTLS is not audio. Keep checking that RTP actually arrives.
+      this.armMediaWatchdog(pc);
+    }
+    // Report the negotiated audio direction: a direction that cannot send or
+    // receive explains one-way audio long before any RTP counter would.
+    void this.checkAudioDirection('peer connected');
   }
 
   /** Inbound RTP arrived recently enough to count as working audio. */
   private mediaFlowingNow(): boolean {
     return this.lastMediaAt > 0 && Date.now() - this.lastMediaAt < MEDIA_FLOW_FRESH_MS;
+  }
+
+  /** Reads the negotiated direction of this participant's audio transceiver. */
+  private audioTransceiverDirection(
+    pc: RTCPeerConnection
+  ): { declared: string; current: string } | null {
+    const transceivers = typeof pc.getTransceivers === 'function' ? pc.getTransceivers() : [];
+    for (const transceiver of transceivers as RTCRtpTransceiver[]) {
+      const kind =
+        transceiver.receiver?.track?.kind ??
+        (transceiver.receiver as unknown as { kind?: string })?.kind ??
+        transceiver.sender?.track?.kind;
+      if (kind !== 'audio') continue;
+      return {
+        declared: transceiver.direction,
+        current: transceiver.currentDirection ?? transceiver.direction ?? 'unknown',
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Verifies that the negotiated audio m-line can actually carry this
+   * participant's microphone (and the peer's).
+   *
+   * `replaceTrack()` on a transceiver whose negotiated direction is `recvonly`
+   * publishes nothing: the call connects, one direction is silent, and no
+   * recovery ever runs because ICE, DTLS and RTP on the other direction are all
+   * healthy. This is the "microphone published but never negotiated" case, so it
+   * is detected and repaired with a bounded renegotiation instead of being
+   * reported as working audio.
+   */
+  private async checkAudioDirection(reason: string): Promise<void> {
+    const pc = this.pc;
+    if (!pc || this.stopped || this.intentionalLeave || this.peerFailureConfirmed) return;
+    if (pc.connectionState !== 'connected') return;
+    const info = this.audioTransceiverDirection(pc);
+    if (!info) return;
+    if (this.diagnostics.audioDirection !== info.current) {
+      this.diagnostics = { ...this.diagnostics, audioDirection: info.current };
+    }
+    const canSend = info.current === 'sendrecv' || info.current === 'sendonly';
+    const canReceive = info.current === 'sendrecv' || info.current === 'recvonly';
+    const hasMicrophone = hasLiveAudioTrack(this.localStream);
+    if (hasMicrophone && !canSend) {
+      this.log(
+        `Negotiated audio direction "${info.current}" cannot carry this microphone; requesting a renegotiation (${reason}).`
+      );
+      this.requestDirectionRepair('send');
+      return;
+    }
+    if (!canReceive) {
+      this.log(
+        `Negotiated audio direction "${info.current}" cannot receive the peer's microphone; requesting a renegotiation (${reason}).`
+      );
+      this.requestDirectionRepair('receive');
+    }
+  }
+
+  /** Bounded repair for a direction that cannot carry audio in one direction. */
+  private requestDirectionRepair(direction: 'send' | 'receive'): void {
+    if (this.directionRepairAttempts >= MAX_DIRECTION_REPAIR_ATTEMPTS) {
+      this.log('Audio direction repair budget exhausted; a manual reconnect is required.');
+      return;
+    }
+    const pc = this.pc;
+    if (!pc || this.stopped || this.peerFailureConfirmed) return;
+    if (this.options.role === 'salesperson') {
+      this.directionRepairAttempts += 1;
+      if (pc.signalingState !== 'stable') {
+        this.log('Audio direction repair deferred: signaling is not stable.');
+        return;
+      }
+      void this.makeOffer({ reason: `audio direction repair (${direction})` });
+      return;
+    }
+    // The customer is the answerer: it can only ask the offerer to renegotiate.
+    if (Date.now() - this.lastRenegotiateRequestAt < RENEGOTIATE_REQUEST_INTERVAL_MS) return;
+    this.lastRenegotiateRequestAt = Date.now();
+    this.directionRepairAttempts += 1;
+    const sent = this.sendSignal({
+      type: 'renegotiate',
+      reason: `audio direction repair (${direction})`,
+    });
+    this.log(
+      `Asked the salesperson to renegotiate the audio direction${sent ? '' : ': signaling is unavailable'}.`
+    );
   }
 
   /**
@@ -2422,6 +3254,16 @@ export class CallEngine {
       return;
     }
 
+    if (
+      this.options.role === 'salesperson' &&
+      this.peerParticipantId &&
+      this.peerParticipantId !== counterpart.participantId
+    ) {
+      // A different customer in the same session must never inherit the
+      // previous customer's transcript segments.
+      this.resetCustomerTranscript('a different customer joined');
+    }
+
     this.log(`Establishing a fresh peer connection for ${counterpart.role} (${source}).`);
     this.createPeerConnection(counterpart);
     if (this.options.role === 'salesperson') void this.makeOffer({ reason: source });
@@ -2585,6 +3427,8 @@ export class CallEngine {
         await pc.setLocalDescription(answer);
         this.sendSignal({ type: 'answer', answer: pc.localDescription ?? answer });
         this.log('Answer sent.');
+        // The answer decides whether this side can send its microphone.
+        void this.checkAudioDirection('answer sent');
       } catch (err) {
         this.log(`Failed to apply offer/create answer: ${(err as Error)?.message || err}`);
       }
@@ -2602,6 +3446,29 @@ export class CallEngine {
       }
       this.log('The customer requested an ICE restart.');
       this.requestIceRecovery('customer requested ICE restart', true);
+      return;
+    }
+
+    if (type === 'renegotiate') {
+      // The customer is the answerer and cannot create an offer. When its
+      // negotiated audio direction cannot carry its microphone it asks the
+      // salesperson (the only offerer) for a fresh negotiation.
+      if (this.options.role !== 'salesperson') {
+        this.log('Ignoring renegotiation request: only the salesperson creates offers.');
+        return;
+      }
+      if (data.from && this.peerParticipantId && data.from !== this.peerParticipantId) {
+        this.log('Ignoring renegotiation request from a stale peer.');
+        return;
+      }
+      if (this.peerFailureConfirmed || this.stopped || this.intentionalLeave) return;
+      this.log(
+        `The customer asked for a renegotiation${
+          typeof data.reason === 'string' ? ` (${data.reason.slice(0, 80)})` : ''
+        }.`
+      );
+      if (!this.pc) return;
+      void this.makeOffer({ reason: 'customer requested renegotiation' });
       return;
     }
 
@@ -2646,6 +3513,8 @@ export class CallEngine {
         this.log('Answer applied.');
         // A restart requested while signaling was not stable is now runnable.
         this.tryPendingIceRestart();
+        // The remote answer decides whether the customer's audio can arrive.
+        void this.checkAudioDirection('answer applied');
       } catch (err) {
         if (this.pc !== pc || this.pcGeneration !== generation) return;
         this.answerInFlight = false;
@@ -2695,12 +3564,14 @@ export class CallEngine {
       const state = (allowed as string[]).includes(rawState)
         ? (rawState as AiStatus['state'])
         : 'error';
+      const reportedCallId = typeof data.callId === 'string' ? data.callId.slice(0, 100) : null;
+      this.bindCustomerTranscriptToCall(reportedCallId);
       this.applyRemoteAi({
         state,
         status: null,
         connected: data.connected === true && state === 'connected',
         error: sanitizeAiDetail(data.error),
-        callId: typeof data.callId === 'string' ? data.callId.slice(0, 100) : null,
+        callId: reportedCallId,
         reconnectAttempt:
           typeof data.reconnectAttempt === 'number' ? Math.max(0, Math.round(data.reconnectAttempt)) : 0,
         reconnecting: state === 'reconnecting' || state === 'creating' || state === 'connecting',
@@ -2763,8 +3634,24 @@ export class CallEngine {
 
     if (type === 'customer_speech_transcript') {
       if (this.options.role !== 'salesperson') return;
-      this.customerSpeech = typeof data.text === 'string' ? data.text : '';
-      this.emit();
+      const result = applyCustomerTranscriptEvent(this.customerTranscript, {
+        text: data.text,
+        isFinal: data.isFinal,
+        ordinal: data.ordinal,
+        callId: data.callId,
+        medium: data.medium,
+        timestamp: data.timestamp,
+      });
+      this.customerTranscript = result.state;
+      if (result.applied) {
+        // The single-line compatibility field only ever holds final text; the
+        // segment list is what renders partials and preserved utterance
+        // boundaries. Nothing is merged across ordinals.
+        this.customerSpeech = latestFinalCustomerTranscriptSegment(this.customerTranscript)?.text ?? '';
+        this.emit();
+      } else if (result.reason !== 'duplicate') {
+        this.log(`Ignored customer transcript (${result.reason}).`);
+      }
       return;
     }
 
@@ -2829,6 +3716,8 @@ export class CallEngine {
     // error or transcript callbacks can never overwrite the new session's state.
     const generation = ++this.aiGeneration;
     await this.teardownAiSession('replacing the previous AI session');
+    // Ordinals belong to one Ultravox call; never carry them into the next one.
+    this.forwardedTranscripts.clear();
 
     if (this.stopped || this.intentionalLeave || generation !== this.aiGeneration) {
       // The call was stopped while the previous session was tearing down.
@@ -2894,6 +3783,23 @@ export class CallEngine {
       this.ultravox = session;
       this.aiEverConnected = false;
       this.aiConnectedSince = null;
+      // The agent is text-only in this product, so its audio output must be
+      // silenced BEFORE the room is joined. `ultravox-client` enables a
+      // subscribed agent-audio publication unless its own speaker mute flag is
+      // already set (`TrackSubscribed` -> `setEnabled(!isSpeakerMuted)`), and the
+      // engine used to mute only after the first LISTENING/IDLE status - i.e.
+      // after the agent's first utterance had already been rendered on the
+      // customer's speakers. That audio is picked up by BOTH of the customer
+      // device's microphone captures (the participant capture and the Ultravox
+      // capture), which doubles the agent's voice with the salesperson's and lets
+      // the AI hear itself (repeated words).
+      try {
+        session.muteSpeaker();
+        session.setOutputMedium(Medium.TEXT);
+      } catch {
+        // Older SDKs reject an early output-medium change; the status handler
+        // below re-applies both once the session is live.
+      }
       this.setAi({
         state: 'connecting',
         status: UltravoxSessionStatus.CONNECTING,
@@ -2973,27 +3879,48 @@ export class CallEngine {
         let lastSuggestionAt = this.ai.lastSuggestionAt;
         let lastResponseAt = this.ai.lastResponseAt;
         for (const transcript of session.transcripts) {
-          if (transcript.speaker === Role.AGENT && transcript.text.trim()) {
+          if (!transcript || typeof transcript.text !== 'string') continue;
+          if (transcript.text.trim().length === 0) continue;
+          if (typeof transcript.ordinal !== 'number') continue;
+
+          // The SDK re-emits the entire ordinal-indexed array on every update.
+          // Forward a segment only when its text/finality actually changed, so
+          // an earlier final is never re-sent when a later partial arrives.
+          const key = `${transcript.speaker}:${transcript.ordinal}`;
+          const isFinal = Boolean(transcript.isFinal);
+          const previous = this.forwardedTranscripts.get(key);
+          if (previous && previous.text === transcript.text && previous.isFinal === isFinal) continue;
+          this.forwardedTranscripts.set(key, { text: transcript.text, isFinal });
+          if (this.forwardedTranscripts.size > 500) {
+            const oldest = this.forwardedTranscripts.keys().next().value;
+            if (oldest !== undefined) this.forwardedTranscripts.delete(oldest);
+          }
+
+          if (transcript.speaker === Role.AGENT) {
             this.sendSignal({
               type: 'ai_suggestion',
               text: transcript.text,
-              isFinal: transcript.isFinal,
+              isFinal,
               ordinal: transcript.ordinal,
               timestamp,
             });
             lastResponseAt = Date.now();
-            if (transcript.isFinal) lastSuggestionAt = lastResponseAt;
+            if (isFinal) lastSuggestionAt = lastResponseAt;
           } else if (transcript.speaker === Role.USER) {
             this.customerSpeech = transcript.text;
-            if (transcript.isFinal && transcript.text.trim()) {
-              this.sendSignal({
-                type: 'customer_speech_transcript',
-                text: transcript.text,
-                isFinal: true,
-                ordinal: transcript.ordinal,
-                timestamp,
-              });
-            }
+            this.sendSignal({
+              type: 'customer_speech_transcript',
+              text: transcript.text,
+              isFinal,
+              ordinal: transcript.ordinal,
+              // Identifies the Ultravox call so a late segment from a replaced
+              // session can never be shown in the new call.
+              callId: this.ai.callId,
+              // Only metadata the SDK actually exposes. There is no language or
+              // confidence field in ultravox-client@0.6, so none is invented.
+              medium: transcript.medium,
+              timestamp,
+            });
           }
         }
         this.setAi(
@@ -3079,6 +4006,37 @@ export class CallEngine {
     });
   }
 
+  /**
+   * Binds the salesperson's transcript view to the reported Ultravox call and
+   * resets stale transcript/suggestion state when the call changes.
+   */
+  private bindCustomerTranscriptToCall(callId: string | null): void {
+    if (this.options.role !== 'salesperson') return;
+    const wasUnbound = this.customerTranscript.callId === null;
+    const next = bindCustomerTranscriptSession(this.customerTranscript, callId);
+    if (next === this.customerTranscript) return;
+    this.customerTranscript = next;
+    if (wasUnbound) return;
+
+    // A new Ultravox call restarts ordinals. Keeping the previous call's
+    // segments or suggestions would mix two conversations and let an old
+    // suggestion ordinal suppress a new one.
+    this.customerSpeech = '';
+    this.suggestions = [];
+    this.log(`Customer transcript reset for AI call ${String(callId).slice(0, 8)}.`);
+    this.emit();
+  }
+
+  /** Drops all customer-speech state, e.g. when a different customer joins. */
+  private resetCustomerTranscript(reason: string): void {
+    if (this.options.role !== 'salesperson') return;
+    if (this.customerTranscript.segments.length === 0 && !this.customerSpeech) return;
+    this.customerTranscript = createCustomerTranscriptState();
+    this.customerSpeech = '';
+    this.log(`Customer transcript cleared (${reason}).`);
+    this.emit();
+  }
+
   /** Mirrors customer-reported AI state into the salesperson's engine. */
   private applyRemoteAi(patch: Partial<AiStatus> & { state: AiStatus['state'] }): void {
     if (this.options.role !== 'salesperson') return;
@@ -3096,12 +4054,14 @@ export class CallEngine {
     const rawState = typeof runtime.state === 'string' ? runtime.state : '';
     if (!rawState) return;
     const state = rawState as AiStatus['state'];
+    const callId = typeof runtime.callId === 'string' ? runtime.callId.slice(0, 100) : null;
+    this.bindCustomerTranscriptToCall(callId);
     this.applyRemoteAi({
       state,
       connected: runtime.connected === true && state === 'connected',
       status: null,
       error: sanitizeAiDetail(runtime.error),
-      callId: typeof runtime.callId === 'string' ? runtime.callId.slice(0, 100) : null,
+      callId,
       reconnectAttempt:
         typeof runtime.reconnectAttempt === 'number'
           ? Math.max(0, Math.round(runtime.reconnectAttempt))
@@ -3323,6 +4283,7 @@ export class CallEngine {
       audioElementMuted: element ? element.muted : null,
       audioElementVolume: element ? element.volume : null,
       playbackError: this.playbackError,
+      playbackState: this.playbackState,
       hasTurn: this.iceConfig.hasTurn,
       iceTransportPolicy: this.iceConfig.iceTransportPolicy,
       sendBitrateKbps: 0,
@@ -3348,6 +4309,9 @@ export class CallEngine {
           }
           if (report.type === 'inbound-rtp' && report.kind === 'audio') {
             next.bytesReceived = report.bytesReceived ?? 0;
+            next.inboundPackets = report.packetsReceived ?? 0;
+            next.inboundPacketsLost = report.packetsLost ?? 0;
+            next.inboundJitter = report.jitter ?? 0;
           }
           if (report.type === 'outbound-rtp' && report.kind === 'audio') {
             next.bytesSent = report.bytesSent ?? 0;
@@ -3385,6 +4349,26 @@ export class CallEngine {
     } else {
       this.lastStats = null;
     }
+
+    // Measured energy, not just counters: RTP keeps arriving (as silence) when
+    // the remote microphone is muted or held by another capture on its device.
+    this.sampleAudioLevels();
+    next.inboundAudioLevel = this.inboundAudioLevel;
+    next.localAudioLevel = this.localAudioLevel;
+    next.lastSoundAgoMs = this.lastInboundSoundAt > 0 ? Date.now() - this.lastInboundSoundAt : null;
+    next.inboundSoundDetected = this.soundDetectedNow();
+
+    // Playback is part of the audio path: a paused element is not audio.
+    this.supervisePlayback();
+    // A capture that ended without firing `ended` publishes nothing at all.
+    this.superviseOutboundAudio();
+    next.playbackState = this.playbackState;
+    next.playbackError = this.playbackError;
+    next.audioElementPaused = element ? element.paused : null;
+    next.audioElementMuted = element ? element.muted : null;
+    next.audioElementVolume = element ? element.volume : null;
+    const direction = pc ? this.audioTransceiverDirection(pc) : null;
+    if (direction) next.audioDirection = direction.current;
 
     const mediaAge = this.lastMediaAt > 0 ? Date.now() - this.lastMediaAt : null;
     next.lastMediaAgoMs = mediaAge;
@@ -3442,6 +4426,23 @@ export class CallEngine {
         audioFlow: this.diagnostics.audioFlow,
         lastMediaAgoMs: this.diagnostics.lastMediaAgoMs,
         dtlsState: this.dtlsState,
+        // Inbound audio evidence (packets are not sound).
+        inboundPackets: this.diagnostics.inboundPackets,
+        inboundPacketsLost: this.diagnostics.inboundPacketsLost,
+        inboundJitter: this.diagnostics.inboundJitter,
+        inboundAudioLevel: this.diagnostics.inboundAudioLevel,
+        inboundSoundDetected: this.diagnostics.inboundSoundDetected,
+        lastSoundAgoMs: this.diagnostics.lastSoundAgoMs,
+        localAudioLevel: this.diagnostics.localAudioLevel,
+        audioDirection: this.diagnostics.audioDirection,
+        playbackState: this.diagnostics.playbackState,
+        playbackError: this.diagnostics.playbackError,
+        // Capture processing the browser reported (never assumed) plus how many
+        // times the microphone was opened. `micCaptures` is the evidence that a
+        // recovery did not turn into repeated device re-opens.
+        micProcessing: this.diagnostics.microphoneProcessing,
+        micEchoCancellation: this.diagnostics.echoCancellationActive,
+        micCaptures: this.diagnostics.micCaptures,
       },
     });
   }

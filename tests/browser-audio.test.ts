@@ -88,6 +88,22 @@ const openContext = async (browser: Browser): Promise<BrowserContext> => {
     // Registry of every microphone track handed to this page, so a test can
     // prove that recovery/reconnect leaves exactly one live capture.
     (window as any).__micTracks = [];
+    /**
+     * Every element that started playback while holding a MediaStream, keyed by
+     * a per-element id. More than one id means more than one playback path, which
+     * is exactly the "doubled voice" regression this suite must catch.
+     */
+    (window as any).__playbackIds = [];
+    let nextPlaybackId = 0;
+    const originalPlay = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function (this: HTMLMediaElement) {
+      if ((this as any).srcObject) {
+        const tagged = this as unknown as { __playbackId?: number };
+        if (tagged.__playbackId === undefined) tagged.__playbackId = nextPlaybackId++;
+        (window as any).__playbackIds.push(tagged.__playbackId);
+      }
+      return originalPlay.apply(this);
+    };
     const mediaDevices = navigator.mediaDevices;
     if (mediaDevices?.getUserMedia) {
       const originalGetUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
@@ -508,6 +524,103 @@ test('prototype2 three-path audio with synthetic media', async (t) => {
     );
     const rendered = await salespersonPage.textContent('[data-testid="ai-suggestion-latest"]');
     assert.match(rendered || '', /renewal date/);
+    socket.close();
+  });
+
+  await t.test('customer transcript segments reach the dashboard once, in order, without translation', async () => {
+    // Reuse the protocol-level customer socket from the previous subtest through
+    // the same real server route and real dashboard render path.
+    const inviteToken = decodeURIComponent(inviteUrl.split('invite=')[1]);
+    const customerKey = await customerPage.evaluate(
+      (token) =>
+        JSON.parse(sessionStorage.getItem(`sc.prototype2.customer.${token}`) || '{}').customerKey as string,
+      inviteToken
+    );
+    const sessionId = await salespersonPage.evaluate(
+      () => JSON.parse(localStorage.getItem('sc.prototype2.salesperson') || '{}').sessionId as string
+    );
+
+    const socket = new WebSocket(`${base.replace('http', 'ws')}/ws`);
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => resolve());
+      socket.once('error', reject);
+    });
+    socket.send(JSON.stringify({ type: 'join', sessionId, role: 'customer', credential: customerKey }));
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('join ack timeout')), 5000);
+      socket.on('message', (raw) => {
+        const message = JSON.parse(raw.toString());
+        if (message.type === 'joined') {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+    });
+
+    socket.send(
+      JSON.stringify({
+        type: 'ai_status',
+        sessionId,
+        state: 'connected',
+        connected: true,
+        callId: 'call_uitest',
+        audioReachingAi: true,
+      })
+    );
+    await sleep(150);
+
+    const send = (payload: Record<string, unknown>) =>
+      socket.send(
+        JSON.stringify({
+          type: 'customer_speech_transcript',
+          sessionId,
+          callId: 'call_uitest',
+          medium: 'voice',
+          ...payload,
+        })
+      );
+
+    send({ text: 'I need the', isFinal: false, ordinal: 1 });
+    await salespersonPage.waitForFunction(
+      () =>
+        document.querySelectorAll('[data-testid="customer-transcript-segment"]').length === 1 &&
+        document
+          .querySelector('[data-testid="customer-transcript-segment"]')
+          ?.getAttribute('data-final') === 'false',
+      { timeout: 8000 }
+    );
+
+    send({ text: 'I need the enterprise plan.', isFinal: true, ordinal: 1 });
+    // The same final again must not create a second segment.
+    send({ text: 'I need the enterprise plan.', isFinal: true, ordinal: 1 });
+    send({
+      text: 'Quiero el plan básico, but I need it for my team.',
+      isFinal: true,
+      ordinal: 2,
+    });
+
+    await salespersonPage.waitForFunction(
+      () => document.querySelectorAll('[data-testid="customer-transcript-segment"]').length === 2,
+      { timeout: 8000 }
+    );
+    await sleep(300);
+
+    const segments = await salespersonPage.evaluate(() =>
+      Array.from(document.querySelectorAll('[data-testid="customer-transcript-segment"]')).map(
+        (element) => ({
+          text: element.textContent || '',
+          ordinal: element.getAttribute('data-ordinal'),
+          final: element.getAttribute('data-final'),
+        })
+      )
+    );
+    assert.equal(segments.length, 2, 'one segment per ordinal, no duplicate final');
+    assert.equal(segments[0].ordinal, '1');
+    assert.equal(segments[0].final, 'true');
+    assert.equal(segments[0].text, 'I need the enterprise plan.');
+    assert.equal(segments[1].ordinal, '2');
+    assert.equal(segments[1].text, 'Quiero el plan básico, but I need it for my team.');
+    assert.ok(!segments[1].text.includes('live'), 'a final segment is not labelled live');
     socket.close();
   });
 
@@ -1149,6 +1262,28 @@ const writeToneWav = (file: string, hz: number, sampleRate = 48000, seconds = 2)
   return file;
 };
 
+/** Writes a 16-bit mono WAV of pure silence (a live but silent microphone). */
+const writeSilentWav = (file: string, sampleRate = 48000, seconds = 2): string => {
+  const frames = sampleRate * seconds;
+  const buffer = Buffer.alloc(44 + frames * 2);
+  buffer.write('RIFF', 0);
+  buffer.writeUInt32LE(36 + frames * 2, 4);
+  buffer.write('WAVE', 8);
+  buffer.write('fmt ', 12);
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20);
+  buffer.writeUInt16LE(1, 22);
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(sampleRate * 2, 28);
+  buffer.writeUInt16LE(2, 32);
+  buffer.writeUInt16LE(16, 34);
+  buffer.write('data', 36);
+  buffer.writeUInt32LE(frames * 2, 40);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, buffer);
+  return file;
+};
+
 const SALESPERSON_TONE_HZ = 440;
 const CUSTOMER_TONE_HZ = 1200;
 
@@ -1290,6 +1425,45 @@ const probeAudio = (page: Page, durationMs = 2600): Promise<AudioProbe> =>
     };
   }, durationMs);
 
+interface AudioPathAudit {
+  /** `<audio>`/`<video>` elements currently in the DOM. */
+  elements: number;
+  /** Elements currently holding a MediaStream (each one is a playback path). */
+  streamElements: number;
+  /** Distinct elements that ever played a stream (1 = no duplicate playback). */
+  playbackIds: number[];
+  /** Elements that received a stream but are not playing right now. */
+  pausedStreamElements: number;
+  /** Microphone captures opened by the engine (from its own diagnostics). */
+  micCaptures: number | null;
+  /** Processing the browser reported for the capture (null = not measured). */
+  micProcessing: string | null;
+  /** Live microphone tracks handed to this page. */
+  liveCaptures: number;
+}
+
+/**
+ * Audits the playback and capture side of one page: how many playback paths
+ * exist, whether a stale element kept a stream, and how many times the
+ * microphone was opened. This is measurement, not assertion.
+ */
+const auditAudioPaths = (page: Page): Promise<AudioPathAudit> =>
+  page.evaluate(() => {
+    const media = Array.from(document.querySelectorAll('audio,video')) as HTMLMediaElement[];
+    const withStream = media.filter((element) => Boolean(element.srcObject));
+    const snapshot = (window as any).__prototype2?.getSnapshot?.() ?? null;
+    const micTracks = (window as any).__micTracks || [];
+    return {
+      elements: media.length,
+      streamElements: withStream.length,
+      playbackIds: Array.from(new Set<number>((window as any).__playbackIds || [])),
+      pausedStreamElements: withStream.filter((element) => element.paused).length,
+      micCaptures: snapshot?.diagnostics?.micCaptures ?? null,
+      micProcessing: snapshot?.diagnostics?.microphoneProcessing ?? null,
+      liveCaptures: micTracks.filter((track: MediaStreamTrack) => track.readyState === 'live').length,
+    };
+  });
+
 test('prototype2 participant audio is non-silent in both directions and independent of the AI path', async (t) => {
   const salesWav = writeToneWav(path.join(toneDir, 'sales.wav'), SALESPERSON_TONE_HZ);
   const customerWav = writeToneWav(path.join(toneDir, 'customer.wav'), CUSTOMER_TONE_HZ);
@@ -1367,6 +1541,29 @@ test('prototype2 participant audio is non-silent in both directions and independ
     assert.ok(probe.stats.inbound && probe.stats.inbound.bytes > 0, 'inbound RTP bytes must increase');
     assert.ok(probe.stats.inbound && probe.stats.inbound.packets > 0, 'inbound RTP packets must arrive');
     assert.equal(probe.openPcs, 1);
+
+    // Packets are not sound: the salesperson must also measure real audio
+    // energy in the decoded inbound stream and prove playback is running.
+    const measured = await waitFor(
+      () => snapshot(salespersonPage),
+      (value) => value.inboundSoundDetected === true,
+      20000
+    );
+    assert.equal(measured.playbackState, 'playing', 'the browser must be playing the stream');
+    assert.ok(
+      (measured.diagnostics.inboundAudioLevel ?? 0) > 0.004,
+      `inbound audio level too low (${measured.diagnostics.inboundAudioLevel})`
+    );
+    assert.ok(measured.diagnostics.inboundPackets > 0, 'inbound RTP packets must be counted');
+    assert.equal(measured.diagnostics.audioDirection, 'sendrecv', 'the audio m-line must be bidirectional');
+
+    // The dashboard presents the five facts separately and raises no warning
+    // when everything is measured as working.
+    const soundText = (await salespersonPage.textContent('[data-testid="audio-sound"]')) || '';
+    const playbackText = (await salespersonPage.textContent('[data-testid="audio-playback"]')) || '';
+    assert.match(soundText, /audible/);
+    assert.match(playbackText, /playing/);
+    assert.equal(await salespersonPage.locator('[data-testid="customer-audio-warning"]').count(), 0);
   });
 
   await t.test('salesperson microphone reaches the customer as non-silent audio', async () => {
@@ -1388,6 +1585,58 @@ test('prototype2 participant audio is non-silent in both directions and independ
     assert.ok(probe.stats.outbound && probe.stats.outbound.bytes > 0);
     assert.equal(probe.openPcs, 1);
   });
+
+  await t.test('each direction has exactly one playback path and no duplicate elements', async () => {
+    for (const [page, label] of [
+      [salespersonPage, 'salesperson'],
+      [customerPage, 'customer'],
+    ] as Array<[Page, string]>) {
+      const audit = await auditAudioPaths(page);
+      assert.equal(audit.streamElements, 1, `${label}: exactly one element may hold a stream`);
+      assert.deepEqual(audit.playbackIds, [0], `${label}: only one element may ever play a stream`);
+      assert.equal(audit.pausedStreamElements, 0, `${label}: the one path must be playing`);
+
+      // One capture for this participant. The customer device also holds the
+      // Ultravox capture, which is a separate, deliberately independent capture
+      // (it is not connected in this fake-AI environment).
+      assert.equal(audit.micCaptures, 1, `${label}: the microphone must be opened exactly once`);
+      assert.equal(audit.liveCaptures, 1, `${label}: exactly one live capture`);
+      assert.ok(audit.micProcessing, `${label}: the applied microphone processing must be reported`);
+      assert.match(
+        String(audit.micProcessing),
+        /aec (on|unmeasured)/,
+        `${label}: echo cancellation must be requested (measured state reported): ${audit.micProcessing}`
+      );
+    }
+    const elementCount = await salespersonPage.locator('[data-testid="remote-audio"]').count();
+    assert.equal(elementCount, 1, 'the salesperson dashboard mounts exactly one audio element');
+  });
+
+  await t.test('switching views while live neither remounts a second element nor reopens the mic', async () => {
+    const before = await auditAudioPaths(salespersonPage);
+    await salespersonPage.click('[data-testid="show-invitation"]');
+    await salespersonPage.waitForSelector('[data-testid="salesperson-invite-url"]', { timeout: 20000 });
+    await salespersonPage.click('[data-testid="back-to-dashboard"]');
+    await salespersonPage.waitForSelector('[data-testid="join-call"], [data-testid="leave-call"]', {
+      timeout: 20000,
+    });
+    // Audio must keep flowing through the same single path.
+    await waitFor(
+      () => snapshot(salespersonPage),
+      (value) => value.playbackState === 'playing' && value.diagnostics.inboundPackets > 0,
+      20000
+    );
+    const after = await auditAudioPaths(salespersonPage);
+    assert.equal(after.streamElements, 1, 'a view switch must not create a second playback path');
+    assert.deepEqual(after.playbackIds, [0], 'a view switch must not start a second element');
+    assert.equal(after.micCaptures, before.micCaptures, 'a view switch must not reopen the microphone');
+    assert.equal(
+      await salespersonPage.locator('[data-testid="remote-audio"]').count(),
+      1,
+      'still exactly one audio element'
+    );
+  });
+
 
   await t.test('the AI path is separate: its capture is not the participant audio path', async () => {
     // The customer device is the only one that may start an Ultravox session.
@@ -1459,6 +1708,90 @@ test('prototype2 participant audio is non-silent in both directions and independ
     assert.ok(near(customerProbe.remote.dominantHz, SALESPERSON_TONE_HZ), `got ${customerProbe.remote.dominantHz} Hz`);
   });
 
+  await t.test('a paused remote audio element is resumed by playback supervision', async () => {
+    // Autoplay policies, tab switches and element reloads can pause playback
+    // while ICE/DTLS and RTP stay healthy. The engine must notice and retry
+    // without any user interaction.
+    const pausedNow = await salespersonPage.evaluate(() => {
+      const element = document.querySelector('[data-testid="remote-audio"]') as HTMLAudioElement | null;
+      element?.pause();
+      return element?.paused ?? false;
+    });
+    assert.equal(pausedNow, true, 'the element must really be paused');
+
+    const elementResumed = await waitFor(
+      () =>
+        salespersonPage.evaluate(() => ({
+          paused:
+            (document.querySelector('[data-testid="remote-audio"]') as HTMLAudioElement | null)?.paused ?? true,
+        })),
+      (value) => value.paused === false,
+      30000
+    );
+    assert.equal(elementResumed.paused, false, 'supervision must actually restart playback without a gesture');
+
+    const resumed = await waitFor(
+      () => snapshot(salespersonPage),
+      (value) => value.playbackState === 'playing' && value.callState === 'connected',
+      20000
+    );
+    assert.equal(resumed.playbackBlocked, false);
+    assert.equal(resumed.diagnostics.audioElementPaused, false);
+
+    // Supervision must not rebuild the connection or duplicate the stream.
+    const elementState = await salespersonPage.evaluate(() => {
+      const element = document.querySelector('[data-testid="remote-audio"]') as HTMLAudioElement | null;
+      const pcs = ((window as any).__pcs || []).filter((pc: any) => pc.connectionState !== 'closed');
+      return {
+        hasStream: Boolean(element?.srcObject),
+        tracks: (element?.srcObject as MediaStream | null)?.getAudioTracks().length ?? 0,
+        openPcs: pcs.length,
+      };
+    });
+    assert.equal(elementState.hasStream, true);
+    assert.equal(elementState.tracks, 1);
+    assert.equal(elementState.openPcs, 1);
+
+    const probe = await probeAudio(salespersonPage);
+    assert.ok(probe.remote.peak > 0.02, 'customer audio must be audible again after resuming');
+  });
+
+  await t.test('an interrupted customer microphone is recovered without losing the audio path', async () => {
+    // Simulates the device ending the capture (another capture took the device,
+    // the OS revoked it, or the browser stopped the track).
+    const stopped = await customerPage.evaluate(() => {
+      const tracks = ((window as any).__micTracks || []) as MediaStreamTrack[];
+      const live = tracks.filter((track) => track.readyState === 'live');
+      live.forEach((track) => track.stop());
+      return live.length;
+    });
+    assert.ok(stopped > 0, 'the customer must have had a live capture to interrupt');
+
+    await waitFor(
+      () => snapshot(customerPage),
+      (value) => value.callState === 'connected' && value.localTrackState === 'live',
+      30000
+    );
+    const recovered = await waitFor(
+      () => snapshot(salespersonPage),
+      (value) => value.inboundSoundDetected === true && value.diagnostics.inboundPackets > 0,
+      30000
+    );
+    assert.equal(recovered.playbackState, 'playing');
+
+    const salesProbe = await probeAudio(salespersonPage);
+    assert.ok(salesProbe.remote.peak > 0.02, 'customer audio must be audible after the recovery');
+    assert.ok(
+      near(salesProbe.remote.dominantHz, CUSTOMER_TONE_HZ),
+      `got ${salesProbe.remote.dominantHz} Hz`
+    );
+    assert.equal(
+      salesProbe.liveMicrophoneTracks,
+      1,
+      `recovery must leave exactly one live capture: ${JSON.stringify(salesProbe.micTracks)}`
+    );
+  });
+
   await t.test('reconnecting leaves one live microphone track and working audio', async () => {
     await customerPage.click('[data-testid="reconnect"]');
 
@@ -1503,6 +1836,39 @@ test('prototype2 participant audio is non-silent in both directions and independ
     const customerAudio = await snapshot(customerPage);
     assert.ok(customerAudio.mediaFlowing, 'the customer must report working audio');
     assert.equal(customerAudio.diagnostics.audioFlow, 'both');
+
+    // A reconnect is a new peer connection, not a new microphone: the capture
+    // count must stay at one and each side must keep a single playback path.
+    for (const [page, label] of [
+      [salespersonPage, 'salesperson'],
+      [customerPage, 'customer'],
+    ] as Array<[Page, string]>) {
+      const audit = await auditAudioPaths(page);
+      assert.equal(audit.micCaptures, 1, `${label}: a reconnect must not reopen the microphone`);
+      assert.equal(audit.streamElements, 1, `${label}: a reconnect must leave one playback path`);
+      assert.deepEqual(audit.playbackIds, [0], `${label}: no second element may play the stream`);
+    }
+  });
+
+  await t.test('leaving the call releases the capture and the playback path', async () => {
+    const before = await auditAudioPaths(salespersonPage);
+    assert.equal(before.streamElements, 1);
+
+    await salespersonPage.click('[data-testid="leave-call"]');
+    // Leaving clears the engine, so the exposed snapshot becomes null and the
+    // pre-join screen returns: that is the observable "call ended" state.
+    await salespersonPage.waitForSelector('[data-testid="join-call"]', { timeout: 20000 });
+
+    const after = await auditAudioPaths(salespersonPage);
+    assert.equal(after.streamElements, 0, 'no element may keep a stream after leaving');
+    assert.equal(after.liveCaptures, 0, 'the microphone capture must be released');
+    assert.equal(after.pausedStreamElements, 0);
+    const elementState = await salespersonPage.evaluate(() => {
+      const element = document.querySelector('[data-testid="remote-audio"]') as HTMLAudioElement | null;
+      return { paused: element?.paused ?? true, hasStream: Boolean(element?.srcObject) };
+    });
+    assert.equal(elementState.hasStream, false, 'the released element must not hold the stream');
+    assert.equal(elementState.paused, true);
   });
 
   await t.test('the customer never sees internal audio diagnostics or AI internals', async () => {
@@ -1523,6 +1889,81 @@ test('prototype2 participant audio is non-silent in both directions and independ
     assert.equal(await customerPage.locator('[data-testid="diagnostics-panel"]').count(), 0);
     assert.equal(await customerPage.locator('[data-testid="ai-suggestions"]').count(), 0);
   });
+});
+
+test('prototype2 reports connected-but-silent customer audio instead of claiming it works', async (t) => {
+  const salesWav = writeToneWav(path.join(toneDir, 'sales-silent-case.wav'), SALESPERSON_TONE_HZ);
+  // The customer's microphone is live and negotiated, but carries no sound: the
+  // exact production symptom of a microphone held by another capture on the
+  // device, where RTP keeps flowing as silence.
+  const silentWav = writeSilentWav(path.join(toneDir, 'customer-silent.wav'));
+
+  const server = await createPrototype2Server({
+    port: 0,
+    serveFrontend: true,
+    ultravoxFetch: fakeUltravoxFetch,
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  const salesBrowser = await launchToneBrowser(salesWav);
+  const customerBrowser = await launchToneBrowser(silentWav);
+  t.after(async () => {
+    await salesBrowser.close();
+    await customerBrowser.close();
+    await server.close();
+  });
+
+  const salespersonContext = await openContext(salesBrowser);
+  const salespersonPage = await salespersonContext.newPage();
+  const customerContext = await openContext(customerBrowser);
+  const customerPage = await customerContext.newPage();
+
+  await salespersonPage.goto(`${base}/sales`, { waitUntil: 'domcontentloaded' });
+  const inviteUrl = await readInvitationAndOpenDashboard(salespersonPage);
+  await customerPage.goto(inviteUrl, { waitUntil: 'domcontentloaded' });
+  await customerPage.waitForSelector('[data-testid="customer-prejoin"]', { timeout: 20000 });
+
+  await salespersonPage.click('[data-testid="join-call"]');
+  await customerPage.click('[data-testid="join-call"]');
+
+  // Transport-level success: connected, packets arriving, playback running.
+  const connected = await waitFor(
+    () => snapshot(salespersonPage),
+    (value) => value.callState === 'connected' && value.diagnostics.pcState === 'connected',
+    40000
+  );
+  assert.equal((await snapshot(customerPage)).callState, 'connected');
+
+  const silent = await waitFor(
+    () => snapshot(salespersonPage),
+    (value) => value.diagnostics.inboundPackets > 0 && value.inboundSoundDetected === false,
+    30000
+  );
+  assert.ok(
+    (silent.diagnostics.inboundAudioLevel ?? 0) < 0.002,
+    `a silent stream must measure silence, got ${silent.diagnostics.inboundAudioLevel}`
+  );
+  assert.equal(connected.playbackState !== 'blocked', true, 'playback itself is not the problem here');
+
+  // The dashboard must warn instead of claiming working audio.
+  await salespersonPage.waitForSelector('[data-testid="customer-audio-warning"]', { timeout: 20000 });
+  const warningText = (await salespersonPage.textContent('[data-testid="customer-audio-warning"]')) || '';
+  assert.match(warningText, /silence/i);
+  assert.equal(
+    await salespersonPage.locator('[data-testid="customer-audio-warning-action"]').count(),
+    1,
+    'the warning must offer an action'
+  );
+  const headline = (await salespersonPage.textContent('[data-testid="call-state"]')) || '';
+  assert.ok(!/playing/i.test(headline), `the headline must not claim working audio: "${headline}"`);
+  const soundText = (await salespersonPage.textContent('[data-testid="audio-sound"]')) || '';
+  assert.match(soundText, /silent/);
+  const packetsText = (await salespersonPage.textContent('[data-testid="audio-packets"]')) || '';
+  assert.match(packetsText, /received/, 'packets are still reported separately from sound');
+
+  // The salesperson's own microphone keeps working in the other direction: a
+  // silent customer must never break the audio this side publishes.
+  const customerProbe = await probeAudio(customerPage);
+  assert.ok(customerProbe.remote.peak > 0.02, 'the customer must still hear the salesperson');
 });
 
 test('main app exposes Admin Settings and no Standalone or Prototype 1 UI', async (t) => {

@@ -250,6 +250,23 @@ test('prototype2 signaling protocol', async (t) => {
     );
     assert.equal(restartRejection.code, 'INVALID_SIGNALING_ROLE');
 
+    // C3. Only the customer may ask for a renegotiation (it cannot offer).
+    customer.send({
+      type: 'renegotiate',
+      sessionId: fixture.sessionId,
+      reason: 'audio direction repair (send)',
+    });
+    const renegotiate = await salesperson.next((message) => message.type === 'renegotiate');
+    assert.equal(renegotiate.from, customerJoin.participantId);
+    assert.equal(renegotiate.fromRole, 'customer');
+    assert.match(String(renegotiate.reason), /direction repair/);
+
+    salesperson.send({ type: 'renegotiate', sessionId: fixture.sessionId, reason: 'spoofed' });
+    const renegotiateRejection = await salesperson.next(
+      (message) => message.type === 'error' && message.code === 'INVALID_SIGNALING_ROLE'
+    );
+    assert.equal(renegotiateRejection.code, 'INVALID_SIGNALING_ROLE');
+
     customer.send({
       type: 'ice_candidate',
       sessionId: fixture.sessionId,
@@ -337,10 +354,12 @@ test('prototype2 signaling protocol', async (t) => {
     assert.equal(captionRejection.code, 'INVALID_SIGNALING_ROLE');
 
     // Customer AI output and speech reach the salesperson, and never echo back to the customer.
-    customer.send({ type: 'customer_speech_transcript', sessionId: fixture.sessionId, text: 'hello', isFinal: true, ordinal: 1 });
+    customer.send({ type: 'customer_speech_transcript', sessionId: fixture.sessionId, text: 'hello', isFinal: true, ordinal: 1, callId: 'call_test', medium: 'voice' });
     customer.send({ type: 'ai_suggestion', sessionId: fixture.sessionId, text: 'suggest', isFinal: true, ordinal: 2 });
     const speech = await salesperson.next((message) => message.type === 'customer_speech_transcript');
     assert.equal(speech.text, 'hello');
+    assert.equal(speech.callId, 'call_test');
+    assert.equal(speech.medium, 'voice');
     await salesperson.next((message) => message.type === 'ai_suggestion');
     await assert.rejects(
       customer.next(

@@ -27,6 +27,20 @@ services:
         sync: false
       - key: ULTRAVOX_API_KEY
         sync: false
+      # Multi-key failover (server-side only). Preferred over the legacy single
+      # key. Value is JSON: [{"id":"primary","key":"..."},{"id":"backup","key":"..."}]
+      # or a list "primary=...,backup=...". Ids are non-secret and appear in
+      # operator diagnostics; raw keys never do. See docs/deployment.md.
+      - key: ULTRAVOX_API_KEYS
+        sync: false
+      - key: ULTRAVOX_MAX_KEY_ATTEMPTS
+        value: '3'
+      - key: ULTRAVOX_KEY_QUOTA_COOLDOWN_SECONDS
+        value: '3600'
+      - key: ULTRAVOX_KEY_RATE_LIMIT_COOLDOWN_SECONDS
+        value: '30'
+      - key: ULTRAVOX_KEY_AUTH_COOLDOWN_SECONDS
+        value: '300'
       # TURN relay. TURN_SECRET (coturn REST style, short-lived credentials) is
       # preferred; TURN_USERNAME + TURN_CREDENTIAL are the static fallback.
       - key: TURN_URLS

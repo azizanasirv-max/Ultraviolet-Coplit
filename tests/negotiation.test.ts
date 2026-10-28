@@ -40,11 +40,32 @@ class FakeTrack {
   onmute: (() => void) | null = null;
   onunmute: (() => void) | null = null;
   onended: (() => void) | null = null;
+  /** What the browser reports for this capture (mirrors getSettings()). */
+  settings: Record<string, unknown> = {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: false,
+    channelCount: 1,
+    sampleRate: 48000,
+  };
+  private listeners = new Map<string, Set<(...args: any[]) => void>>();
   constructor(id: string) {
     this.id = id;
   }
-  addEventListener() {
-    // CallEngine only listens to local tracks for recovery; not needed here.
+  getSettings() {
+    return { ...this.settings };
+  }
+  addEventListener(type: string, listener: (...args: any[]) => void) {
+    const set = this.listeners.get(type) ?? new Set();
+    set.add(listener);
+    this.listeners.set(type, set);
+  }
+  removeEventListener(type: string, listener: (...args: any[]) => void) {
+    this.listeners.get(type)?.delete(listener);
+  }
+  /** Test-only: how many handlers are still attached for one event type. */
+  listenerCount(type: string) {
+    return this.listeners.get(type)?.size ?? 0;
   }
   stop() {
     this.readyState = 'ended';
@@ -61,6 +82,137 @@ class FakeStream {
   }
   getTracks() {
     return this.tracks;
+  }
+}
+
+/** Minimal MediaStream: the engine keeps ONE remote stream and swaps tracks. */
+class FakeMediaStream {
+  tracks: FakeTrack[];
+  constructor(tracks: FakeTrack[] = []) {
+    this.tracks = [...tracks];
+  }
+  getAudioTracks() {
+    return this.tracks.filter((track) => track.kind === 'audio');
+  }
+  getTracks() {
+    return this.tracks;
+  }
+  addTrack(track: FakeTrack) {
+    if (!this.tracks.includes(track)) this.tracks.push(track);
+  }
+  removeTrack(track: FakeTrack) {
+    this.tracks = this.tracks.filter((candidate) => candidate !== track);
+  }
+}
+
+(globalThis as any).MediaStream = FakeMediaStream;
+
+/**
+ * Controllable Web Audio measurement stack.
+ *
+ * The engine only ever reads levels through an AnalyserNode (it is never
+ * connected to a destination), so a fake that reports a fixed RMS per context
+ * is enough to prove both "sound detected" and "connected but silent".
+ */
+let fakeAudioAmplitude = 0;
+
+class FakeAnalyserNode {
+  fftSize = 1024;
+  smoothingTimeConstant = 0;
+  disconnected = false;
+  connect() {}
+  disconnect() {
+    this.disconnected = true;
+  }
+  getFloatTimeDomainData(target: Float32Array) {
+    for (let index = 0; index < target.length; index += 1) {
+      target[index] = Math.sin((index / target.length) * Math.PI * 2) * fakeAudioAmplitude;
+    }
+  }
+}
+
+class FakeMediaStreamAudioSourceNode {
+  connected = false;
+  connect() {
+    this.connected = true;
+  }
+  disconnect() {}
+  constructor() {
+    // Proves that one track is measured by one analyser graph only.
+    mediaStreamSourceCreations += 1;
+  }
+}
+
+/** How many MediaStreamAudioSourceNodes the engine built (one per analyser). */
+let mediaStreamSourceCreations = 0;
+
+class FakeAudioContext {
+  sampleRate = 48000;
+  state = 'running';
+  analysers: FakeAnalyserNode[] = [];
+  createMediaStreamSource() {
+    return new FakeMediaStreamAudioSourceNode();
+  }
+  createAnalyser() {
+    const analyser = new FakeAnalyserNode();
+    this.analysers.push(analyser);
+    return analyser;
+  }
+  resume() {
+    return Promise.resolve();
+  }
+  close() {
+    this.state = 'closed';
+    return Promise.resolve();
+  }
+}
+
+(globalThis as any).AudioContext = FakeAudioContext;
+
+/** Minimal <audio> element: records play() outcomes the test controls. */
+class FakeAudioElement {
+  srcObject: any = null;
+  paused = true;
+  muted = false;
+  volume = 1;
+  loop = false;
+  playCalls = 0;
+  /** Set by the test: 'ok' | 'blocked' | 'abort'. */
+  playOutcome: 'ok' | 'blocked' | 'abort' = 'ok';
+  private srcValue = '';
+
+  get src() {
+    return this.srcValue;
+  }
+  set src(value: string) {
+    this.srcValue = value;
+  }
+  hasAttribute(name: string) {
+    return name === 'src' ? this.srcValue.length > 0 : false;
+  }
+  removeAttribute(name: string) {
+    if (name === 'src') this.srcValue = '';
+  }
+  load() {
+    this.paused = true;
+  }
+  pause() {
+    this.paused = true;
+  }
+  play() {
+    this.playCalls += 1;
+    if (this.playOutcome === 'blocked') {
+      const error = new Error('play() failed because the user did not interact with the document first.');
+      error.name = 'NotAllowedError';
+      return Promise.reject(error);
+    }
+    if (this.playOutcome === 'abort') {
+      const error = new Error('The play() request was interrupted.');
+      error.name = 'AbortError';
+      return Promise.reject(error);
+    }
+    this.paused = false;
+    return Promise.resolve();
   }
 }
 
@@ -117,6 +269,10 @@ class FakePeerConnection {
   /** Configurable getStats() output: inbound/outbound audio RTP counters. */
   inboundBytes = 0;
   outboundBytes = 0;
+  /** Remote receivers, used to prove an audio track is adopted without ontrack. */
+  receiverTracks: FakeTrack[] = [];
+  /** Negotiated direction reported by getTransceivers(); null = unsupported. */
+  audioCurrentDirection: string | null = null;
   closed = false;
 
   constructor(configuration: any) {
@@ -152,6 +308,23 @@ class FakePeerConnection {
 
   getSenders() {
     return this.senders;
+  }
+
+  /** Mirrors the browser API the direction guard uses. */
+  getTransceivers() {
+    if (this.audioCurrentDirection === null) return [];
+    return [
+      {
+        receiver: { kind: 'audio', track: this.receiverTracks[0] ?? null },
+        sender: this.senders[0] ?? { track: null },
+        direction: 'sendrecv',
+        currentDirection: this.audioCurrentDirection,
+      },
+    ];
+  }
+
+  getReceivers() {
+    return this.receiverTracks.map((track) => ({ track }));
   }
 
   createOffer(options?: { iceRestart?: boolean }) {
@@ -362,6 +535,7 @@ const installFetch = (
   options: { iceFetch?: IceFetchBehavior; healthPolicy?: 'all' | 'relay' } = {}
 ) => {
   iceFetchCount = 0;
+  ultravoxCallCount = 0;
   (globalThis as any).fetch = async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes('/ice-config')) {
@@ -377,11 +551,15 @@ const installFetch = (
       });
     }
     if (url.includes('/ultravox-call')) {
+      ultravoxCallCount += 1;
       return jsonResponse({ callId: 'call_test', joinUrl: 'wss://ai.invalid/join', isReused: false });
     }
     return jsonResponse({});
   };
 };
+
+/** How many AI calls this engine asked the server to create. */
+let ultravoxCallCount = 0;
 
 /** Which capture every getUserMedia() call returns. Tests may override it. */
 let micStreamFactory: () => FakeStream = () => new FakeStream();
@@ -1246,11 +1424,13 @@ test('a peer connection always negotiates an outbound audio m-line for a late mi
   assert.ok(ws.offers().length > offersBeforeRecovery, 'the salesperson must renegotiate the new sender');
 });
 
-test('re-acquiring the microphone stops the previous capture', async t => {
+test('a healthy capture is never reopened, and a dead one is replaced without overlap', async t => {
+  let captures = 0;
   let capture: FakeStream | null = null;
   const { engine, pc } = await setupPeer('salesperson', {
     micStream: () => {
-      capture = new FakeStream([new FakeTrack('first')]);
+      captures += 1;
+      capture = new FakeStream([new FakeTrack(`capture-${captures}`)]);
       return capture;
     },
   });
@@ -1258,15 +1438,81 @@ test('re-acquiring the microphone stops the previous capture', async t => {
 
   const previous = (capture as unknown as FakeStream).getAudioTracks()[0];
   assert.equal(previous.readyState, 'live');
+  assert.equal(captures, 1);
 
-  micStreamFactory = () => new FakeStream([new FakeTrack('second')]);
-  await (engine as any).recoverLocalTrack('track ended');
+  // 1. Recovery is idempotent: reopening a device that is already publishing is
+  // what produces clicks, a second processing pipeline and AI-capture contention.
+  await (engine as any).recoverLocalTrack('spurious ended event');
+  await sleep(5);
+  assert.equal(captures, 1, 'a healthy capture must not be re-acquired');
+  assert.equal(previous.readyState, 'live');
+
+  // 2. A capture the browser muted is replaced, and the old one is stopped
+  // BEFORE the replacement is opened (no two simultaneous captures).
+  previous.muted = true;
+  let liveCapturesAtAcquire: number | null = null;
+  micStreamFactory = () => {
+    liveCapturesAtAcquire = previous.readyState === 'live' ? 1 : 0;
+    captures += 1;
+    return new FakeStream([new FakeTrack('second')]);
+  };
+  await (engine as any).recoverLocalTrack('track muted by the browser');
   await sleep(10);
 
   assert.equal(previous.readyState, 'ended', 'the stale capture must not stay hot');
+  assert.equal(liveCapturesAtAcquire, 0, 'the dead capture must be released before the new one opens');
   assert.equal(pc.senders.length, 1);
   assert.equal(pc.senders[0].track?.readyState, 'live');
   assert.equal(pc.senders[0].track?.id, 'second');
+  assert.equal(engine.getSnapshot().diagnostics.micCaptures, 2);
+});
+
+test('microphone recovery is bounded and never reopens the device in a loop', async t => {
+  let captures = 0;
+  // Every capture is immediately muted, like a device held by another process.
+  const { engine } = await setupPeer('salesperson', {
+    micStream: () => {
+      captures += 1;
+      return new FakeStream([Object.assign(new FakeTrack(`muted-${captures}`), { muted: true })]);
+    },
+  });
+  t.after(async () => engine.stop('test finished'));
+
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    await (engine as any).recoverLocalTrack('track muted by the browser');
+    await sleep(5);
+  }
+
+  assert.equal(captures, 3, 'the initial capture plus exactly two bounded re-acquires');
+  assert.ok(
+    (engine as any).micCaptures <= 1 + 2,
+    `recovery must stay within its budget, opened ${(engine as any).micCaptures} captures`
+  );
+  const logs = engine.getSnapshot().logs.join('\n');
+  assert.match(logs, /recovery budget exhausted/i);
+});
+
+test('recovery cleans up the listeners and timers of the replaced capture', async t => {
+  const first = new FakeStream([new FakeTrack('first')]);
+  let calls = 0;
+  const { engine } = await setupPeer('salesperson', {
+    // A real getUserMedia always returns a fresh stream; only the first call
+    // returns the capture that is about to be replaced.
+    micStream: () => (++calls === 1 ? first : new FakeStream([new FakeTrack(`next-${calls}`)])),
+  });
+  t.after(async () => engine.stop('test finished'));
+
+  const track = first.getAudioTracks()[0];
+  assert.ok(track.listenerCount('mute') > 0, 'the capture must be supervised');
+
+  track.muted = true;
+  await (engine as any).recoverLocalTrack('track muted by the browser');
+  await sleep(10);
+
+  assert.equal(track.listenerCount('mute'), 0, 'a replaced capture must not keep dispatching events');
+  assert.equal(track.listenerCount('ended'), 0);
+  assert.equal(track.listenerCount('unmute'), 0);
+  assert.equal((engine as any).micRecoveryTimer, null);
 });
 
 test('a connected call with no audio recovers instead of reporting success', async t => {
@@ -1330,4 +1576,495 @@ test('real inbound audio prevents the media watchdog from restarting ICE', async
   );
   assert.equal(engine.getSnapshot().diagnostics.audioFlow, 'both');
   assert.equal(engine.getSnapshot().diagnostics.mediaFlowing, true);
+});
+
+// ---------------------------------------------------------------------------
+// Customer -> salesperson inbound audio
+//
+// These tests drive the real engine with a fake peer connection and a fake Web
+// Audio stack. They prove that the engine reports inbound audio only when sound
+// is measurable, that playback is supervised, and that a missing or replaced
+// remote track is handled without duplicating the audio path.
+// ---------------------------------------------------------------------------
+
+const inboundTrack = (id: string) => new FakeTrack(id);
+
+const deliverRemoteTrack = (pc: FakePeerConnection, track: FakeTrack) => {
+  pc.receiverTracks = [track];
+  pc.ontrack?.({ track, streams: [new FakeStream([track])] });
+};
+
+test('inbound audio is reported as working only when sound is measurable', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+
+  const element = new FakeAudioElement();
+  engine.attachAudioElement(element as unknown as HTMLAudioElement);
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+  pc.inboundBytes = 4800;
+
+  const track = inboundTrack('customer-mic');
+  deliverRemoteTrack(pc, track);
+  await sleep(5);
+
+  // RTP arrives, the microphone on the other side is silent (muted device or a
+  // second capture holding it). The old code called this "audio flowing".
+  fakeAudioAmplitude = 0;
+  await (engine as any).sampleStats();
+  let snapshot = engine.getSnapshot();
+  assert.equal(snapshot.mediaFlowing, true, 'RTP counters must show that packets arrive');
+  assert.equal(snapshot.diagnostics.inboundPackets > 0, true);
+  assert.equal(snapshot.inboundSoundDetected, false, 'silence must not be reported as audible');
+  assert.equal(snapshot.diagnostics.playbackState, 'playing');
+  assert.ok(
+    (snapshot.diagnostics.inboundAudioLevel ?? 1) < 0.002,
+    `silent stream measured ${snapshot.diagnostics.inboundAudioLevel}`
+  );
+
+  // Real sound on the same stream.
+  fakeAudioAmplitude = 0.4;
+  await (engine as any).sampleStats();
+  snapshot = engine.getSnapshot();
+  assert.equal(snapshot.inboundSoundDetected, true, 'measurable sound must be reported');
+  assert.ok(
+    (snapshot.diagnostics.inboundAudioLevel ?? 0) > 0.1,
+    `loud stream measured ${snapshot.diagnostics.inboundAudioLevel}`
+  );
+  assert.ok(snapshot.diagnostics.lastSoundAgoMs !== null);
+});
+
+test('blocked browser playback is reported and later cleared without dropping the call', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+
+  const element = new FakeAudioElement();
+  element.playOutcome = 'blocked';
+  engine.attachAudioElement(element as unknown as HTMLAudioElement);
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+
+  deliverRemoteTrack(pc, inboundTrack('customer-mic'));
+  await sleep(10);
+
+  let snapshot = engine.getSnapshot();
+  assert.equal(snapshot.playbackBlocked, true, 'a rejected play() must be surfaced');
+  assert.equal(snapshot.playbackState, 'blocked');
+  assert.match(String((engine as any).playbackError), /NotAllowedError/);
+  assert.equal(snapshot.callState, 'connected', 'a playback failure must not end the call');
+
+  // A user gesture (the Enable audio button) resumes playback.
+  element.playOutcome = 'ok';
+  assert.equal(await engine.resumePlayback(), true);
+  snapshot = engine.getSnapshot();
+  assert.equal(snapshot.playbackBlocked, false);
+  assert.equal(snapshot.playbackState, 'playing');
+  assert.equal((engine as any).playbackError, null);
+});
+
+test('a play() interrupted by a newer attach is not reported as blocked', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+
+  const element = new FakeAudioElement();
+  element.playOutcome = 'abort';
+  engine.attachAudioElement(element as unknown as HTMLAudioElement);
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+  deliverRemoteTrack(pc, inboundTrack('customer-mic'));
+  await sleep(10);
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.playbackBlocked, false, 'AbortError is not a playback policy failure');
+});
+
+test('a replaced remote track reuses one stream and never duplicates playback', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+
+  const element = new FakeAudioElement();
+  engine.attachAudioElement(element as unknown as HTMLAudioElement);
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+
+  const first = inboundTrack('first-mic');
+  deliverRemoteTrack(pc, first);
+  await sleep(5);
+  const stream = (engine as any).remoteStream as FakeMediaStream;
+  assert.ok(stream, 'the salesperson must hold a remote stream');
+  assert.equal(element.srcObject, stream);
+
+  // The customer's track is replaced (renegotiation / ICE restart).
+  const second = inboundTrack('second-mic');
+  pc.receiverTracks = [second];
+  pc.ontrack?.({ track: second, streams: [new FakeStream([second])] });
+  await sleep(5);
+
+  assert.equal((engine as any).remoteStream, stream, 'the element must keep one stream object');
+  assert.equal(stream.getAudioTracks().length, 1, 'exactly one remote audio track may be attached');
+  assert.equal(stream.getAudioTracks()[0].id, 'second-mic');
+  assert.equal(element.srcObject, stream, 'playback must not be re-pointed at a second stream');
+});
+
+test('a repeated ontrack for the same track keeps one playback path and one analyser', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+
+  const element = new FakeAudioElement();
+  engine.attachAudioElement(element as unknown as HTMLAudioElement);
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+
+  const track = inboundTrack('customer-mic');
+  deliverRemoteTrack(pc, track);
+  await sleep(5);
+
+  const stream = (engine as any).remoteStream as FakeMediaStream;
+  const playCallsAfterFirstAttach = element.playCalls;
+  mediaStreamSourceCreations = 0;
+  fakeAudioAmplitude = 0.4;
+  await (engine as any).sampleStats();
+  assert.equal(engine.getSnapshot().inboundSoundDetected, true, 'sound must be measured first');
+
+  // The browser emits `ontrack` again for the same m-line (a second stream
+  // object, a re-emitted event, the receiver fallback).
+  pc.ontrack?.({ track, streams: [new FakeStream([track])] });
+  await sleep(5);
+  pc.ontrack?.({ track, streams: [new FakeStream([track])] });
+  await sleep(5);
+
+  assert.equal((engine as any).remoteStream, stream, 'the stable remote stream must be reused');
+  assert.equal(stream.getAudioTracks().length, 1, 'exactly one remote track may be attached');
+  assert.equal(element.srcObject, stream, 'the element must keep the single stream');
+  assert.equal(
+    element.playCalls,
+    playCallsAfterFirstAttach,
+    'a repeated ontrack must not restart playback'
+  );
+  assert.equal(
+    mediaStreamSourceCreations,
+    0,
+    'a repeated ontrack must not build a second analyser graph'
+  );
+  // The measured sound clock belongs to the stream, not to the event.
+  assert.equal(
+    engine.getSnapshot().inboundSoundDetected,
+    true,
+    'a repeated ontrack must not reset the measured sound state'
+  );
+});
+
+test('a remounted audio element leaves exactly one playback path', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+
+  const first = new FakeAudioElement();
+  engine.attachAudioElement(first as unknown as HTMLAudioElement);
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+
+  deliverRemoteTrack(pc, inboundTrack('customer-mic'));
+  await sleep(5);
+  const stream = (engine as any).remoteStream as FakeMediaStream;
+  assert.equal(first.srcObject, stream);
+  assert.equal(first.paused, false);
+
+  // React remounts the <audio> element: a new instance becomes the mounted one.
+  const second = new FakeAudioElement();
+  engine.attachAudioElement(second as unknown as HTMLAudioElement);
+  await sleep(5);
+
+  assert.equal(first.paused, true, 'the detached element must stop playing');
+  assert.equal(first.srcObject, null, 'the detached element must not keep the stream');
+  assert.equal(second.srcObject, stream, 'the mounted element adopts the same single stream');
+  assert.equal(second.paused, false, 'the mounted element must play');
+  assert.equal(
+    [first, second].filter((element) => element.srcObject !== null).length,
+    1,
+    'only one element may hold a playback path'
+  );
+  assert.equal((engine as any).audioElement, second, 'the engine must point at the mounted element');
+});
+
+test('a reconnect detaches the old playback path before a new one exists', async (t) => {
+  const { engine, ws, pc, sessions } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+
+  const element = new FakeAudioElement();
+  engine.attachAudioElement(element as unknown as HTMLAudioElement);
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+  deliverRemoteTrack(pc, inboundTrack('customer-mic'));
+  await sleep(5);
+  assert.equal(element.paused, false);
+
+  // The peer leaves and rejoins: a fresh peer connection and a fresh stream.
+  ws.receive({ type: 'peer_left', participantId: 'customer-1' });
+  await sleep(10);
+  assert.equal(element.srcObject, null, 'a closed connection must not keep its stream');
+  assert.equal(element.paused, true);
+  assert.equal(engine.getSnapshot().playbackState, 'no_track');
+
+  ws.receive({
+    type: 'joined',
+    sessionId: 'session-test',
+    participantId: 'salesperson-1',
+    role: 'salesperson',
+    peers: [{ participantId: 'customer-1', role: 'customer' }],
+    participants: [
+      { participantId: 'salesperson-1', role: 'salesperson' },
+      { participantId: 'customer-1', role: 'customer' },
+    ],
+  });
+  await sleep(10);
+  const nextPc = FakePeerConnection.instances[FakePeerConnection.instances.length - 1];
+  await answerOffer(ws, nextPc);
+  nextPc.__setConnectionState('connected');
+  const replacement = inboundTrack('customer-mic-2');
+  nextPc.receiverTracks = [replacement];
+  nextPc.ontrack?.({ track: replacement, streams: [new FakeStream([replacement])] });
+  await sleep(10);
+
+  const stream = (engine as any).remoteStream as FakeMediaStream;
+  assert.ok(stream, 'the reconnected call must hold a remote stream');
+  assert.equal(element.srcObject, stream, 'one element, one stream after the reconnect');
+  assert.equal(stream.getAudioTracks().length, 1);
+  assert.equal(element.paused, false, 'audio must play again after the reconnect');
+  assert.equal(sessions.length, 0, 'a salesperson never creates an AI session');
+});
+
+test('stopping the call releases the capture, its listeners, the analysers and playback', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  const element = new FakeAudioElement();
+  engine.attachAudioElement(element as unknown as HTMLAudioElement);
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+  deliverRemoteTrack(pc, inboundTrack('customer-mic'));
+  await sleep(10);
+
+  const context = (engine as any).audioContext as FakeAudioContext;
+  const localTrack = (engine as any).localStream.getAudioTracks()[0] as FakeTrack;
+  assert.ok(localTrack.listenerCount('ended') > 0, 'the capture must be supervised');
+  assert.equal(element.paused, false);
+
+  await engine.stop('test finished');
+
+  assert.equal(localTrack.readyState, 'ended', 'the microphone capture must be released');
+  assert.equal(
+    localTrack.listenerCount('ended'),
+    0,
+    'a stopped call must not leave track listeners behind'
+  );
+  assert.equal(localTrack.listenerCount('mute'), 0);
+  assert.equal(element.srcObject, null, 'the playback path must be detached');
+  assert.equal(element.paused, true);
+  assert.equal((engine as any).remoteStream, null);
+  assert.equal((engine as any).remoteTrack, null);
+  assert.equal((engine as any).inboundAnalyser, null);
+  assert.equal((engine as any).outboundAnalyser, null);
+  assert.equal(context.state, 'closed', 'the measurement AudioContext must be closed');
+  assert.equal((engine as any).statsTimer, null);
+  assert.equal((engine as any).reportTimer, null);
+  assert.equal((engine as any).micRecoveryTimer, null);
+  assert.equal(engine.getSnapshot().playbackState, 'no_track');
+});
+
+
+test('quiet speech is measured and never gated by audio processing', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+
+  const element = new FakeAudioElement();
+  engine.attachAudioElement(element as unknown as HTMLAudioElement);
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+  deliverRemoteTrack(pc, inboundTrack('customer-mic'));
+
+  // A quiet talker: about -40 dBFS. Any gate or level threshold would drop this,
+  // and the engine has none - it only *measures*.
+  fakeAudioAmplitude = 0.01;
+  await (engine as any).sampleStats();
+  let snapshot = engine.getSnapshot();
+  const quietRms = snapshot.diagnostics.localAudioLevel ?? 0;
+  assert.ok(quietRms > 0.006, `a quiet capture must still be measured (rms ${quietRms})`);
+  assert.equal(snapshot.localTrackState, 'live', 'quiet audio must not stop the capture');
+  assert.equal((engine as any).micCaptures, 1, 'quiet audio must not trigger a re-capture');
+
+  // The same quiet level on the inbound side is quiet, but still audible.
+  fakeAudioAmplitude = 0.02;
+  await (engine as any).sampleStats();
+  snapshot = engine.getSnapshot();
+  assert.equal(snapshot.inboundSoundDetected, true, 'quiet speech must count as audible');
+  assert.ok((snapshot.diagnostics.inboundAudioLevel ?? 0) > 0.005);
+  assert.equal(snapshot.playbackState, 'playing', 'playback must stay running');
+});
+
+test('each participant publishes its own microphone and plays only the remote track', async (t) => {
+  // Salesperson: one audio sender, one remote playback path.
+  const sales = await setupPeer('salesperson');
+  t.after(async () => sales.engine.stop('test finished'));
+  await answerOffer(sales.ws, sales.pc);
+  sales.pc.__setConnectionState('connected');
+  const salesElement = new FakeAudioElement();
+  sales.engine.attachAudioElement(salesElement as unknown as HTMLAudioElement);
+  const salesRemote = inboundTrack('customer-mic');
+  deliverRemoteTrack(sales.pc, salesRemote);
+  await sleep(10);
+  assert.equal(sales.pc.senders.length, 1, 'the salesperson publishes exactly one audio sender');
+  assert.equal(sales.pc.senders[0].track?.readyState, 'live');
+  assert.notEqual(sales.pc.senders[0].track, salesRemote, 'a participant never republishes the remote track');
+  assert.equal(salesElement.srcObject !== null, true);
+  assert.equal(
+    ((salesElement.srcObject as FakeMediaStream).getAudioTracks()[0] as FakeTrack).id,
+    'customer-mic',
+    'the element must play the remote track'
+  );
+  assert.equal(sales.sessions.length, 0, 'the salesperson microphone is never sent to Ultravox');
+
+  // Customer: the same shape in the other direction.
+  const customer = await setupPeer('customer');
+  t.after(async () => customer.engine.stop('test finished'));
+  await answerOffer(customer.ws, customer.pc);
+  customer.pc.__setConnectionState('connected');
+  const customerElement = new FakeAudioElement();
+  customer.engine.attachAudioElement(customerElement as unknown as HTMLAudioElement);
+  const customerRemote = inboundTrack('salesperson-mic');
+  deliverRemoteTrack(customer.pc, customerRemote);
+  await sleep(10);
+  assert.equal(customer.pc.senders.length, 1, 'the customer publishes exactly one audio sender');
+  assert.equal(customer.pc.senders[0].track?.readyState, 'live');
+  assert.notEqual(customer.pc.senders[0].track, customerRemote);
+  assert.equal(
+    ((customerElement.srcObject as FakeMediaStream).getAudioTracks()[0] as FakeTrack).id,
+    'salesperson-mic',
+    'the element must play the remote track'
+  );
+});
+
+test('a remote audio receiver is adopted even when ontrack never fires', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+
+  const element = new FakeAudioElement();
+  engine.attachAudioElement(element as unknown as HTMLAudioElement);
+  await answerOffer(ws, pc);
+
+  // The browser delivered the receiver but never emitted ontrack.
+  pc.receiverTracks = [inboundTrack('receiver-mic')];
+  pc.__setConnectionState('connected');
+  await sleep(10);
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.remoteTrackState, 'live');
+  const stream = (engine as any).remoteStream as FakeMediaStream;
+  assert.ok(stream, 'the receiver track must reach the audio element');
+  assert.equal(stream.getAudioTracks()[0].id, 'receiver-mic');
+  assert.equal(element.srcObject, stream);
+});
+
+test('an ended remote track is reported and a replacement track restores audio', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+
+  const element = new FakeAudioElement();
+  engine.attachAudioElement(element as unknown as HTMLAudioElement);
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+
+  const first = inboundTrack('first-mic');
+  deliverRemoteTrack(pc, first);
+  await sleep(5);
+  first.readyState = 'ended';
+  first.onended?.();
+  await sleep(5);
+  assert.equal(engine.getSnapshot().remoteTrackState, 'ended');
+  assert.equal(engine.getSnapshot().playbackState, 'no_track');
+
+  const second = inboundTrack('replacement-mic');
+  pc.receiverTracks = [second];
+  pc.ontrack?.({ track: second, streams: [new FakeStream([second])] });
+  await sleep(5);
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.remoteTrackState, 'live');
+  assert.equal(((engine as any).remoteStream as FakeMediaStream).getAudioTracks()[0].id, 'replacement-mic');
+  assert.notEqual(engine.getSnapshot().playbackState, 'no_track');
+});
+
+test('the customer asks for a renegotiation when its microphone cannot be sent', async (t) => {
+  const { engine, ws, pc } = await setupPeer('customer');
+  t.after(async () => engine.stop('test finished'));
+
+  await answerOffer(ws, pc);
+  // The negotiated answer cannot carry the customer's microphone.
+  pc.audioCurrentDirection = 'recvonly';
+  pc.__setConnectionState('connected');
+  await sleep(10);
+
+  const requests = ws.sent.filter((message) => message.type === 'renegotiate');
+  assert.equal(requests.length, 1, 'the customer must ask the offerer to renegotiate');
+  assert.match(String(requests[0].reason), /send/);
+
+  // The request is bounded: repeated checks do not flood signaling.
+  await (engine as any).checkAudioDirection('repeat');
+  await sleep(5);
+  assert.equal(ws.sent.filter((message) => message.type === 'renegotiate').length, 1);
+});
+
+test('the salesperson renegotiates when the answer cannot deliver customer audio', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+
+  await answerOffer(ws, pc);
+  // The customer answered recvonly: this side can send but never receive.
+  pc.audioCurrentDirection = 'sendonly';
+  pc.__setConnectionState('connected');
+  await sleep(20);
+
+  const offers = pc.createOfferCalls.filter((call) => !call.iceRestart);
+  assert.ok(offers.length >= 2, 'a repair offer must follow the one-way negotiation');
+  assert.equal(engine.getSnapshot().diagnostics.audioDirection, 'sendonly');
+});
+
+test('a sendrecv negotiation never triggers a direction repair', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+
+  await answerOffer(ws, pc);
+  pc.audioCurrentDirection = 'sendrecv';
+  pc.__setConnectionState('connected');
+  await sleep(20);
+
+  assert.equal(pc.createOfferCalls.filter((call) => !call.iceRestart).length, 1);
+  assert.match(String(ws.sent.filter((m) => m.type === 'renegotiate').length), /^0$/);
+});
+
+test('the salesperson never creates an Ultravox session for its own microphone', async (t) => {
+  const { engine, sessions } = await setupPeer('salesperson', { enableAi: true });
+  t.after(async () => engine.stop('test finished'));
+
+  await sleep(20);
+  assert.equal(sessions.length, 0, 'only the customer device may run the AI session');
+  assert.equal(ultravoxCallCount, 0, 'the salesperson must never request an AI call');
+  assert.equal(engine.getSnapshot().ai.state, 'off');
+});
+
+test('an outbound capture that ended without an event is re-acquired, never published as silence', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+
+  const sender = pc.getSenders()[0] as { track: FakeTrack | null };
+  const original = sender.track;
+  assert.ok(original, 'the microphone must be published');
+  // `track.stop()` and some OS revocations end the track with no `ended` event.
+  original.readyState = 'ended';
+
+  await (engine as any).sampleStats();
+  await sleep(20);
+
+  assert.notEqual(sender.track, original, 'the sender must carry a freshly captured track');
+  assert.equal(sender.track?.readyState, 'live');
+  assert.equal(engine.getSnapshot().localTrackState, 'live');
 });

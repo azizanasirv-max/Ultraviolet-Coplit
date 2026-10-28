@@ -19,6 +19,20 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import {
+  buildUltravoxCallRequest,
+  resolveLanguageHint,
+  ULTRAVOX_MODEL,
+} from './server/ultravoxCallConfig';
+import {
+  classifyUltravoxFailure,
+  createUltravoxKeyPool,
+  describeFailureForLog,
+  UltravoxFailureCategory,
+  UltravoxKeyPool,
+  UltravoxKeyEntry,
+  UltravoxRetryAction,
+} from './server/ultravoxKeys';
 import { ParticipantRole, SessionRecord, SessionStore } from './server/sessionStore';
 import {
   buildIceConfig,
@@ -66,34 +80,31 @@ const JOIN_DEADLINE_MS = 10000;
 const REDEEM_RATE_LIMIT = 30;
 const REDEEM_RATE_WINDOW_MS = 60_000;
 
-/** True when the server has a usable Ultravox key (never the key itself). */
-const ultravoxReady = (): boolean => Boolean(ultravoxApiKey());
+/**
+ * AI readiness for one key pool. `missing` keeps the legacy variable name when
+ * no configuration exists at all, so existing deployment checks/humans get the
+ * same actionable hint. Only booleans/counts/source are exposed; never a key.
+ */
+const aiReadinessFor = (pool: UltravoxKeyPool) => {
+  const ready = pool.hasKeys();
+  return {
+    ready,
+    provider: 'ultravox',
+    model: ULTRAVOX_MODEL,
+    missing: ready ? [] : pool.source === 'multi' ? ['ULTRAVOX_API_KEYS'] : ['ULTRAVOX_API_KEY'],
+    keyCount: pool.configuredCount,
+    keySource: pool.source,
+    message: ready
+      ? 'The server can create Ultravox calls. Readiness is not proof that a live AI session is connected; see the session AI state.'
+      : 'AI suggestions are unavailable until a valid server-side Ultravox key is configured. Human-to-human audio is unaffected.',
+  };
+};
 
 const configuredPublicUrl = (): string | null => {
   const value = process.env.APP_URL?.trim();
   if (!value || value === 'MY_APP_URL') return null;
   if (!/^https?:\/\//i.test(value)) return null;
   return value.replace(/\/+$/, '');
-};
-
-const ultravoxApiKey = (): string | null => {
-  const key = process.env.ULTRAVOX_API_KEY?.trim();
-  if (!key || key === 'MY_ULTRAVOX_API_KEY') return null;
-  return key;
-};
-
-/** AI readiness: the app serves human audio even when the AI key is absent. */
-const aiReadiness = () => {
-  const ready = Boolean(ultravoxApiKey());
-  return {
-    ready,
-    provider: 'ultravox',
-    model: 'ultravox-v0.7',
-    missing: ready ? [] : ['ULTRAVOX_API_KEY'],
-    message: ready
-      ? 'The server can create Ultravox calls. Readiness is not proof that a live AI session is connected; see the session AI state.'
-      : 'AI suggestions are unavailable until ULTRAVOX_API_KEY is set on the server. Human-to-human audio is unaffected.',
-  };
 };
 
 /** AI lifecycle states the customer device is allowed to report. */
@@ -191,6 +202,85 @@ const publicBaseUrl = (req: Request): string => {
 const inviteUrlFor = (baseUrl: string, token: string): string =>
   `${baseUrl.replace(/\/+$/, '')}/join?invite=${encodeURIComponent(token)}`;
 
+/** Client-safe failure shape for the AI-call route. No provider payloads. */
+interface UltravoxClientFailure {
+  httpStatus: number;
+  error: string;
+  message: string;
+  retryAfterSeconds?: number;
+  ambiguous?: boolean;
+}
+
+const ultravoxClientFailure = (
+  category: UltravoxFailureCategory,
+  _reason: string,
+  providerStatus: number,
+  retryAfterMs: number | null,
+  ambiguous: boolean
+): UltravoxClientFailure => {
+  const retryAfterSeconds =
+    retryAfterMs !== null && retryAfterMs >= 0 ? Math.max(1, Math.ceil(retryAfterMs / 1000)) : undefined;
+  switch (category) {
+    case 'quota_exhausted':
+      return {
+        httpStatus: 429,
+        error: 'ULTRAVOX_QUOTA_EXHAUSTED',
+        message:
+          'The Ultravox AI quota is exhausted. AI suggestions are unavailable; human-to-human audio is unaffected.',
+        ...(retryAfterSeconds ? { retryAfterSeconds } : {}),
+      };
+    case 'rate_limited':
+      return {
+        httpStatus: 429,
+        error: 'ULTRAVOX_RATE_LIMITED',
+        message:
+          'Ultravox is temporarily rate limiting new AI calls. Retry later; human-to-human audio is unaffected.',
+        ...(retryAfterSeconds ? { retryAfterSeconds } : {}),
+      };
+    case 'authentication':
+      return {
+        httpStatus: 503,
+        error: 'ULTRAVOX_AUTH_FAILED',
+        message:
+          'Ultravox rejected the server API credentials. Ask the operator to check the server-side key configuration. Human-to-human audio is unaffected.',
+      };
+    case 'permission':
+      return {
+        httpStatus: 503,
+        error: 'ULTRAVOX_PERMISSION_DENIED',
+        message:
+          'The Ultravox API key is not permitted to create calls. Ask the operator to check its permissions. Human-to-human audio is unaffected.',
+      };
+    case 'invalid_request':
+      return {
+        httpStatus: 502,
+        error: 'ULTRAVOX_INVALID_REQUEST',
+        message:
+          'Ultravox rejected the AI call configuration. This is a server configuration problem; human-to-human audio is unaffected.',
+      };
+    case 'transient':
+      return {
+        // Preserve a provider 5xx so existing recovery code/operators see the
+        // real availability signal; network failures have no provider status.
+        httpStatus: providerStatus >= 500 && providerStatus <= 599 ? providerStatus : 502,
+        error: providerStatus === 0 ? 'ULTRAVOX_UNREACHABLE' : 'ULTRAVOX_API_ERROR',
+        message:
+          providerStatus === 0
+            ? 'Could not reach Ultravox. Human-to-human audio is unaffected.'
+            : 'Ultravox is temporarily unavailable. Human-to-human audio is unaffected.',
+        ...(ambiguous ? { ambiguous: true } : {}),
+        ...(retryAfterSeconds ? { retryAfterSeconds } : {}),
+      };
+    default:
+      return {
+        httpStatus: 502,
+        error: 'ULTRAVOX_API_ERROR',
+        message: 'Ultravox returned an unexpected error. Human-to-human audio is unaffected.',
+        ...(retryAfterSeconds ? { retryAfterSeconds } : {}),
+      };
+  }
+};
+
 export interface CreateServerOptions {
   /** Injected for tests. */
   store?: SessionStore;
@@ -198,6 +288,11 @@ export interface CreateServerOptions {
   serveFrontend?: boolean;
   /** Injected for tests so no real Ultravox call is created. */
   ultravoxFetch?: typeof fetch;
+  /**
+   * Injected for tests. When omitted, a process-local pool is created from
+   * ULTRAVOX_API_KEYS / ULTRAVOX_API_KEY and refreshed when those change.
+   */
+  ultravoxKeyPool?: UltravoxKeyPool;
   /** Injected for tests so no real TURN credential provider is called. */
   turnFetch?: typeof fetch;
   /** Per-server cache for provider-issued TURN credentials. */
@@ -219,6 +314,21 @@ interface SocketState {
 export async function createPrototype2Server(options: CreateServerOptions = {}) {
   const store = options.store ?? new SessionStore();
   const fetchImpl = options.ultravoxFetch ?? fetch;
+  /**
+   * Process-local Ultravox key state. An injected pool is owned by the test;
+   * otherwise the pool follows the server's environment so a configuration
+   * change (including the "no key" case) is reflected without a restart while
+   * cooldowns survive between requests.
+   */
+  const ultravoxKeys = options.ultravoxKeyPool ?? createUltravoxKeyPool(process.env);
+  const syncUltravoxKeys = (logChange = false): UltravoxKeyPool => {
+    if (!options.ultravoxKeyPool && ultravoxKeys.refresh() && logChange) {
+      console.log(`[ai] ${ultravoxKeys.summaryForLog()}`);
+      for (const warning of ultravoxKeys.configWarnings) console.warn(`[ai] KEY CONFIG: ${warning}`);
+      for (const error of ultravoxKeys.configErrors) console.error(`[ai] KEY CONFIG: ${error}`);
+    }
+    return ultravoxKeys;
+  };
   const turnFetch = options.turnFetch ?? fetch;
   const turnCache = options.turnCache ?? new Map<string, ProviderIceResult>();
   const rstreamCache = options.rstreamCache ?? new Map<string, RstreamTurnResult>();
@@ -412,12 +522,16 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     const session = requireSalesperson(req, res);
     if (!session) return;
     const diagnostics = store.diagnostics(session);
+    const keys = syncUltravoxKeys();
     res.json({
       diagnostics,
       // Summary only: never include TURN credentials here.
       ice: turnSummary(),
-      hasUltravoxKey: Boolean(ultravoxApiKey()),
-      ai: aiReadiness(),
+      hasUltravoxKey: keys.hasKeys(),
+      ai: aiReadinessFor(keys),
+      // Non-secret key pool visibility: ids, health, cooldowns and the last
+      // classification. Raw keys never appear here.
+      ultravoxKeys: keys.diagnostics(),
     });
   });
 
@@ -498,16 +612,19 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
         joinUrl: existing.joinUrl,
         isReused: true,
         createdAt: existing.createdAt,
-        model: 'ultravox-v0.7',
+        model: ULTRAVOX_MODEL,
       });
       return;
     }
 
-    const apiKey = ultravoxApiKey();
-    if (!apiKey) {
+    const keys = syncUltravoxKeys();
+    if (!keys.hasKeys()) {
+      const configInvalid = keys.configErrors.length > 0;
       res.status(503).json({
-        error: 'MISSING_API_KEY',
-        message: 'The server is missing ULTRAVOX_API_KEY. Ask the operator to configure it.',
+        error: configInvalid ? 'ULTRAVOX_KEY_CONFIG_INVALID' : 'MISSING_API_KEY',
+        message: configInvalid
+          ? 'The server has no usable Ultravox API key. Ask the operator to check the server-side key configuration. Human-to-human audio is unaffected.'
+          : 'The server is missing a Ultravox API key. Ask the operator to configure it. Human-to-human audio is unaffected.',
       });
       return;
     }
@@ -522,93 +639,277 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     aiCallInFlight.add(session.sessionId);
 
     // Forget the old record before contacting Ultravox: if creation fails, a
-    // subsequent retry must not hand out the dead join URL again.
+    // subsequent retry must not hand out the dead join URL again. Cleanup uses
+    // the non-secret id of the key that created the call when it is still
+    // configured; it never switches the live call's transcript identity.
     const previous = replace ? store.clearUltravoxCall(session.sessionId) : null;
-    if (previous) void endUltravoxCallQuietly(previous.callId, apiKey);
+    if (previous) {
+      const cleanupKey =
+        keys.keyForId(previous.apiKeyId) ?? keys.firstConfiguredKey() ?? null;
+      if (cleanupKey) void endUltravoxCallQuietly(previous.callId, cleanupKey.key);
+    }
 
     // The prompt is operator-controlled: a customer must not be able to steer the
-    // paid model with arbitrary instructions.
-    const systemPrompt =
-      'You are an AI sales copilot assisting a salesperson in a live sales call. Listen attentively to the customer statements, questions, and objections. Generate concise, natural, 1-2 sentence ready-to-read sales responses and qualification questions for the salesperson to read aloud.';
+    // paid model with arbitrary instructions. `ULTRAVOX_LANGUAGE_HINT` is an
+    // optional operator setting (BCP47); when unset no language is forced.
+    const callRequest = buildUltravoxCallRequest(
+      resolveLanguageHint(process.env.ULTRAVOX_LANGUAGE_HINT)
+    );
+
+    let attempted = 0;
+    const tried = new Set<string>();
+    let failover = false;
+    let selected: UltravoxKeyEntry | null = null;
+    let finalCategory: UltravoxFailureCategory = 'none';
+    let finalAction: UltravoxRetryAction = 'none';
+    let finalReason: string | null = null;
+    let finalFailure: UltravoxClientFailure | null = null;
+    let succeeded = false;
 
     try {
-      const response = await fetchImpl('https://api.ultravox.ai/api/calls', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-        body: JSON.stringify({
-          model: 'ultravox-v0.7',
-          initialOutputMedium: 'MESSAGE_MEDIUM_TEXT',
-          maxDuration: '3600s',
-          systemPrompt,
-          temperature: 0.1,
-        }),
-      });
+      const budget = keys.attemptBudget();
+      for (let index = 0; index < budget; index += 1) {
+        const key = keys.select(tried);
+        if (!key) break;
+        selected = key;
+        tried.add(key.id);
+        attempted += 1;
 
-      if (!response.ok) {
-        const errText = await response.text().catch(() => '');
-        store.recordError(session.sessionId, `Ultravox HTTP ${response.status}`);
-        console.warn(
-          `[ai] Ultravox call creation failed for session ${session.sessionId.slice(0, 8)}: HTTP ${response.status}`
-        );
-        res.status(response.status).json({
-          error: 'ULTRAVOX_API_ERROR',
+        let response: Awaited<ReturnType<typeof fetch>>;
+        try {
+          response = await fetchImpl('https://api.ultravox.ai/api/calls', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-API-Key': key.key },
+            body: JSON.stringify(callRequest),
+          });
+        } catch (err) {
+          // No response: Create Call has no documented idempotency key, so a
+          // retry could create a second live call. Do not rotate or retry.
+          const classification = classifyUltravoxFailure({
+            status: 0,
+            networkError: true,
+            idempotent: false,
+          });
+          finalCategory = classification.category;
+          finalAction = classification.action;
+          finalReason = classification.reason;
+          finalFailure = ultravoxClientFailure(
+            classification.category,
+            classification.reason,
+            0,
+            classification.retryAfterMs,
+            classification.ambiguous
+          );
+          console.warn(
+            `[session:${session.sessionId.slice(0, 8)}] ${describeFailureForLog(
+              classification,
+              0,
+              key.id
+            )} attempt=${attempted}/${budget} detail=${
+              sanitizeAiDetail((err as Error)?.message, 120) || 'network error'
+            }`
+          );
+          break;
+        }
+
+        if (response.ok) {
+          let data: { callId?: unknown; joinUrl?: unknown; model?: unknown } | null = null;
+          try {
+            data = (await response.json()) as {
+              callId?: unknown;
+              joinUrl?: unknown;
+              model?: unknown;
+            };
+          } catch {
+            data = null;
+          }
+          const callId = sanitizeCallId(data?.callId);
+          const joinUrl = typeof data?.joinUrl === 'string' ? data.joinUrl.trim() : '';
+          const validJoinUrl = /^wss?:\/\/\S+$/i.test(joinUrl) && joinUrl.length <= 2048;
+          if (!data || !callId || !validJoinUrl) {
+            // A 2xx with an unusable body is provider-wide; another key cannot
+            // fix a bad response shape, and the outcome is not safe to retry.
+            finalCategory = 'unknown';
+            finalReason = 'invalid-provider-payload';
+            finalFailure = {
+              httpStatus: 502,
+              error: 'ULTRAVOX_INVALID_RESPONSE',
+              message: 'Ultravox did not return a usable call id and join URL.',
+            };
+            store.recordError(session.sessionId, 'Ultravox returned an invalid call payload');
+            console.warn(
+              `[ai] Ultravox returned an unusable call payload for session ${session.sessionId.slice(0, 8)} (key=${key.id})`
+            );
+            break;
+          }
+
+          const createdAt = Date.now();
+          store.setUltravoxCall(session.sessionId, {
+            callId,
+            joinUrl,
+            createdAt,
+            createdByParticipantId: session.customer?.participantId || 'unknown',
+            apiKeyId: key.id,
+          });
+          store.setAiRuntime(session.sessionId, {
+            state: 'creating',
+            connected: false,
+            error: null,
+            callId,
+            reconnectAttempt: 0,
+            audioReachingAi: false,
+          });
+          keys.noteSuccess(key.id);
+          succeeded = true;
+          keys.recordOperation({
+            selectedKeyId: key.id,
+            attempts: attempted,
+            failover,
+            succeeded: true,
+            finalCategory: 'none',
+            finalAction: 'none',
+            finalReason: null,
+            allKeysExhausted: false,
+            retryAfterSeconds: null,
+          });
+          broadcastSession(store.getSession(session.sessionId) as SessionRecord);
+          res.json({
+            callId,
+            joinUrl,
+            isReused: false,
+            createdAt,
+            model: typeof data.model === 'string' ? data.model : ULTRAVOX_MODEL,
+          });
+          return;
+        }
+
+        // Read the body only for classification evidence. It is never logged or
+        // returned: provider payloads can contain request details.
+        const errorBody = await response.text().catch(() => '');
+        const classification = classifyUltravoxFailure({
           status: response.status,
-          message: `Ultravox API returned HTTP ${response.status}`,
-          details: sanitizeAiDetail(errText, 500),
+          headers: response.headers,
+          body: errorBody,
+          idempotent: false,
         });
-        return;
-      }
-
-      const data = (await response.json()) as { callId?: unknown; joinUrl?: unknown; model?: unknown };
-      const callId = sanitizeCallId(data.callId);
-      const joinUrl = typeof data.joinUrl === 'string' ? data.joinUrl.trim() : '';
-      const validJoinUrl = /^wss?:\/\/\S+$/i.test(joinUrl) && joinUrl.length <= 2048;
-      if (!callId || !validJoinUrl) {
-        store.recordError(session.sessionId, 'Ultravox returned an invalid call payload');
+        finalCategory = classification.category;
+        finalAction = classification.action;
+        finalReason = classification.reason;
         console.warn(
-          `[ai] Ultravox returned an unusable call payload for session ${session.sessionId.slice(0, 8)}`
+          `[session:${session.sessionId.slice(0, 8)}] ${describeFailureForLog(
+            classification,
+            response.status,
+            key.id
+          )} attempt=${attempted}/${budget}`
         );
-        res.status(502).json({
-          error: 'ULTRAVOX_INVALID_RESPONSE',
-          message: 'Ultravox did not return a usable call id and join URL.',
-        });
-        return;
+
+        if (classification.category === 'quota_exhausted') {
+          keys.markQuotaExhausted(key.id, classification.resetAt, classification.reason);
+        } else if (classification.category === 'rate_limited') {
+          keys.markRateLimited(key.id, classification.retryAfterMs, classification.reason);
+        } else if (classification.category === 'authentication') {
+          keys.markAuthenticationFailed(key.id, classification.reason);
+        }
+
+        finalFailure = ultravoxClientFailure(
+          classification.category,
+          classification.reason,
+          response.status,
+          classification.retryAfterMs,
+          classification.ambiguous
+        );
+
+        // Only an explicit quota/rate decision with remaining budget and another
+        // eligible key rotates. Authentication, permission, validation,
+        // transient and unknown failures never cycle through the pool.
+        const nextCandidate = keys.select(tried);
+        const canRotate =
+          classification.action === 'rotate' && attempted < budget && Boolean(nextCandidate);
+        finalAction = canRotate
+          ? 'rotate'
+          : classification.action === 'rotate'
+            ? 'fail'
+            : classification.action;
+        if (canRotate) {
+          failover = true;
+          continue;
+        }
+        break;
       }
 
-      store.setUltravoxCall(session.sessionId, {
-        callId,
-        joinUrl,
-        createdAt: Date.now(),
-        createdByParticipantId: session.customer?.participantId || 'unknown',
-      });
-      store.setAiRuntime(session.sessionId, {
-        state: 'creating',
-        connected: false,
-        error: null,
-        callId,
-        reconnectAttempt: 0,
-        audioReachingAi: false,
-      });
-      broadcastSession(store.getSession(session.sessionId) as SessionRecord);
-
-      res.json({
-        callId,
-        joinUrl,
-        isReused: false,
-        createdAt: Date.now(),
-        model: typeof data.model === 'string' ? data.model : 'ultravox-v0.7',
-      });
+      if (!succeeded) {
+        if (attempted === 0) {
+          const pool = keys.diagnostics();
+          const retryAfter = keys.secondsUntilNextEligible();
+          finalCategory = pool.quotaExhaustedCount > 0 ? 'quota_exhausted' : 'rate_limited';
+          finalAction = 'wait';
+          finalReason = 'no-eligible-key';
+          finalFailure = {
+            httpStatus: 503,
+            error: 'ULTRAVOX_KEYS_EXHAUSTED',
+            message:
+              'All configured Ultravox keys are cooling down or quota-exhausted. Retry later; human-to-human audio is unaffected.',
+            ...(retryAfter ? { retryAfterSeconds: retryAfter } : {}),
+          };
+          console.warn(
+            `[session:${session.sessionId.slice(0, 8)}] no eligible Ultravox key (${pool.configuredCount} configured)`
+          );
+        }
+        const failure = finalFailure ?? {
+          httpStatus: 502,
+          error: 'ULTRAVOX_API_ERROR',
+          message: 'Ultravox returned an unexpected error. Human-to-human audio is unaffected.',
+        };
+        store.recordError(
+          session.sessionId,
+          `Ultravox ${finalCategory}${finalReason ? ` (${finalReason})` : ''}`
+        );
+        const pool = keys.diagnostics();
+        keys.recordOperation({
+          selectedKeyId: selected?.id ?? null,
+          attempts: attempted,
+          failover,
+          succeeded: false,
+          finalCategory,
+          finalAction,
+          finalReason,
+          allKeysExhausted: attempted >= keys.attemptBudget() || pool.eligibleCount === 0,
+          retryAfterSeconds: failure.retryAfterSeconds ?? null,
+        });
+        res.status(failure.httpStatus).json({
+          error: failure.error,
+          message: failure.message,
+          ...(failure.retryAfterSeconds ? { retryAfterSeconds: failure.retryAfterSeconds } : {}),
+          ...(failure.ambiguous ? { ambiguous: true } : {}),
+        });
+      }
     } catch (err) {
+      // Defensive: any unexpected server-side error must still leave the human
+      // WebRTC call untouched and must not expose provider/internal details.
       store.recordError(session.sessionId, 'Ultravox request failed');
       console.warn(
-        `[ai] Ultravox request failed for session ${session.sessionId.slice(0, 8)}: ${
-          sanitizeAiDetail((err as Error)?.message, 160) || 'network error'
+        `[ai] Ultravox call handling failed for session ${session.sessionId.slice(0, 8)}: ${
+          sanitizeAiDetail((err as Error)?.message, 160) || 'unexpected error'
         }`
       );
-      res.status(502).json({
-        error: 'ULTRAVOX_UNREACHABLE',
-        message: sanitizeAiDetail((err as Error)?.message, 200) || 'Failed to reach Ultravox.',
+      keys.recordOperation({
+        selectedKeyId: selected?.id ?? null,
+        attempts: attempted,
+        failover,
+        succeeded: false,
+        finalCategory: 'unknown',
+        finalAction: 'fail',
+        finalReason: 'unexpected-server-error',
+        allKeysExhausted: false,
+        retryAfterSeconds: null,
       });
+      if (!res.headersSent) {
+        res.status(502).json({
+          error: 'ULTRAVOX_UNREACHABLE',
+          message: 'Failed to reach Ultravox. Human-to-human audio is unaffected.',
+          ambiguous: true,
+        });
+      }
     } finally {
       aiCallInFlight.delete(session.sessionId);
     }
@@ -738,10 +1039,10 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     // Public: capability flags only. No keys, no TURN usernames/credentials.
     const appUrl = appUrlDiagnostics();
     const ice = turnSummary(process.env, expressTurnOptions());
-    const ai = aiReadiness();
+    const ai = aiReadinessFor(syncUltravoxKeys());
     res.json({
       status: 'ok',
-      model: 'ultravox-v0.7',
+      model: ULTRAVOX_MODEL,
       ai,
       hasUltravoxKey: ai.ready,
       ice,
@@ -1093,7 +1394,10 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       'aiConnected', 'aiState', 'aiAudioReaching', 'aiLastResponseAt', 'aiReconnectAttempt',
       'reconnectAttempt', 'candidates', 'iceConfigLoaded', 'turnConfigured',
       'turnCredentialMode', 'relayCandidates', 'mediaFlowing', 'dtlsState',
-      'audioFlow', 'lastMediaAgoMs',
+      'audioFlow', 'lastMediaAgoMs', 'inboundPackets', 'inboundPacketsLost',
+      'inboundJitter', 'inboundAudioLevel', 'localAudioLevel', 'inboundSoundDetected',
+      'lastSoundAgoMs', 'audioDirection', 'playbackState', 'playbackError',
+      'micProcessing', 'micEchoCancellation', 'micCaptures',
     ]);
     const out: Record<string, unknown> = {};
     for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
@@ -1401,6 +1705,24 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
         return;
       }
 
+      if (type === 'renegotiate') {
+        // The customer is the answerer and cannot create an offer. This asks the
+        // salesperson for a fresh negotiation (used when the negotiated audio
+        // direction cannot carry the customer's microphone).
+        if (state.role !== 'customer') {
+          rejectMessage(
+            session.sessionId,
+            'INVALID_SIGNALING_ROLE',
+            'Only the customer may request a renegotiation.'
+          );
+          return;
+        }
+        relayToCounterpart(session, current, 'renegotiate', {
+          reason: typeof data.reason === 'string' ? data.reason.slice(0, 120) : 'customer requested',
+        });
+        return;
+      }
+
       if (type === 'answer') {
         if (state.role !== 'customer') {
           rejectMessage(session.sessionId, 'INVALID_SIGNALING_ROLE', 'Only the customer may send an answer.');
@@ -1446,6 +1768,10 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
           isFinal: Boolean(data.isFinal),
           ordinal: typeof data.ordinal === 'number' ? data.ordinal : 0,
           timestamp: typeof data.timestamp === 'string' ? data.timestamp.slice(0, 40) : '',
+          // Session identity for transcript de-duplication / stale protection.
+          // The call id is not a credential; join URLs never cross this relay.
+          callId: sanitizeCallId(data.callId) ?? undefined,
+          medium: data.medium === 'voice' || data.medium === 'text' ? data.medium : undefined,
         });
         return;
       }
@@ -1616,7 +1942,11 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     );
   }
 
-  const aiStartup = aiReadiness();
+  const startupKeys = syncUltravoxKeys();
+  const aiStartup = aiReadinessFor(startupKeys);
+  console.log(`[ai] Ultravox keys: ${startupKeys.summaryForLog()}`);
+  for (const warning of startupKeys.configWarnings) console.warn(`[ai] KEY CONFIG: ${warning}`);
+  for (const error of startupKeys.configErrors) console.error(`[ai] KEY CONFIG: ${error}`);
   if (!aiStartup.ready) console.warn(`[ai] ${aiStartup.message}`);
   for (const warning of appUrlDiagnostics().warnings) console.warn(`[app-url] ${warning}`);
 
