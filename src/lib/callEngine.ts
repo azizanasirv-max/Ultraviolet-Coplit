@@ -266,6 +266,12 @@ const PLAYBACK_RETRY_MS = 5000;
 const MAX_DIRECTION_REPAIR_ATTEMPTS = 2;
 /** Minimum spacing between customer-initiated renegotiation requests. */
 const RENEGOTIATE_REQUEST_INTERVAL_MS = 10000;
+/**
+ * How often a dead outbound capture is re-acquired per incident. `track.stop()`
+ * and some OS-level revocations end a capture *without* firing `ended`, so the
+ * track state must be checked instead of trusted to emit an event.
+ */
+const MAX_LOCAL_MIC_RECOVERY_ATTEMPTS = 2;
 /** A `disconnected` transport may recover on its own; only then is it broken. */
 const DISCONNECT_GRACE_MS = 4000;
 /** Actionable, credential-free terminal error shown to both participants. */
@@ -457,6 +463,8 @@ export class CallEngine {
   /** Bounded, per-connection budget for audio-direction renegotiations. */
   private directionRepairAttempts = 0;
   private lastRenegotiateRequestAt = 0;
+  /** Bounded re-acquires of a capture the browser ended without an event. */
+  private localMicRecoveryAttempts = 0;
 
   // Timers
   private reconnectTimer: number | null = null;
@@ -839,6 +847,33 @@ export class CallEngine {
       element.srcObject = stream;
     }
     void this.playRemoteAudio('remote stream attached');
+  }
+
+  /**
+   * Detects an outbound capture that died without firing `ended`.
+   *
+   * `MediaStreamTrack.stop()` (and some OS-level revocations) leave the track
+   * `ended` with no event, so a connected call would publish nothing at all
+   * while every counter on the other side still looks healthy. The capture is
+   * re-acquired a bounded number of times per incident.
+   */
+  private superviseOutboundAudio(): void {
+    if (this.stopped || this.intentionalLeave || this.micMuted) return;
+    if (this.micPermission !== 'granted' || this.recoveryInFlight) return;
+    const pc = this.pc;
+    if (!pc || (pc.connectionState !== 'connected' && pc.connectionState !== 'connecting')) return;
+    const track = this.localStream?.getAudioTracks()[0] ?? null;
+    if (track && track.readyState === 'live') {
+      this.localMicRecoveryAttempts = 0;
+      return;
+    }
+    if (this.localMicRecoveryAttempts >= MAX_LOCAL_MIC_RECOVERY_ATTEMPTS) return;
+    this.localMicRecoveryAttempts += 1;
+    this.log(
+      `Outbound microphone track is ${track ? track.readyState : 'missing'}; re-acquiring it ` +
+        `(attempt ${this.localMicRecoveryAttempts}/${MAX_LOCAL_MIC_RECOVERY_ATTEMPTS}).`
+    );
+    void this.recoverLocalTrack(track ? 'track ended without an event' : 'track missing');
   }
 
   /** Periodic supervision: never leave a live stream silently paused. */
@@ -1891,6 +1926,7 @@ export class CallEngine {
     this.pendingIceRestartForce = false;
     this.directionRepairAttempts = 0;
     this.lastRenegotiateRequestAt = 0;
+    this.localMicRecoveryAttempts = 0;
     if (reason) this.log(`Peer recovery state reset (${reason}).`);
   }
 
@@ -3943,6 +3979,8 @@ export class CallEngine {
 
     // Playback is part of the audio path: a paused element is not audio.
     this.supervisePlayback();
+    // A capture that ended without firing `ended` publishes nothing at all.
+    this.superviseOutboundAudio();
     next.playbackState = this.playbackState;
     next.playbackError = this.playbackError;
     next.audioElementPaused = element ? element.paused : null;

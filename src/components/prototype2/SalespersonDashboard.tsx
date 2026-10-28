@@ -1069,6 +1069,35 @@ export const SalespersonDashboard: React.FC = () => {
                   ) : (
                     <p className="text-[11px] text-slate-500">Loading server diagnostics...</p>
                   )}
+                  {serverDiagnostics
+                    ? serverDiagnostics.diagnostics.participants
+                        .filter((participant) => participant.diagnostics)
+                        .map((participant) => {
+                          const reported = participant.diagnostics as Record<string, unknown>;
+                          const text = (value: unknown) =>
+                            value === null || value === undefined ? 'n/a' : String(value);
+                          const level = (value: unknown) =>
+                            formatAudioLevel(typeof value === 'number' ? value : null);
+                          return (
+                            <div key={participant.participantId} className="pt-1 space-y-1">
+                              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">
+                                {participant.role} device (reported by that browser)
+                              </p>
+                              <DiagGrid
+                                rows={[
+                                  ['mic', text(reported.localTrackState)],
+                                  ['mic level', level(reported.localAudioLevel)],
+                                  ['remote track', text(reported.remoteTrackState)],
+                                  ['rtp in', `${text(reported.inboundPackets)} pkt / ${text(reported.bytesReceived)} B`],
+                                  ['inbound level', level(reported.inboundAudioLevel)],
+                                  ['playback', text(reported.playbackState)],
+                                  ['direction', text(reported.audioDirection)],
+                                ]}
+                              />
+                            </div>
+                          );
+                        })
+                    : null}
                   <button
                     onClick={() => void endSession()}
                     className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold"

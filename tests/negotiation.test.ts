@@ -1716,3 +1716,24 @@ test('the salesperson never creates an Ultravox session for its own microphone',
   assert.equal(ultravoxCallCount, 0, 'the salesperson must never request an AI call');
   assert.equal(engine.getSnapshot().ai.state, 'off');
 });
+
+test('an outbound capture that ended without an event is re-acquired, never published as silence', async (t) => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+
+  const sender = pc.getSenders()[0] as { track: FakeTrack | null };
+  const original = sender.track;
+  assert.ok(original, 'the microphone must be published');
+  // `track.stop()` and some OS revocations end the track with no `ended` event.
+  original.readyState = 'ended';
+
+  await (engine as any).sampleStats();
+  await sleep(20);
+
+  assert.notEqual(sender.track, original, 'the sender must carry a freshly captured track');
+  assert.equal(sender.track?.readyState, 'live');
+  assert.equal(engine.getSnapshot().localTrackState, 'live');
+});

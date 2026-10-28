@@ -300,6 +300,33 @@ Direction by direction, the participant path guarantees:
    (`both` / `inbound-only` / `outbound-only` / `none`) and
    `diagnostics.lastMediaAgoMs`; the salesperson panel renders both. "I can hear
    them but they cannot hear me" is now a readable state, not a guess.
+6. **Packets are not sound.** `getStats()` counters only prove that RTP is
+   arriving. A muted/disabled microphone, a track held by a second capture on the
+   same device, or a track paused by the OS keeps producing RTP *frames of
+   silence*. The engine therefore decodes the inbound track through a read-only
+   `AnalyserNode` (never connected to a destination, so it cannot create feedback
+   or a second playback path) and exposes `diagnostics.inboundAudioLevel` (RMS),
+   `diagnostics.lastSoundAgoMs` and `snapshot.inboundSoundDetected`. The
+   salesperson UI is driven by these measurements, not by `connectionState`.
+7. **Playback is supervised.** `element.play()` is a single code path with a
+   per-attempt token (a stale promise can never overwrite newer state).
+   `NotAllowedError` marks playback as blocked; `AbortError` (interrupted by a
+   newer attach) is not treated as a failure. A paused element with a live
+   stream is retried at most every 5 s and again on any user gesture, so an
+   autoplay rejection cannot leave a connected call inaudible.
+8. **One remote stream, one playback path.** All inbound audio tracks are adopted
+   into a single `MediaStream` that lives for the call, so a replaced track (ICE
+   restart, renegotiation) never reloads the `<audio>` element, never re-triggers
+   the autoplay policy and can never play twice. A track that `ontrack` never
+   delivered is recovered from `pc.getReceivers()`. Replacing the element (a view
+   switch or remount) detaches the old one first.
+9. **The negotiated direction is verified.** `replaceTrack()` on a transceiver
+   whose negotiated direction is `recvonly` publishes nothing, and every counter
+   still looks healthy. After `answer` / connectivity the engine reads
+   `transceiver.currentDirection`; if it cannot send with a live microphone (or
+   cannot receive) it performs at most two bounded renegotiations. The customer
+   (the answerer) asks the salesperson with the role-checked `renegotiate`
+   signaling message; the salesperson creates a plain offer (not an ICE restart).
 
 ## 4. Diagnostics
 
@@ -311,7 +338,17 @@ Both dashboards show a details panel with:
 * selected local/remote candidate types, relay flag, gathered candidate counts
 * microphone permission, track state (including `disabled`), sender count
 * remote track state, RTP bytes sent/received and kbps, `<audio>` paused/muted state
+* inbound RTP packets, packets lost and jitter (proof that RTP arrives)
+* measured inbound audio level in RMS and dBFS, and how long ago sound was heard
+  (proof that the remote microphone carries sound)
+* measured microphone level of this browser (proof that its own capture is live)
+* playback state (`playing` / `paused` / `blocked` / `no_track`) and the playback
+  error text
+* negotiated audio direction (`sendrecv` / `sendonly` / `recvonly` / `inactive`)
 * autoplay error text
+* per-participant `client_diagnostics` (mic level, inbound level, packets,
+  playback, direction) of the other device, so a silent or muted remote
+  microphone is visible from the salesperson dashboard
 * AI lifecycle state, raw SDK status, call id, reconnect attempt, whether the
   customer mic actually reaches the AI, last AI response time, and the safe
   provider failure text (never a join URL or token)
@@ -338,10 +375,11 @@ rising while `answers` stays 0) without reading the frontend console.
 | --- | --- | --- |
 | `npm run test:unit` | `SessionStore`: session/credential isolation, role mismatch, single-use invitation, rotation/revocation, expiry, resume identity, duplicate prevention, AI call clearing, AI liveness vs call record, no plaintext secrets | 13/13 pass |
 | `npm run test:turn` | ICE/TURN unit tests (synthetic env + mocked provider HTTP): URL parsing, static/ephemeral/provider credentials, HMAC correctness, relay-only fail-fast, provider caching/failure, no secret leakage | 17/17 pass |
-| `npm run test:signaling` | Real HTTP + WebSocket server: join authentication, role enforcement, offer/answer/ICE relay including the customer's role-checked `ice_restart` request, AI text relay to the salesperson only, cross-session isolation, reconnect identity, `peer_left`, invalid JSON, diagnostics authorization, customer-only Ultravox call, **AI call rotation, failed-creation retry, AI status relay/role enforcement/redaction, customer-disconnect AI state**, authenticated ICE endpoint, TURN static/ephemeral/provider delivery, relay misconfiguration, APP_URL, AI readiness without a key, secrecy | 31/31 pass |
-| `npm run test:negotiation` | Deterministic fake WebRTC/WebSocket: repeated `session_state` never creates a duplicate offer, no offer while `have-local-offer`, queued ICE restart runs when stable, an unanswered offer is rolled back and retried within a bounded budget, signaling-send/createOffer/setLocalDescription failures each consume one bounded attempt, bounded recovery reaches terminal with no busy loop, a later attempt within budget can recover, watchdog never rolls back an in-flight answer, a failed answer re-arms the watchdog, stale-peer answers cannot cancel a new watchdog, signaling rejoin after terminal starts a fresh negotiation, duplicate failure events coalesce, no PC churn after terminal, replacement cancels timers/ignores stale callbacks, customer restart request path, transient disconnect, AI independence, **late microphone attaches through a sendrecv transceiver + replaceTrack with one sender**, **microphone recovery stops the stale capture**, **a connected call with no inbound RTP recovers through a forced bounded ICE restart and then fails honestly**, **real inbound RTP never causes an ICE restart** | 28/28 pass |
+| `npm run test:signaling` | Real HTTP + WebSocket server: join authentication, role enforcement, offer/answer/ICE relay including the customer's role-checked `ice_restart` request and role-checked `renegotiate` request, AI text relay to the salesperson only, cross-session isolation, reconnect identity, `peer_left`, invalid JSON, diagnostics authorization, customer-only Ultravox call, **AI call rotation, failed-creation retry, AI status relay/role enforcement/redaction, customer-disconnect AI state**, authenticated ICE endpoint, TURN static/ephemeral/provider delivery, relay misconfiguration, APP_URL, AI readiness without a key, secrecy | 35/35 pass |
+| `npm run test:negotiation` | Deterministic fake WebRTC/WebSocket: repeated `session_state` never creates a duplicate offer, no offer while `have-local-offer`, queued ICE restart runs when stable, an unanswered offer is rolled back and retried within a bounded budget, signaling-send/createOffer/setLocalDescription failures each consume one bounded attempt, bounded recovery reaches terminal with no busy loop, a later attempt within budget can recover, watchdog never rolls back an in-flight answer, a failed answer re-arms the watchdog, stale-peer answers cannot cancel a new watchdog, signaling rejoin after terminal starts a fresh negotiation, duplicate failure events coalesce, no PC churn after terminal, replacement cancels timers/ignores stale callbacks, customer restart request path, transient disconnect, AI independence, **late microphone attaches through a sendrecv transceiver + replaceTrack with one sender**, **microphone recovery stops the stale capture**, **a connected call with no inbound RTP recovers through a forced bounded ICE restart and then fails honestly**, **real inbound RTP never causes an ICE restart**, **inbound audio is only reported as working when sound is measurable (RMS), silence is reported as silence**, **blocked/aborted/supervised playback**, **a replaced remote track reuses one stream and one playback path**, **a receiver track is adopted when `ontrack` never fires**, **an ended track is reported and a replacement restores audio**, **the customer requests a renegotiation when the negotiated direction cannot carry its microphone (bounded)**, **the salesperson renegotiates a `sendonly` (one-way) negotiation but never a healthy `sendrecv` one**, **an outbound capture that ended without an event is re-acquired**, **the salesperson never creates an Ultravox session** | 39/39 pass |
 | `npm run test:ai` | **Mocked `UltravoxSession` + mocked `fetch`**: new-call-per-retry, connected only from live SDK status, mic-published reporting, abnormal-close recovery, stale-callback isolation, bounded retries with real error text, duplicate-retry suppression, salesperson restart over signaling, AI failure leaves WebRTC state untouched | 8/8 pass |
-| `npm run test:browser` | Chromium, two isolated browser contexts, synthetic media: role-specific UIs, invitation scoping/replay rejection, legacy URL rejection, bidirectional RTP, `<audio>` playing, mute/unmute on both sides, reconnect without duplicate participants/tracks, **presence-refresh flood smoke test (real Chromium; the deterministic suite is the D1 regression proof)**, AI text on the correct dashboard, AI failure isolated **and visible on the salesperson dashboard**, **salesperson-triggered AI restart without dropping audio**, **rotated invitation creates a new AI call**, server-side client diagnostics, TURN applied to every PC (incl. reconnect), relay-only policy applied, relay-only-without-TURN refuses to start, no credential leakage in DOM/snapshot, **two browser instances with different microphone tones (440 Hz / 1200 Hz) prove non-silent decoded audio in each direction independently with matching inbound RTP bytes/packets/audioLevel**, **the AI capture is a separate capture and an AI failure never interrupts participant audio**, **reconnect leaves exactly one live, enabled capture and audio still flowing**, **the customer DOM shows no RTP/ICE/TURN error or AI internals** | 30/30 pass |
+| `npm run test:audio` | Pure inbound-audio state machine: a fully measured call is the only "working audio" state; connected-without-packets, packets-without-sound, blocked/paused playback, locally muted speaker, absent customer and pending transport are all distinguished; level formatting | 8/8 pass |
+| `npm run test:browser` | Chromium, two isolated browser contexts, synthetic media: role-specific UIs, invitation scoping/replay rejection, legacy URL rejection, bidirectional RTP, `<audio>` playing, mute/unmute on both sides, reconnect without duplicate participants/tracks, **presence-refresh flood smoke test (real Chromium; the deterministic suite is the D1 regression proof)**, AI text on the correct dashboard, AI failure isolated **and visible on the salesperson dashboard**, **salesperson-triggered AI restart without dropping audio**, **rotated invitation creates a new AI call**, server-side client diagnostics, TURN applied to every PC (incl. reconnect), relay-only policy applied, relay-only-without-TURN refuses to start, no credential leakage in DOM/snapshot, **two browser instances with different microphone tones (440 Hz / 1200 Hz) prove non-silent decoded audio in each direction independently with matching inbound RTP bytes/packets/audioLevel**, **the salesperson's measured inbound level/dBFS and `playbackState` prove audible, playing audio (not just RTP) and the `sendrecv` direction**, **a live-but-silent customer microphone produces `inboundSoundDetected: false`, a visible actionable warning and a headline that does not claim working audio**, **a paused remote audio element is resumed by playback supervision with one stream and one peer connection**, **an interrupted customer capture is re-acquired and audio returns with exactly one live capture and no duplicate playback**, **the AI capture is a separate capture and an AI failure never interrupts participant audio**, **reconnect leaves exactly one live, enabled capture and audio still flowing**, **the customer DOM shows no RTP/ICE/TURN error or AI internals** | 36/36 pass |
 | `npm run build` | Production Vite build | pass |
 | `npm run lint` | `tsc --noEmit` | pass |
 
@@ -453,6 +491,41 @@ the operator's credentials, whether a relay candidate was gathered, or what the
 selected candidate pair was. Those need `/admin/turn` to be configured and a
 real two-network call; `relay candidates > 0` plus a `relay` selected pair in
 the salesperson panel is the only local proof that the relay works.
+
+### Customer -> salesperson audio: what was still wrong (this change)
+
+The reported symptom — the customer is heard by the AI, the salesperson is heard
+by the customer, but the salesperson hears nothing while the UI looks healthy —
+cannot be explained by the transport: an ICE/DTLS connection carries media in
+both directions, and the same connection already delivers the salesperson's
+audio. Three defects in the *inbound* half of the path produced it, and none of
+them is visible to `connectionState` or to RTP counters:
+
+1. **"Audio flowing" was derived from RTP byte counters only.** A microphone
+   track that is muted, disabled, held by a second capture on the same device, or
+   ended by the OS keeps the sender transmitting RTP *frames of silence*.
+   `getStats()` therefore kept increasing, the media watchdog was satisfied, and
+   the salesperson dashboard reported working audio for a silent stream. This is
+   exactly the "connected but nothing audible" state.
+2. **Playback was not supervised.** The remote stream was attached by replacing
+   `srcObject` on a hidden `<audio>` element, which reloads the element and
+   re-runs the autoplay policy. A rejected `play()` was recorded once and never
+   retried, and an element that ended up paused (a reload, a remount, a view
+   switch) was never detected at all: the call stayed "connected" and inaudible.
+   A React remount also left the *old* element holding the stream.
+3. **The outbound capture was trusted to emit events.** The customer's published
+   track could end (or be handed to another capture) without an `ended`/`mute`
+   event, and the negotiated audio direction was never verified: `replaceTrack()`
+   into a `recvonly` transceiver publishes nothing while everything else looks
+   fine.
+
+Each is fixed by measurement rather than assumption (see the nine guarantees in
+section 3) and by the diagnostics/UI described in section 4. What this change
+does **not** do is remove the duplicate microphone capture on the customer
+device: `ultravox-client@0.6` has no public API for adopting an existing track,
+and merging the two paths would make participant audio depend on the AI session,
+which requirement 5 of this work forbids. The duplicate capture is now *visible*
+(customer mic level vs. inbound level) instead of silent.
 
 ## 7. Environment variables
 | Variable | Required | Purpose |

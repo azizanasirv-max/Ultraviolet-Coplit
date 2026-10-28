@@ -1504,6 +1504,90 @@ test('prototype2 participant audio is non-silent in both directions and independ
     assert.ok(near(customerProbe.remote.dominantHz, SALESPERSON_TONE_HZ), `got ${customerProbe.remote.dominantHz} Hz`);
   });
 
+  await t.test('a paused remote audio element is resumed by playback supervision', async () => {
+    // Autoplay policies, tab switches and element reloads can pause playback
+    // while ICE/DTLS and RTP stay healthy. The engine must notice and retry
+    // without any user interaction.
+    const pausedNow = await salespersonPage.evaluate(() => {
+      const element = document.querySelector('[data-testid="remote-audio"]') as HTMLAudioElement | null;
+      element?.pause();
+      return element?.paused ?? false;
+    });
+    assert.equal(pausedNow, true, 'the element must really be paused');
+
+    const elementResumed = await waitFor(
+      () =>
+        salespersonPage.evaluate(() => ({
+          paused:
+            (document.querySelector('[data-testid="remote-audio"]') as HTMLAudioElement | null)?.paused ?? true,
+        })),
+      (value) => value.paused === false,
+      30000
+    );
+    assert.equal(elementResumed.paused, false, 'supervision must actually restart playback without a gesture');
+
+    const resumed = await waitFor(
+      () => snapshot(salespersonPage),
+      (value) => value.playbackState === 'playing' && value.callState === 'connected',
+      20000
+    );
+    assert.equal(resumed.playbackBlocked, false);
+    assert.equal(resumed.diagnostics.audioElementPaused, false);
+
+    // Supervision must not rebuild the connection or duplicate the stream.
+    const elementState = await salespersonPage.evaluate(() => {
+      const element = document.querySelector('[data-testid="remote-audio"]') as HTMLAudioElement | null;
+      const pcs = ((window as any).__pcs || []).filter((pc: any) => pc.connectionState !== 'closed');
+      return {
+        hasStream: Boolean(element?.srcObject),
+        tracks: (element?.srcObject as MediaStream | null)?.getAudioTracks().length ?? 0,
+        openPcs: pcs.length,
+      };
+    });
+    assert.equal(elementState.hasStream, true);
+    assert.equal(elementState.tracks, 1);
+    assert.equal(elementState.openPcs, 1);
+
+    const probe = await probeAudio(salespersonPage);
+    assert.ok(probe.remote.peak > 0.02, 'customer audio must be audible again after resuming');
+  });
+
+  await t.test('an interrupted customer microphone is recovered without losing the audio path', async () => {
+    // Simulates the device ending the capture (another capture took the device,
+    // the OS revoked it, or the browser stopped the track).
+    const stopped = await customerPage.evaluate(() => {
+      const tracks = ((window as any).__micTracks || []) as MediaStreamTrack[];
+      const live = tracks.filter((track) => track.readyState === 'live');
+      live.forEach((track) => track.stop());
+      return live.length;
+    });
+    assert.ok(stopped > 0, 'the customer must have had a live capture to interrupt');
+
+    await waitFor(
+      () => snapshot(customerPage),
+      (value) => value.callState === 'connected' && value.localTrackState === 'live',
+      30000
+    );
+    const recovered = await waitFor(
+      () => snapshot(salespersonPage),
+      (value) => value.inboundSoundDetected === true && value.diagnostics.inboundPackets > 0,
+      30000
+    );
+    assert.equal(recovered.playbackState, 'playing');
+
+    const salesProbe = await probeAudio(salespersonPage);
+    assert.ok(salesProbe.remote.peak > 0.02, 'customer audio must be audible after the recovery');
+    assert.ok(
+      near(salesProbe.remote.dominantHz, CUSTOMER_TONE_HZ),
+      `got ${salesProbe.remote.dominantHz} Hz`
+    );
+    assert.equal(
+      salesProbe.liveMicrophoneTracks,
+      1,
+      `recovery must leave exactly one live capture: ${JSON.stringify(salesProbe.micTracks)}`
+    );
+  });
+
   await t.test('reconnecting leaves one live microphone track and working audio', async () => {
     await customerPage.click('[data-testid="reconnect"]');
 
