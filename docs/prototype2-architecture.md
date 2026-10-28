@@ -429,6 +429,10 @@ rising while `answers` stays 0) without reading the frontend console.
 | `npm run build` | Production Vite build | pass |
 | `npm run lint` | `tsc --noEmit` | pass |
 
+Task 2 totals: `npm test` = 183/183 assertions across 11 suites; `npm run test:browser`
+= 39/39 in real Chromium (two browser instances, synthetic 440/1200 Hz tones and a
+silent WAV).
+
 ### What synthetic tests do NOT prove
 
 Chromium's fake audio device proves that signaling, negotiation, track routing,
