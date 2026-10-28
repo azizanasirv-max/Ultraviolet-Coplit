@@ -299,6 +299,101 @@ test('prototype2 signaling protocol', async (t) => {
     customer.close();
   });
 
+  await t.test('relays the audio repair messages with role enforcement and no leakage', async () => {
+    const fixture = await createFixture(harness.base);
+    const salesperson = await openSocket(harness.base);
+    const customer = await openSocket(harness.base);
+    t.after(() => {
+      salesperson.close();
+      customer.close();
+    });
+
+    const salespersonJoin = await join(salesperson, {
+      sessionId: fixture.sessionId,
+      role: 'salesperson',
+      credential: fixture.salespersonKey,
+    });
+    assert.equal(salespersonJoin.type, 'joined');
+    const customerJoin = await join(customer, {
+      sessionId: fixture.sessionId,
+      role: 'customer',
+      credential: fixture.customerKey,
+    });
+    assert.equal(customerJoin.type, 'joined');
+    await salesperson.next((message) => message.type === 'peer_joined');
+
+    // Salesperson -> customer: "verify and re-publish your microphone".
+    salesperson.send({
+      type: 'audio_recheck',
+      sessionId: fixture.sessionId,
+      reason: 'no incoming audio',
+    });
+    const recheck = await customer.next((message) => message.type === 'audio_recheck');
+    assert.equal(recheck.from, salespersonJoin.participantId);
+    assert.equal(recheck.fromRole, 'salesperson');
+    assert.equal(recheck.reason, 'no incoming audio');
+
+    // Only the salesperson may ask for it.
+    customer.send({ type: 'audio_recheck', sessionId: fixture.sessionId, reason: 'spoofed' });
+    const recheckRejection = await customer.next(
+      (message) => message.type === 'error' && message.code === 'INVALID_SIGNALING_ROLE'
+    );
+    assert.match(recheckRejection.message, /Only the salesperson/);
+
+    // Customer -> salesperson: sanitized audio report, whitelisted fields only.
+    customer.send({
+      type: 'audio_state',
+      sessionId: fixture.sessionId,
+      reason: 'audio check',
+      track: 'live',
+      sender: 'track',
+      direction: 'sendrecv',
+      packetsSent: 120,
+      level: 0.42,
+      sdp: 'v=0 do-not-relay',
+      credential: 'do-not-relay',
+    });
+    const state = await salesperson.next((message) => message.type === 'audio_state');
+    assert.equal(state.from, customerJoin.participantId);
+    assert.equal(state.track, 'live');
+    assert.equal(state.direction, 'sendrecv');
+    assert.equal(state.packetsSent, 120);
+    assert.equal(state.level, 0.42);
+    assert.equal(state.sdp, undefined, 'audio_state must not relay arbitrary fields');
+    assert.equal(state.credential, undefined);
+
+    // Only the customer may report its audio state.
+    salesperson.send({ type: 'audio_state', sessionId: fixture.sessionId, track: 'live' });
+    const stateRejection = await salesperson.next(
+      (message) => message.type === 'error' && message.code === 'INVALID_SIGNALING_ROLE'
+    );
+    assert.match(stateRejection.message, /Only the customer/);
+
+    // Customer -> salesperson: "I cannot publish, renegotiate".
+    customer.send({
+      type: 'audio_renegotiate',
+      sessionId: fixture.sessionId,
+      reason: 'cannot publish',
+    });
+    const renegotiate = await salesperson.next((message) => message.type === 'audio_renegotiate');
+    assert.equal(renegotiate.reason, 'cannot publish');
+
+    salesperson.send({ type: 'audio_renegotiate', sessionId: fixture.sessionId });
+    const renegotiateRejection = await salesperson.next(
+      (message) => message.type === 'error' && message.code === 'INVALID_SIGNALING_ROLE'
+    );
+    assert.match(renegotiateRejection.message, /Only the customer/);
+
+    // Server-side counters expose the repair activity (never the payload).
+    const diagnostics = await get(
+      harness.base,
+      `/api/sessions/${fixture.sessionId}/diagnostics`,
+      fixture.salespersonKey
+    );
+    assert.equal(diagnostics.status, 200);
+    assert.ok(diagnostics.body.diagnostics.signals.audioChecks >= 2);
+  });
+
   await t.test('customer never receives AI/private data and cannot be sent transcripts reserved for the salesperson', async () => {
     const fixture = await createFixture(harness.base, 'Privacy');
     const salesperson = await openSocket(harness.base);

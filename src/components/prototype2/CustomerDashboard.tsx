@@ -108,6 +108,12 @@ export const CustomerDashboard: React.FC<{ inviteToken: string; legacyInvitation
     void redeem();
   }, [redeem]);
 
+  // Re-bind the audio element if React replaces it, so the salesperson's stream
+  // is never left attached to a detached element.
+  useEffect(() => {
+    if (engineRef.current) engineRef.current.attachAudioElement(audioRef.current);
+  }, [joined, status]);
+
   /**
    * AI recovery is internal bookkeeping. The customer screen never renders AI
    * status, errors, transcripts or suggestions; if the AI session drops it is

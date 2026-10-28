@@ -81,6 +81,7 @@ export interface SessionDiagnosticsResponse {
       aiSuggestions: number;
       rejectedMessages: number;
       relayFailures: number;
+      audioChecks: number;
       lastError: string | null;
       lastActivityAt: number;
     };

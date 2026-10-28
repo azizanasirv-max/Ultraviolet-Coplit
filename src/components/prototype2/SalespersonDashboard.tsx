@@ -27,11 +27,16 @@ type StatusTone = 'emerald' | 'amber' | 'red' | 'slate' | 'indigo';
  */
 const callStateLabel = (snapshot: EngineSnapshot | null): { label: string; tone: StatusTone } => {
   const state = snapshot?.callState ?? 'idle';
+  const health = snapshot?.audioHealth;
   switch (state) {
     case 'connected':
-      return snapshot?.mediaFlowing
+      if (!health) return snapshot?.mediaFlowing
         ? { label: 'Audio flowing', tone: 'emerald' }
         : { label: 'Connected — waiting for media', tone: 'amber' };
+      if (health.code === 'ok') return { label: 'Customer audio flowing', tone: 'emerald' };
+      if (health.code === 'no-peer') return { label: 'Connected', tone: 'amber' };
+      // Connected transport is never reported as working audio.
+      return { label: 'Connected — customer audio not working', tone: 'red' };
     case 'disconnected': return { label: 'Customer disconnected', tone: 'red' };
     case 'connecting': return { label: 'Connecting audio', tone: 'amber' };
     case 'waiting': return { label: 'Waiting for customer', tone: 'amber' };
@@ -64,6 +69,47 @@ const captionStatusLabel = (snapshot: EngineSnapshot | null): string => {
     case 'error': return 'Captions stopped — call audio is unaffected';
     default: return 'Captions off';
   }
+};
+
+/**
+ * The five states the salesperson needs to tell apart. "Connected" alone is
+ * never used as proof that the customer can be heard.
+ */
+const audioHealthRows = (
+  snapshot: EngineSnapshot | null
+): { rows: Array<[string, string]>; tone: StatusTone } => {
+  const health = snapshot?.audioHealth;
+  if (!health) {
+    return { rows: [['customer', 'not connected']], tone: 'slate' };
+  }
+  const playback =
+    health.playback === 'playing'
+      ? 'playing'
+      : health.playback === 'blocked'
+        ? 'blocked by browser'
+        : health.playback === 'paused'
+          ? 'paused'
+          : health.playback === 'ended'
+            ? 'stream ended'
+            : health.playback === 'error'
+              ? 'error'
+              : 'no stream';
+  const sound = !health.soundMeasurable
+    ? 'cannot measure'
+    : health.soundDetected
+      ? `yes${typeof health.audioLevel === 'number' ? ` (level ${Math.round(health.audioLevel * 100)}%)` : ''}`
+      : 'silent';
+  return {
+    rows: [
+      ['customer', health.customerConnected ? 'connected' : 'waiting'],
+      ['webrtc transport', health.transportConnected ? 'connected' : 'not connected'],
+      ['customer track', health.remoteTrack],
+      ['incoming packets', health.packetsReceived > 0 ? String(health.packetsReceived) : 'none'],
+      ['incoming sound', sound],
+      ['playback', playback],
+    ],
+    tone: health.code === 'ok' ? 'emerald' : health.code === 'no-peer' ? 'slate' : 'amber',
+  };
 };
 
 
@@ -104,6 +150,13 @@ export const SalespersonDashboard: React.FC = () => {
       engineRef.current = null;
     };
   }, []);
+
+  // The <audio> element can be replaced by React (view switch, banner, error
+  // path). Re-binding it keeps the remote stream attached instead of silently
+  // playing into a detached element.
+  useEffect(() => {
+    if (engineRef.current) engineRef.current.attachAudioElement(audioRef.current);
+  }, [engineStarted, view]);
 
   const adoptSession = useCallback(
     async (created: CreatedSession, name: string, nextView: 'dashboard' | 'invitation') => {
@@ -364,6 +417,7 @@ export const SalespersonDashboard: React.FC = () => {
   };
 
   const callState = callStateLabel(snapshot);
+  const audioHealth = audioHealthRows(snapshot);
   const micLive = snapshot?.micPermission === 'granted' && snapshot.localTrackState === 'live';
   const latestSuggestion = useMemo(
     () => (snapshot?.suggestions.length ? snapshot.suggestions[snapshot.suggestions.length - 1] : null),
@@ -587,6 +641,45 @@ export const SalespersonDashboard: React.FC = () => {
               {snapshot.iceConfigError}
             </Banner>
           ) : null}
+          {/* Connected is not the same as audible. This warning only appears when
+              the customer is in the call but their voice is not reaching (or not
+              playing on) this device. */}
+          {snapshot?.audioHealth?.warning ? (
+            <Banner
+              tone={snapshot.audioHealth.code === 'transport-down' ? 'red' : 'amber'}
+              title="You may not be hearing the customer"
+              testId="audio-health-warning"
+              action={
+                <span className="flex flex-wrap gap-2">
+                  {snapshot.audioHealth.playback === 'blocked' ||
+                  snapshot.audioHealth.playback === 'paused' ? (
+                    <button
+                      onClick={() => void engineRef.current?.resumePlayback()}
+                      data-testid="enable-audio"
+                      className="px-3 py-1 rounded-lg bg-amber-500 text-slate-950 font-semibold"
+                    >
+                      Enable audio
+                    </button>
+                  ) : null}
+                  <button
+                    onClick={() => engineRef.current?.requestAudioCheck()}
+                    data-testid="audio-check"
+                    className="px-3 py-1 rounded-lg bg-slate-800 text-slate-100 font-semibold"
+                  >
+                    Ask customer to check mic
+                  </button>
+                  <button
+                    onClick={() => void restartCall()}
+                    className="px-3 py-1 rounded-lg bg-slate-800 text-slate-100 font-semibold"
+                  >
+                    Reconnect
+                  </button>
+                </span>
+              }
+            >
+              {snapshot.audioHealth.warning}
+            </Banner>
+          ) : null}
           {snapshot && !snapshot.turnConfigured && !snapshot.iceConfigError ? (
             <Banner tone="amber" title="TURN relay not configured" testId="turn-warning">
               Audio works only when both devices can reach each other directly. Configure TURN_URLS on the server for
@@ -596,22 +689,6 @@ export const SalespersonDashboard: React.FC = () => {
           {snapshot?.diagnostics.iceTransportPolicy === 'relay' && snapshot.relayCandidates === 0 ? (
             <Banner tone="red" title="Relay-only mode: no relay candidates gathered" testId="relay-warning">
               TURN is unreachable or rejected the credentials, so no media path can be established.
-            </Banner>
-          ) : null}
-          {snapshot?.playbackBlocked ? (
-            <Banner
-              tone="amber"
-              title="Customer audio is blocked by the browser"
-              action={
-                <button
-                  onClick={() => void engineRef.current?.resumePlayback()}
-                  className="px-3 py-1 rounded-lg bg-amber-500 text-slate-950 font-semibold"
-                >
-                  Enable audio
-                </button>
-              }
-            >
-              A user gesture is required before audio can play.
             </Banner>
           ) : null}
           {snapshot?.lastError ? (
@@ -712,6 +789,44 @@ export const SalespersonDashboard: React.FC = () => {
               </p>
             ) : null}
           </section>
+
+          {/* What the salesperson actually needs to know about the incoming
+              customer audio, deliberately split into transport / packets /
+              sound / playback so "connected" can never be mistaken for audio. */}
+          {engineStarted && snapshot?.audioHealth ? (
+            <Panel
+              title="Customer audio"
+              icon={<Activity className="w-3.5 h-3.5" />}
+              action={
+                <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${toneClasses(audioHealth.tone)}`}>
+                  {snapshot.audioHealth.code === 'ok' ? 'audible' : snapshot.audioHealth.code}
+                </span>
+              }
+            >
+              <div data-testid="audio-health">
+                {audioHealth.rows.map(([label, value]) => (
+                  <StatusLine
+                    key={label}
+                    label={label}
+                    value={value}
+                    tone={
+                      snapshot.audioHealth?.code === 'ok'
+                        ? 'emerald'
+                        : value === 'none' || value === 'silent' || value === 'not connected'
+                          ? 'red'
+                          : 'amber'
+                    }
+                  />
+                ))}
+              </div>
+              <p className="text-[10px] text-slate-500 mt-1" data-testid="audio-health-code">
+                state: {snapshot.audioHealth.code}
+                {snapshot.diagnostics.peerAudioReport
+                  ? ` · customer reports: ${snapshot.diagnostics.peerAudioReport}`
+                  : ''}
+              </p>
+            </Panel>
+          ) : null}
 
           {/* AI copilot status: the real customer-side Ultravox session */}
           <Panel
@@ -857,6 +972,36 @@ export const SalespersonDashboard: React.FC = () => {
                       ['remote', snapshot?.diagnostics.remoteTrackState ?? 'none'],
                       ['rtp out', `${snapshot?.diagnostics.bytesSent ?? 0} B`],
                       ['rtp in', `${snapshot?.diagnostics.bytesReceived ?? 0} B`],
+                      ['packets in', String(snapshot?.diagnostics.inboundPackets ?? 0)],
+                      ['packets out', String(snapshot?.diagnostics.outboundPackets ?? 0)],
+                      ['packets lost', String(snapshot?.diagnostics.inboundPacketsLost ?? 0)],
+                      [
+                        'in audio level',
+                        typeof snapshot?.diagnostics.inboundAudioLevel === 'number'
+                          ? snapshot.diagnostics.inboundAudioLevel.toFixed(4)
+                          : 'n/a',
+                      ],
+                      ['in sound', snapshot?.diagnostics.inboundSound ? 'yes' : 'no'],
+                      [
+                        'sound last',
+                        snapshot?.diagnostics.lastSoundAgoMs === null ||
+                        snapshot?.diagnostics.lastSoundAgoMs === undefined
+                          ? 'never'
+                          : `${Math.round(snapshot.diagnostics.lastSoundAgoMs / 1000)}s ago`,
+                      ],
+                      ['remote ready', snapshot?.diagnostics.remoteTrackState ?? 'none'],
+                      ['remote enabled', String(snapshot?.diagnostics.remoteTrackEnabled ?? 'n/a')],
+                      ['direction', snapshot?.diagnostics.sendDirection ?? 'unknown'],
+                      ['sender track', snapshot?.diagnostics.senderTrackState ?? 'none'],
+                      ['playback', snapshot?.diagnostics.playbackState ?? 'no-track'],
+                      [
+                        'element time',
+                        typeof snapshot?.diagnostics.audioElementCurrentTime === 'number'
+                          ? `${snapshot.diagnostics.audioElementCurrentTime}s`
+                          : 'n/a',
+                      ],
+                      ['playback error', snapshot?.diagnostics.playbackError ?? 'none'],
+                      ['audio state', snapshot?.audioHealth?.code ?? 'n/a'],
                       ['audio flow', snapshot?.diagnostics.audioFlow ?? 'none'],
                       [
                         'audio last in',
@@ -896,6 +1041,7 @@ export const SalespersonDashboard: React.FC = () => {
                         ['answers', String(serverDiagnostics.diagnostics.signals.answers)],
                         ['ice relayed', String(serverDiagnostics.diagnostics.signals.iceCandidates)],
                         ['AI text relayed', String(serverDiagnostics.diagnostics.signals.aiSuggestions)],
+                        ['audio checks', String(serverDiagnostics.diagnostics.signals.audioChecks)],
                         ['relay failures', String(serverDiagnostics.diagnostics.signals.relayFailures)],
                         ['rejected msgs', String(serverDiagnostics.diagnostics.signals.rejectedMessages)],
                         ['last server error', serverDiagnostics.diagnostics.signals.lastError ?? 'none'],

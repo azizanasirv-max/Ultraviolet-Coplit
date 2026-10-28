@@ -48,6 +48,8 @@ export interface SessionSignalingCounters {
   aiSuggestions: number;
   rejectedMessages: number;
   relayFailures: number;
+  /** Salesperson audio-check requests + customer renegotiation requests. */
+  audioChecks: number;
   lastError: string | null;
   lastActivityAt: number;
 }
@@ -233,6 +235,7 @@ export class SessionStore {
         aiSuggestions: 0,
         rejectedMessages: 0,
         relayFailures: 0,
+        audioChecks: 0,
         lastError: null,
         lastActivityAt: now,
       },
@@ -580,7 +583,14 @@ export class SessionStore {
 
   countSignal(
     sessionId: string,
-    kind: 'offers' | 'answers' | 'iceCandidates' | 'aiSuggestions' | 'rejectedMessages' | 'relayFailures'
+    kind:
+      | 'offers'
+      | 'answers'
+      | 'iceCandidates'
+      | 'aiSuggestions'
+      | 'rejectedMessages'
+      | 'relayFailures'
+      | 'audioChecks'
   ): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;

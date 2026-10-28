@@ -117,6 +117,8 @@ class FakePeerConnection {
   /** Configurable getStats() output: inbound/outbound audio RTP counters. */
   inboundBytes = 0;
   outboundBytes = 0;
+  /** Optional inbound audio level reported by getStats()/getSynchronizationSources. */
+  inboundAudioLevel: number | null = null;
   closed = false;
 
   constructor(configuration: any) {
@@ -214,6 +216,7 @@ class FakePeerConnection {
       kind: 'audio',
       bytesReceived: this.inboundBytes,
       packetsReceived: Math.floor(this.inboundBytes / 160),
+      ...(this.inboundAudioLevel === null ? {} : { audioLevel: this.inboundAudioLevel }),
     });
     reports.set('outbound', {
       id: 'outbound',
@@ -223,6 +226,10 @@ class FakePeerConnection {
       packetsSent: Math.floor(this.outboundBytes / 160),
     });
     return Promise.resolve(reports);
+  }
+
+  getTransceivers() {
+    return this.transceivers;
   }
 
   close() {
@@ -386,6 +393,36 @@ const installFetch = (
 /** Which capture every getUserMedia() call returns. Tests may override it. */
 let micStreamFactory: () => FakeStream = () => new FakeStream();
 
+/**
+ * Minimal HTMLAudioElement stand-in: the engine only reads/writes muted,
+ * volume, loop, srcObject, paused/currentTime and calls play()/pause()/load().
+ */
+const fakeAudioElement = () => {
+  const element: any = {
+    muted: false,
+    volume: 1,
+    loop: false,
+    src: '',
+    srcObject: null,
+    paused: true,
+    currentTime: 0,
+    getAttribute: (name: string) => (name === 'src' ? element.src || null : null),
+    removeAttribute: (name: string) => {
+      if (name === 'src') element.src = '';
+    },
+    load: () => {},
+    pause: () => {
+      element.paused = true;
+    },
+    play: () => {
+      element.paused = false;
+      return Promise.resolve();
+    },
+  };
+  return element as HTMLAudioElement;
+};
+
+
 Object.defineProperty(globalThis, 'navigator', {
   configurable: true,
   value: {
@@ -426,6 +463,8 @@ const setupPeer = async (
     mediaFlowCheckMs?: number;
     mediaFlowGraceMs?: number;
     mediaStallMs?: number;
+    audioRepairWaitMs?: number;
+    playbackCheckMs?: number;
     /** Initial microphone capture (defaults to a fresh live fake track). */
     micStream?: () => FakeStream;
   } = {}
@@ -453,6 +492,8 @@ const setupPeer = async (
     mediaFlowCheckMs: options.mediaFlowCheckMs ?? 60000,
     mediaFlowGraceMs: options.mediaFlowGraceMs ?? 60000,
     mediaStallMs: options.mediaStallMs ?? 60000,
+    audioRepairWaitMs: options.audioRepairWaitMs ?? 60000,
+    playbackCheckMs: options.playbackCheckMs ?? 60000,
     createAiSession: () => {
       const session = new FakeUltravoxSession();
       sessions.push(session);
@@ -1269,12 +1310,13 @@ test('re-acquiring the microphone stops the previous capture', async t => {
   assert.equal(pc.senders[0].track?.id, 'second');
 });
 
-test('a connected call with no audio recovers instead of reporting success', async t => {
+test('a connected call with no audio asks for a re-publish before restarting ICE', async t => {
   const { engine, ws, pc } = await setupPeer('salesperson', {
     mediaFlowCheckMs: 5,
     mediaFlowGraceMs: 10,
     mediaStallMs: 10,
     iceRestartVerifyMs: 15,
+    audioRepairWaitMs: 20,
   });
   t.after(async () => engine.stop('test finished'));
 
@@ -1285,21 +1327,298 @@ test('a connected call with no audio recovers instead of reporting success', asy
   pc.__setConnectionState('connected');
   await sleep(30);
 
-  assert.equal(pc.createOfferCalls.filter((call) => call.iceRestart).length >= 1, true,
-    'a silent connected call must trigger an ICE restart');
+  // An ICE restart interrupts the direction that works and cannot fix a remote
+  // track that was never published, so the peer is asked first.
+  const rechecks = () => ws.sent.filter((message) => message.type === 'audio_recheck');
+  assert.ok(rechecks().length >= 1, 'a silent connected call must ask the customer to re-publish');
+  assert.equal(
+    pc.createOfferCalls.filter((call) => call.iceRestart).length,
+    0,
+    'no ICE restart before the remote audio has been re-published'
+  );
+
+  // Audio still never arrives: after the wait window it must fall back to the
+  // bounded ICE restart.
+  await sleep(80);
+  assert.equal(
+    pc.createOfferCalls.filter((call) => call.iceRestart).length >= 1,
+    true,
+    `a silent connected call must still restart ICE as a last resort: ${engine
+      .getSnapshot()
+      .logs.slice(-8)
+      .join(' | ')}`
+  );
+  assert.ok(rechecks().length <= 2, 'the re-publish request must stay bounded');
 
   // Answer every restart offer the way the real customer would; only the
   // audio itself stays missing.
-  for (let index = 0; index < 8; index += 1) {
+  for (let index = 0; index < 10; index += 1) {
     await answerOffer(ws, pc);
     await sleep(40);
   }
 
   // After the bounded attempts it must stop and report an actionable failure.
-  await sleep(200);
+  await sleep(300);
   const snapshot = engine.getSnapshot();
   assert.equal(snapshot.callState, 'failed', `state=${snapshot.callState} logs=${snapshot.logs.join(' | ')}`);
   assert.match(String(snapshot.lastError), /could not be established/i);
+});
+
+test('a re-publish that restores audio prevents the ICE restart entirely', async t => {
+  const { engine, ws, pc } = await setupPeer('salesperson', {
+    mediaFlowCheckMs: 5,
+    mediaFlowGraceMs: 10,
+    // Audio that was flowing is allowed to pause while people talk.
+    mediaStallMs: 400,
+    iceRestartVerifyMs: 15,
+    audioRepairWaitMs: 40,
+  });
+  t.after(async () => engine.stop('test finished'));
+  (engine as any).attachAudioElement(fakeAudioElement());
+
+  await answerOffer(ws, pc);
+  pc.outboundBytes = 4000;
+  pc.__setConnectionState('connected');
+  await sleep(25);
+  assert.ok(ws.sent.some((message) => message.type === 'audio_recheck'));
+
+  // The customer device repaired its track: the remote track and RTP appear.
+  const remoteTrack = new FakeTrack('repaired');
+  pc.ontrack?.({ track: remoteTrack, streams: [new FakeStream([remoteTrack])] });
+  for (let index = 0; index < 4; index += 1) {
+    pc.inboundBytes += 2500;
+    await (engine as any).sampleStats();
+    await sleep(15);
+  }
+  await sleep(80);
+
+  assert.equal(
+    pc.createOfferCalls.filter((call) => call.iceRestart).length,
+    0,
+    'repairing the remote track must not restart a healthy transport'
+  );
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.callState, 'connected');
+  assert.equal(snapshot.audioHealth?.code, 'ok', JSON.stringify(snapshot.audioHealth));
+  assert.equal(snapshot.audioHealth?.packetsReceived > 0, true);
+});
+
+test('the inbound audio states are distinguished, never inferred from "connected"', async t => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+  (engine as any).attachAudioElement(fakeAudioElement());
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+
+  // 1. Connected with no remote track at all.
+  await (engine as any).sampleStats();
+  assert.equal(engine.getSnapshot().audioHealth?.code, 'no-remote-track');
+  assert.ok(engine.getSnapshot().audioHealth?.warning);
+
+  // 2. The track arrives but no RTP: connected, but nothing is arriving.
+  const track = new FakeTrack('customer-mic');
+  pc.ontrack?.({ track, streams: [new FakeStream([track])] });
+  await (engine as any).sampleStats();
+  assert.equal(engine.getSnapshot().audioHealth?.code, 'no-packets');
+  assert.ok(engine.getSnapshot().audioHealth?.warning);
+
+  // 3. Packets arrive but they are digital silence.
+  pc.inboundAudioLevel = 0;
+  for (let index = 0; index < 3; index += 1) {
+    pc.inboundBytes += 2000;
+    await (engine as any).sampleStats();
+    await sleep(10);
+  }
+  let health = engine.getSnapshot().audioHealth;
+  assert.equal(health?.code, 'silent', JSON.stringify(health));
+  assert.equal(health?.soundMeasurable, true);
+  assert.equal(health?.soundDetected, false);
+  assert.match(String(health?.warning), /no measurable sound/i);
+
+  // 4. Measurable sound arrives: the only state that may be reported as working.
+  pc.inboundAudioLevel = 0.2;
+  for (let index = 0; index < 3; index += 1) {
+    pc.inboundBytes += 2000;
+    await (engine as any).sampleStats();
+    await sleep(10);
+  }
+  health = engine.getSnapshot().audioHealth;
+  assert.equal(health?.code, 'ok', JSON.stringify(health));
+  assert.equal(health?.soundDetected, true);
+  assert.equal(health?.warning, null);
+  assert.ok(health && health.packetsReceived > 0);
+  assert.equal(engine.getSnapshot().callState, 'connected');
+});
+
+test('a blocked audio element is reported as blocked, not as working audio', async t => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+  const element = fakeAudioElement();
+  element.play = () => Promise.reject(Object.assign(new Error('blocked'), { name: 'NotAllowedError' }));
+  (engine as any).attachAudioElement(element);
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+
+  const track = new FakeTrack('customer-mic');
+  pc.ontrack?.({ track, streams: [new FakeStream([track])] });
+  pc.inboundAudioLevel = 0.3;
+  for (let index = 0; index < 3; index += 1) {
+    pc.inboundBytes += 2000;
+    await (engine as any).sampleStats();
+    await sleep(10);
+  }
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.audioHealth?.playback, 'blocked');
+  assert.equal(snapshot.audioHealth?.code, 'playback-blocked');
+  assert.match(String(snapshot.audioHealth?.warning), /Enable audio/i);
+  assert.equal(snapshot.playbackBlocked, true);
+
+  // A user gesture (the banner button) recovers playback and the warning clears.
+  element.play = () => {
+    (element as any).paused = false;
+    return Promise.resolve();
+  };
+  assert.equal(await engine.resumePlayback(), true);
+  await (engine as any).sampleStats();
+  const recovered = engine.getSnapshot();
+  assert.equal(recovered.audioHealth?.playback, 'playing');
+  assert.equal(recovered.audioHealth?.code, 'ok', JSON.stringify(recovered.audioHealth));
+});
+
+test('the customer device never receives inbound-audio diagnostics', async t => {
+  const { engine } = await setupPeer('customer');
+  t.after(async () => engine.stop('test finished'));
+  assert.equal(engine.getSnapshot().audioHealth, null);
+});
+
+test('a sendonly answer immediately asks the customer to re-publish audio', async t => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+  // The negotiated m-line lets this side send but not receive: the exact
+  // "salesperson hears nothing" symptom, detectable without waiting for RTP.
+  (pc as any).transceivers.push({
+    receiver: { track: new FakeTrack('remote') },
+    sender: pc.senders[0],
+    direction: 'sendrecv',
+    currentDirection: 'sendonly',
+  });
+  await answerOffer(ws, pc);
+  const rechecks = ws.sent.filter((message) => message.type === 'audio_recheck');
+  assert.equal(rechecks.length, 1, 'a sendonly answer must trigger a re-publish request');
+  assert.equal(engine.getSnapshot().audioHealth?.code === 'ok', false);
+});
+
+test('an ended remote track asks the customer to publish again', async t => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+  (engine as any).attachAudioElement(fakeAudioElement());
+  await answerOffer(ws, pc);
+  pc.__setConnectionState('connected');
+  const track = new FakeTrack('customer-mic');
+  pc.ontrack?.({ track, streams: [new FakeStream([track])] });
+  track.readyState = 'ended';
+  track.onended?.();
+  await sleep(10);
+  assert.ok(
+    ws.sent.some((message) => message.type === 'audio_recheck'),
+    'a dead remote track must trigger a re-publish request (an ICE restart cannot fix it)'
+  );
+  assert.equal(engine.getSnapshot().audioHealth?.code, 'no-remote-track');
+});
+
+test('the customer re-publishes its microphone when the salesperson asks', async t => {
+  const { engine, ws, pc } = await setupPeer('customer');
+  t.after(async () => engine.stop('test finished'));
+  const sender = pc.senders[0];
+  const first = sender.track as FakeTrack;
+  first.readyState = 'ended'; // the device dropped the capture
+  micStreamFactory = () => new FakeStream([new FakeTrack('replacement')]);
+  // The negotiated audio m-line, as Chrome reports it after an answer.
+  (pc as any).transceivers.push({
+    receiver: { track: new FakeTrack('remote') },
+    sender,
+    direction: 'sendrecv',
+    currentDirection: 'sendrecv',
+  });
+
+  ws.receive({ type: 'audio_recheck', from: 'salesperson-1', reason: 'no incoming audio' });
+  await sleep(30);
+
+  assert.equal(pc.senders.length, 1, 're-publishing must never add a second sender');
+  assert.equal(sender.track?.id, 'replacement');
+  assert.equal(sender.track?.readyState, 'live');
+  const report = ws.sent.find((message) => message.type === 'audio_state');
+  assert.ok(report, 'the customer reports the audio state back to the salesperson');
+  assert.equal(report.direction, 'sendrecv');
+  assert.equal(report.sender, 'track');
+  assert.match(String(report.track), /live/);
+});
+
+test('audio repair messages are role-checked on the client too', async t => {
+  const sales = await setupPeer('salesperson');
+  t.after(async () => sales.engine.stop('test finished'));
+  sales.ws.receive({ type: 'audio_recheck', from: 'customer-1', reason: 'nope' });
+  await sleep(10);
+  assert.equal(
+    sales.ws.sent.filter((message) => message.type === 'audio_state').length,
+    0,
+    'a salesperson must never answer an audio check'
+  );
+
+  const cust = await setupPeer('customer');
+  t.after(async () => cust.engine.stop('test finished'));
+  cust.ws.receive({
+    type: 'audio_state',
+    from: 'salesperson-1',
+    track: 'live',
+    direction: 'sendrecv',
+  });
+  assert.equal(
+    cust.engine.getSnapshot().diagnostics.peerAudioReport,
+    null,
+    'customer audio reports are salesperson-only'
+  );
+});
+
+test('the salesperson records the customer audio report and can force a renegotiation', async t => {
+  const { engine, ws, pc } = await setupPeer('salesperson');
+  t.after(async () => engine.stop('test finished'));
+  ws.receive({
+    type: 'audio_state',
+    from: 'customer-1',
+    track: 'live',
+    sender: 'track',
+    direction: 'sendrecv',
+    packetsSent: 42,
+    level: 0.25,
+  });
+  await sleep(10);
+  const report = engine.getSnapshot().diagnostics.peerAudioReport;
+  assert.match(String(report), /direction sendrecv/);
+  assert.match(String(report), /sent 42/);
+
+  await answerOffer(ws, pc);
+  const offersBefore = ws.offers().length;
+  ws.receive({ type: 'audio_renegotiate', from: 'customer-1', reason: 'cannot publish' });
+  await sleep(20);
+  assert.ok(ws.offers().length > offersBefore, 'the salesperson must answer with a fresh offer');
+});
+
+test('the salesperson microphone is never published to the AI', async t => {
+  const calls: string[] = [];
+  (globalThis as any).fetch = async (input: RequestInfo | URL) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.includes('/ice-config')) return jsonResponse(icePayload());
+    return jsonResponse({});
+  };
+  const { engine, sessions } = await setupPeer('salesperson', { enableAi: true });
+  t.after(async () => engine.stop('test finished'));
+  await sleep(20);
+  assert.equal(calls.filter((url) => url.includes('/ultravox-call')).length, 0);
+  assert.equal(sessions.length, 0);
+  assert.equal(engine.getSnapshot().ai.state, 'off');
 });
 
 test('real inbound audio prevents the media watchdog from restarting ICE', async t => {

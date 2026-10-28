@@ -1369,6 +1369,74 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
         return;
       }
 
+      if (type === 'audio_recheck') {
+        // Salesperson -> customer only: ask the customer device to verify and
+        // re-publish its microphone. Text-only, role-checked, no payload of
+        // value beyond a short reason string.
+        if (state.role !== 'salesperson') {
+          rejectMessage(
+            session.sessionId,
+            'INVALID_SIGNALING_ROLE',
+            'Only the salesperson may request an audio check.'
+          );
+          return;
+        }
+        store.countSignal(session.sessionId, 'audioChecks');
+        relayToCounterpart(session, current, 'audio_recheck', {
+          reason: typeof data.reason === 'string' ? data.reason.slice(0, 120) : 'salesperson requested',
+        });
+        return;
+      }
+
+      if (type === 'audio_state') {
+        // Customer -> salesperson only: sanitized audio-path report. Scalar
+        // states/counters are whitelisted so no SDP, ICE or credential data can
+        // ever ride along.
+        if (state.role !== 'customer') {
+          rejectMessage(
+            session.sessionId,
+            'INVALID_SIGNALING_ROLE',
+            'Only the customer may report its audio state.'
+          );
+          return;
+        }
+        const text = (value: unknown): string =>
+          typeof value === 'string' ? value.slice(0, 40) : '';
+        const count = (value: unknown): number =>
+          typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+        const level =
+          typeof data.level === 'number' && Number.isFinite(data.level)
+            ? Math.min(1, Math.max(0, data.level))
+            : null;
+        relayToCounterpart(session, current, 'audio_state', {
+          reason: text(data.reason),
+          track: text(data.track),
+          sender: text(data.sender),
+          direction: text(data.direction),
+          packetsSent: count(data.packetsSent),
+          level,
+        });
+        return;
+      }
+
+      if (type === 'audio_renegotiate') {
+        // Customer -> salesperson only: the customer cannot publish on the
+        // negotiated m-line, so the offerer must send a fresh offer.
+        if (state.role !== 'customer') {
+          rejectMessage(
+            session.sessionId,
+            'INVALID_SIGNALING_ROLE',
+            'Only the customer may request a renegotiation.'
+          );
+          return;
+        }
+        store.countSignal(session.sessionId, 'audioChecks');
+        relayToCounterpart(session, current, 'audio_renegotiate', {
+          reason: typeof data.reason === 'string' ? data.reason.slice(0, 120) : 'customer requested',
+        });
+        return;
+      }
+
       if (type === 'offer') {
         if (state.role !== 'salesperson') {
           rejectMessage(session.sessionId, 'INVALID_SIGNALING_ROLE', 'Only the salesperson may send an offer.');
