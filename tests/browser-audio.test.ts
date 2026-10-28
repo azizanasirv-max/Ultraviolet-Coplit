@@ -527,6 +527,103 @@ test('prototype2 three-path audio with synthetic media', async (t) => {
     socket.close();
   });
 
+  await t.test('customer transcript segments reach the dashboard once, in order, without translation', async () => {
+    // Reuse the protocol-level customer socket from the previous subtest through
+    // the same real server route and real dashboard render path.
+    const inviteToken = decodeURIComponent(inviteUrl.split('invite=')[1]);
+    const customerKey = await customerPage.evaluate(
+      (token) =>
+        JSON.parse(sessionStorage.getItem(`sc.prototype2.customer.${token}`) || '{}').customerKey as string,
+      inviteToken
+    );
+    const sessionId = await salespersonPage.evaluate(
+      () => JSON.parse(localStorage.getItem('sc.prototype2.salesperson') || '{}').sessionId as string
+    );
+
+    const socket = new WebSocket(`${base.replace('http', 'ws')}/ws`);
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => resolve());
+      socket.once('error', reject);
+    });
+    socket.send(JSON.stringify({ type: 'join', sessionId, role: 'customer', credential: customerKey }));
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('join ack timeout')), 5000);
+      socket.on('message', (raw) => {
+        const message = JSON.parse(raw.toString());
+        if (message.type === 'joined') {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+    });
+
+    socket.send(
+      JSON.stringify({
+        type: 'ai_status',
+        sessionId,
+        state: 'connected',
+        connected: true,
+        callId: 'call_uitest',
+        audioReachingAi: true,
+      })
+    );
+    await sleep(150);
+
+    const send = (payload: Record<string, unknown>) =>
+      socket.send(
+        JSON.stringify({
+          type: 'customer_speech_transcript',
+          sessionId,
+          callId: 'call_uitest',
+          medium: 'voice',
+          ...payload,
+        })
+      );
+
+    send({ text: 'I need the', isFinal: false, ordinal: 1 });
+    await salespersonPage.waitForFunction(
+      () =>
+        document.querySelectorAll('[data-testid="customer-transcript-segment"]').length === 1 &&
+        document
+          .querySelector('[data-testid="customer-transcript-segment"]')
+          ?.getAttribute('data-final') === 'false',
+      { timeout: 8000 }
+    );
+
+    send({ text: 'I need the enterprise plan.', isFinal: true, ordinal: 1 });
+    // The same final again must not create a second segment.
+    send({ text: 'I need the enterprise plan.', isFinal: true, ordinal: 1 });
+    send({
+      text: 'Quiero el plan básico, but I need it for my team.',
+      isFinal: true,
+      ordinal: 2,
+    });
+
+    await salespersonPage.waitForFunction(
+      () => document.querySelectorAll('[data-testid="customer-transcript-segment"]').length === 2,
+      { timeout: 8000 }
+    );
+    await sleep(300);
+
+    const segments = await salespersonPage.evaluate(() =>
+      Array.from(document.querySelectorAll('[data-testid="customer-transcript-segment"]')).map(
+        (element) => ({
+          text: element.textContent || '',
+          ordinal: element.getAttribute('data-ordinal'),
+          final: element.getAttribute('data-final'),
+        })
+      )
+    );
+    assert.equal(segments.length, 2, 'one segment per ordinal, no duplicate final');
+    assert.equal(segments[0].ordinal, '1');
+    assert.equal(segments[0].final, 'true');
+    assert.equal(segments[0].text, 'I need the enterprise plan.');
+    assert.equal(segments[1].ordinal, '2');
+    assert.equal(segments[1].text, 'Quiero el plan básico, but I need it for my team.');
+    assert.ok(!segments[1].text.includes('live'), 'a final segment is not labelled live');
+    socket.close();
+  });
+
   await t.test('server receives client diagnostics from the salesperson', async () => {
     await sleep(5500);
     const salespersonKey = await salespersonPage.evaluate(

@@ -19,6 +19,11 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import {
+  buildUltravoxCallRequest,
+  resolveLanguageHint,
+  ULTRAVOX_MODEL,
+} from './server/ultravoxCallConfig';
 import { ParticipantRole, SessionRecord, SessionStore } from './server/sessionStore';
 import {
   buildIceConfig,
@@ -88,7 +93,7 @@ const aiReadiness = () => {
   return {
     ready,
     provider: 'ultravox',
-    model: 'ultravox-v0.7',
+    model: ULTRAVOX_MODEL,
     missing: ready ? [] : ['ULTRAVOX_API_KEY'],
     message: ready
       ? 'The server can create Ultravox calls. Readiness is not proof that a live AI session is connected; see the session AI state.'
@@ -498,7 +503,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
         joinUrl: existing.joinUrl,
         isReused: true,
         createdAt: existing.createdAt,
-        model: 'ultravox-v0.7',
+        model: ULTRAVOX_MODEL,
       });
       return;
     }
@@ -527,21 +532,17 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     if (previous) void endUltravoxCallQuietly(previous.callId, apiKey);
 
     // The prompt is operator-controlled: a customer must not be able to steer the
-    // paid model with arbitrary instructions.
-    const systemPrompt =
-      'You are an AI sales copilot assisting a salesperson in a live sales call. Listen attentively to the customer statements, questions, and objections. Generate concise, natural, 1-2 sentence ready-to-read sales responses and qualification questions for the salesperson to read aloud.';
+    // paid model with arbitrary instructions. `ULTRAVOX_LANGUAGE_HINT` is an
+    // optional operator setting (BCP47); when unset no language is forced.
+    const callRequest = buildUltravoxCallRequest(
+      resolveLanguageHint(process.env.ULTRAVOX_LANGUAGE_HINT)
+    );
 
     try {
       const response = await fetchImpl('https://api.ultravox.ai/api/calls', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-        body: JSON.stringify({
-          model: 'ultravox-v0.7',
-          initialOutputMedium: 'MESSAGE_MEDIUM_TEXT',
-          maxDuration: '3600s',
-          systemPrompt,
-          temperature: 0.1,
-        }),
+        body: JSON.stringify(callRequest),
       });
 
       if (!response.ok) {
@@ -596,7 +597,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
         joinUrl,
         isReused: false,
         createdAt: Date.now(),
-        model: typeof data.model === 'string' ? data.model : 'ultravox-v0.7',
+        model: typeof data.model === 'string' ? data.model : ULTRAVOX_MODEL,
       });
     } catch (err) {
       store.recordError(session.sessionId, 'Ultravox request failed');
@@ -741,7 +742,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     const ai = aiReadiness();
     res.json({
       status: 'ok',
-      model: 'ultravox-v0.7',
+      model: ULTRAVOX_MODEL,
       ai,
       hasUltravoxKey: ai.ready,
       ice,
@@ -1467,6 +1468,10 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
           isFinal: Boolean(data.isFinal),
           ordinal: typeof data.ordinal === 'number' ? data.ordinal : 0,
           timestamp: typeof data.timestamp === 'string' ? data.timestamp.slice(0, 40) : '',
+          // Session identity for transcript de-duplication / stale protection.
+          // The call id is not a credential; join URLs never cross this relay.
+          callId: sanitizeCallId(data.callId) ?? undefined,
+          medium: data.medium === 'voice' || data.medium === 'text' ? data.medium : undefined,
         });
         return;
       }

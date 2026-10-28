@@ -354,10 +354,12 @@ test('prototype2 signaling protocol', async (t) => {
     assert.equal(captionRejection.code, 'INVALID_SIGNALING_ROLE');
 
     // Customer AI output and speech reach the salesperson, and never echo back to the customer.
-    customer.send({ type: 'customer_speech_transcript', sessionId: fixture.sessionId, text: 'hello', isFinal: true, ordinal: 1 });
+    customer.send({ type: 'customer_speech_transcript', sessionId: fixture.sessionId, text: 'hello', isFinal: true, ordinal: 1, callId: 'call_test', medium: 'voice' });
     customer.send({ type: 'ai_suggestion', sessionId: fixture.sessionId, text: 'suggest', isFinal: true, ordinal: 2 });
     const speech = await salesperson.next((message) => message.type === 'customer_speech_transcript');
     assert.equal(speech.text, 'hello');
+    assert.equal(speech.callId, 'call_test');
+    assert.equal(speech.medium, 'voice');
     await salesperson.next((message) => message.type === 'ai_suggestion');
     await assert.rejects(
       customer.next(

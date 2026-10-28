@@ -17,7 +17,7 @@
     "test:customer": "node --import tsx --test tests/customerMessages.test.ts",
     "test:signaling": "node --import tsx --test tests/signaling.test.ts",
     "test:negotiation": "node --import tsx --test tests/negotiation.test.ts",
-    "test:ai": "node --import tsx --test tests/aiSession.test.ts",
+    "test:ai": "node --import tsx --test tests/aiSession.test.ts tests/customerTranscript.test.ts tests/aiPrompt.test.ts tests/ultravoxCall.test.ts",
     "test:browser": "node --import tsx --test tests/browser-audio.test.ts",
     "test:all": "npm run test && npm run test:browser",
     "start:prod": "NODE_ENV=production tsx server.ts",

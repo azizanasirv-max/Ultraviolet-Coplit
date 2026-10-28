@@ -948,13 +948,49 @@ export const SalespersonDashboard: React.FC = () => {
           <div className="grid gap-4 md:grid-cols-2">
             <Panel title="Customer speech" icon={<UserRound className="w-3.5 h-3.5" />}>
               <div className="space-y-2" data-testid="customer-speech">
-                {snapshot?.customerSpeech ? (
+                {snapshot?.customerTranscript?.segments.length ? (
+                  <>
+                    <ul className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                      {snapshot.customerTranscript.segments.map((segment) => (
+                        <li
+                          key={segment.ordinal}
+                          data-testid="customer-transcript-segment"
+                          data-ordinal={segment.ordinal}
+                          data-final={segment.isFinal ? 'true' : 'false'}
+                          className={
+                            segment.isFinal
+                              ? 'text-sm text-slate-100 leading-relaxed'
+                              : 'text-sm text-slate-300/90 leading-relaxed'
+                          }
+                        >
+                          {segment.isFinal ? null : (
+                            <span className="mr-1.5 align-middle text-[9px] uppercase tracking-wide font-semibold text-cyan-300/80">
+                              live
+                            </span>
+                          )}
+                          <span className="whitespace-pre-wrap">{segment.text}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    {!aiView.connected ? (
+                      <p className="text-[11px] text-amber-300" data-testid="transcript-paused">
+                        Live transcription is paused while the AI session is
+                        {' '}
+                        {aiView.reconnecting ? 'reconnecting' : 'unavailable'}. The customer call audio is unaffected.
+                      </p>
+                    ) : null}
+                  </>
+                ) : snapshot?.customerSpeech ? (
                   <p className="text-sm text-slate-100 leading-relaxed">{snapshot.customerSpeech}</p>
                 ) : (
-                  <p className="text-xs text-slate-500">
-                    {sessionState?.customerConnected
-                      ? 'Waiting for the customer to speak.'
-                      : 'Customer speech appears here once the customer joins.'}
+                  <p className="text-xs text-slate-500" data-testid="customer-transcript-status">
+                    {!sessionState?.customerConnected
+                      ? 'Customer speech appears here once the customer joins.'
+                      : !aiView.connected
+                        ? aiView.reconnecting
+                          ? 'Connecting the AI session before live transcription starts. The customer call audio is unaffected.'
+                          : 'Live transcription is unavailable for this call. The customer call audio is unaffected.'
+                        : 'Waiting for the customer to speak.'}
                   </p>
                 )}
               </div>

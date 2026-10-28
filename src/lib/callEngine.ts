@@ -21,6 +21,13 @@ import {
   isLiveAiStatus,
   sanitizeAiDetail,
 } from './aiStatus';
+import {
+  applyCustomerTranscriptEvent,
+  bindCustomerTranscriptSession,
+  createCustomerTranscriptState,
+  CustomerTranscriptState,
+  latestFinalCustomerTranscriptSegment,
+} from './customerTranscript';
 import { ApiError, getHealth, getIceConfig, IceConfigResponse } from './sessionApi';
 import {
   INBOUND_SOUND_RMS_THRESHOLD,
@@ -143,7 +150,14 @@ export interface EngineSnapshot {
   /** Salesperson only: when they asked the customer device to restart the AI. */
   aiReconnectRequestedAt: number | null;
   suggestions: SuggestionCard[];
+  /** Latest *final* customer utterance (compatibility single-line field). */
   customerSpeech: string;
+  /**
+   * Salesperson only: customer speech as ordered segments, exactly one entry per
+   * Ultravox ordinal. Partial and final updates replace the same ordinal; the
+   * text is never merged, translated or completed.
+   */
+  customerTranscript: CustomerTranscriptState;
   /**
    * Salesperson only: browser speech-recognition state for salesperson captions.
    * 'unsupported' means the browser has no SpeechRecognition implementation; the
@@ -563,6 +577,13 @@ export class CallEngine {
   private aiReconnectRequestedAt: number | null = null;
   private suggestions: SuggestionCard[] = [];
   private customerSpeech = '';
+  private customerTranscript = createCustomerTranscriptState();
+  /**
+   * Per-generation record of what was already forwarded to the salesperson.
+   * `session.transcripts` re-emits the whole sparse array on every update, so
+   * without this every new partial would re-send every earlier final segment.
+   */
+  private forwardedTranscripts = new Map<string, { text: string; isFinal: boolean }>();
   private captionStatus: EngineSnapshot['captionStatus'] = 'off';
   private salespersonCaption = '';
   private recognition: any = null;
@@ -654,6 +675,7 @@ export class CallEngine {
       aiReconnectRequestedAt: this.aiReconnectRequestedAt,
       suggestions: this.suggestions,
       customerSpeech: this.customerSpeech,
+      customerTranscript: this.customerTranscript,
       captionStatus: this.captionStatus,
       salespersonCaption: this.salespersonCaption,
       reconnectAttempt: this.reconnectAttempt,
@@ -1362,6 +1384,9 @@ export class CallEngine {
     this.stopCaptions();
     this.closePeerConnection(`stop: ${reason}`);
     this.resetPeerRecoveryState('call stopped');
+    this.resetCustomerTranscript('call stopped');
+    this.forwardedTranscripts.clear();
+    this.suggestions = [];
     this.releaseLocalMedia(reason);
     this.releaseAudioMeasurement();
     // Idempotent: closePeerConnection already detached the playback path.
@@ -3229,6 +3254,16 @@ export class CallEngine {
       return;
     }
 
+    if (
+      this.options.role === 'salesperson' &&
+      this.peerParticipantId &&
+      this.peerParticipantId !== counterpart.participantId
+    ) {
+      // A different customer in the same session must never inherit the
+      // previous customer's transcript segments.
+      this.resetCustomerTranscript('a different customer joined');
+    }
+
     this.log(`Establishing a fresh peer connection for ${counterpart.role} (${source}).`);
     this.createPeerConnection(counterpart);
     if (this.options.role === 'salesperson') void this.makeOffer({ reason: source });
@@ -3529,12 +3564,14 @@ export class CallEngine {
       const state = (allowed as string[]).includes(rawState)
         ? (rawState as AiStatus['state'])
         : 'error';
+      const reportedCallId = typeof data.callId === 'string' ? data.callId.slice(0, 100) : null;
+      this.bindCustomerTranscriptToCall(reportedCallId);
       this.applyRemoteAi({
         state,
         status: null,
         connected: data.connected === true && state === 'connected',
         error: sanitizeAiDetail(data.error),
-        callId: typeof data.callId === 'string' ? data.callId.slice(0, 100) : null,
+        callId: reportedCallId,
         reconnectAttempt:
           typeof data.reconnectAttempt === 'number' ? Math.max(0, Math.round(data.reconnectAttempt)) : 0,
         reconnecting: state === 'reconnecting' || state === 'creating' || state === 'connecting',
@@ -3597,8 +3634,24 @@ export class CallEngine {
 
     if (type === 'customer_speech_transcript') {
       if (this.options.role !== 'salesperson') return;
-      this.customerSpeech = typeof data.text === 'string' ? data.text : '';
-      this.emit();
+      const result = applyCustomerTranscriptEvent(this.customerTranscript, {
+        text: data.text,
+        isFinal: data.isFinal,
+        ordinal: data.ordinal,
+        callId: data.callId,
+        medium: data.medium,
+        timestamp: data.timestamp,
+      });
+      this.customerTranscript = result.state;
+      if (result.applied) {
+        // The single-line compatibility field only ever holds final text; the
+        // segment list is what renders partials and preserved utterance
+        // boundaries. Nothing is merged across ordinals.
+        this.customerSpeech = latestFinalCustomerTranscriptSegment(this.customerTranscript)?.text ?? '';
+        this.emit();
+      } else if (result.reason !== 'duplicate') {
+        this.log(`Ignored customer transcript (${result.reason}).`);
+      }
       return;
     }
 
@@ -3663,6 +3716,8 @@ export class CallEngine {
     // error or transcript callbacks can never overwrite the new session's state.
     const generation = ++this.aiGeneration;
     await this.teardownAiSession('replacing the previous AI session');
+    // Ordinals belong to one Ultravox call; never carry them into the next one.
+    this.forwardedTranscripts.clear();
 
     if (this.stopped || this.intentionalLeave || generation !== this.aiGeneration) {
       // The call was stopped while the previous session was tearing down.
@@ -3824,27 +3879,48 @@ export class CallEngine {
         let lastSuggestionAt = this.ai.lastSuggestionAt;
         let lastResponseAt = this.ai.lastResponseAt;
         for (const transcript of session.transcripts) {
-          if (transcript.speaker === Role.AGENT && transcript.text.trim()) {
+          if (!transcript || typeof transcript.text !== 'string') continue;
+          if (transcript.text.trim().length === 0) continue;
+          if (typeof transcript.ordinal !== 'number') continue;
+
+          // The SDK re-emits the entire ordinal-indexed array on every update.
+          // Forward a segment only when its text/finality actually changed, so
+          // an earlier final is never re-sent when a later partial arrives.
+          const key = `${transcript.speaker}:${transcript.ordinal}`;
+          const isFinal = Boolean(transcript.isFinal);
+          const previous = this.forwardedTranscripts.get(key);
+          if (previous && previous.text === transcript.text && previous.isFinal === isFinal) continue;
+          this.forwardedTranscripts.set(key, { text: transcript.text, isFinal });
+          if (this.forwardedTranscripts.size > 500) {
+            const oldest = this.forwardedTranscripts.keys().next().value;
+            if (oldest !== undefined) this.forwardedTranscripts.delete(oldest);
+          }
+
+          if (transcript.speaker === Role.AGENT) {
             this.sendSignal({
               type: 'ai_suggestion',
               text: transcript.text,
-              isFinal: transcript.isFinal,
+              isFinal,
               ordinal: transcript.ordinal,
               timestamp,
             });
             lastResponseAt = Date.now();
-            if (transcript.isFinal) lastSuggestionAt = lastResponseAt;
+            if (isFinal) lastSuggestionAt = lastResponseAt;
           } else if (transcript.speaker === Role.USER) {
             this.customerSpeech = transcript.text;
-            if (transcript.isFinal && transcript.text.trim()) {
-              this.sendSignal({
-                type: 'customer_speech_transcript',
-                text: transcript.text,
-                isFinal: true,
-                ordinal: transcript.ordinal,
-                timestamp,
-              });
-            }
+            this.sendSignal({
+              type: 'customer_speech_transcript',
+              text: transcript.text,
+              isFinal,
+              ordinal: transcript.ordinal,
+              // Identifies the Ultravox call so a late segment from a replaced
+              // session can never be shown in the new call.
+              callId: this.ai.callId,
+              // Only metadata the SDK actually exposes. There is no language or
+              // confidence field in ultravox-client@0.6, so none is invented.
+              medium: transcript.medium,
+              timestamp,
+            });
           }
         }
         this.setAi(
@@ -3930,6 +4006,37 @@ export class CallEngine {
     });
   }
 
+  /**
+   * Binds the salesperson's transcript view to the reported Ultravox call and
+   * resets stale transcript/suggestion state when the call changes.
+   */
+  private bindCustomerTranscriptToCall(callId: string | null): void {
+    if (this.options.role !== 'salesperson') return;
+    const wasUnbound = this.customerTranscript.callId === null;
+    const next = bindCustomerTranscriptSession(this.customerTranscript, callId);
+    if (next === this.customerTranscript) return;
+    this.customerTranscript = next;
+    if (wasUnbound) return;
+
+    // A new Ultravox call restarts ordinals. Keeping the previous call's
+    // segments or suggestions would mix two conversations and let an old
+    // suggestion ordinal suppress a new one.
+    this.customerSpeech = '';
+    this.suggestions = [];
+    this.log(`Customer transcript reset for AI call ${String(callId).slice(0, 8)}.`);
+    this.emit();
+  }
+
+  /** Drops all customer-speech state, e.g. when a different customer joins. */
+  private resetCustomerTranscript(reason: string): void {
+    if (this.options.role !== 'salesperson') return;
+    if (this.customerTranscript.segments.length === 0 && !this.customerSpeech) return;
+    this.customerTranscript = createCustomerTranscriptState();
+    this.customerSpeech = '';
+    this.log(`Customer transcript cleared (${reason}).`);
+    this.emit();
+  }
+
   /** Mirrors customer-reported AI state into the salesperson's engine. */
   private applyRemoteAi(patch: Partial<AiStatus> & { state: AiStatus['state'] }): void {
     if (this.options.role !== 'salesperson') return;
@@ -3947,12 +4054,14 @@ export class CallEngine {
     const rawState = typeof runtime.state === 'string' ? runtime.state : '';
     if (!rawState) return;
     const state = rawState as AiStatus['state'];
+    const callId = typeof runtime.callId === 'string' ? runtime.callId.slice(0, 100) : null;
+    this.bindCustomerTranscriptToCall(callId);
     this.applyRemoteAi({
       state,
       connected: runtime.connected === true && state === 'connected',
       status: null,
       error: sanitizeAiDetail(runtime.error),
-      callId: typeof runtime.callId === 'string' ? runtime.callId.slice(0, 100) : null,
+      callId,
       reconnectAttempt:
         typeof runtime.reconnectAttempt === 'number'
           ? Math.max(0, Math.round(runtime.reconnectAttempt))

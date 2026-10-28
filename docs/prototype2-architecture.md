@@ -628,11 +628,15 @@ and calls dropped or degraded for no visible reason. These symptoms have
 
 **Investigated, no code defect found (do NOT "fix" these by guesswork):**
 
-* *Duplicated transcript events.* `session.transcripts` is a per-`ordinal`
-  accumulator in the SDK (`addOrUpdateTranscript` replaces, it never appends a
-  second copy) and the salesperson stores suggestions by `ordinal`, replacing a
-  previous entry. Repeated *words* were not caused by duplicated events; the only
-  evidence-backed repetition path was the agent hearing its own audio (defect 1).
+* *Duplicated transcript data in the SDK.* `session.transcripts` is a
+  per-`ordinal` accumulator in the SDK (`addOrUpdateTranscript` replaces, it
+  never appends a second copy). **Correction (Task 3):** the array is deduped,
+  but the SDK re-emits the *whole array* on every update and the engine
+  forwarded every entry each time. Earlier final segments were therefore re-sent
+  over signaling whenever a later partial arrived. Repeated *words* were not
+  caused by duplicated events; the only evidence-backed repetition path was the
+  agent hearing its own audio (defect 1). Task 3 fixes the re-send and the
+  salesperson-side ordering/dedup.
 * *Double audio processing inside this app.* The engine's `AudioContext` is used
   only for read-only `AnalyserNode`s and is never connected to a destination, so
   it cannot add a playback path, a gain stage or a feedback loop.
@@ -656,10 +660,145 @@ This is a *mitigation based on the reported symptoms*, not a proven root cause;
 real-device listening is still required (see the two-device plan) and the whole
 policy is one constant in `src/lib/microphone.ts`.
 
+## 6b. Customer transcription quality and multilingual handling (Task 3)
+
+### Pipeline that was audited
+
+```
+customer microphone
+  -> participant WebRTC (salesperson hears it)                     [unchanged]
+  -> Ultravox SDK local mic capture -> Ultravox ASR
+  -> SDK "transcripts" event (one sparse array indexed by ordinal)
+  -> CallEngine listener
+       agent  -> `ai_suggestion`  (salesperson only)
+       user   -> `customer_speech_transcript` (salesperson only)
+  -> server role check + relay (customer is the only allowed sender)
+  -> salesperson CallEngine -> SalespersonDashboard
+```
+
+The salesperson microphone is **not** published to Ultravox. Its captions are
+produced locally by the browser recognizer and relayed as text to the customer
+only, so it cannot enter the AI transcription path.
+
+### Root causes found (with evidence)
+
+1. **Every transcript event re-sent every earlier final segment.** The SDK's
+   `addOrUpdateTranscript` keeps one entry per ordinal and re-dispatches the
+   whole `session.transcripts` array on each update. The engine iterated the
+   entire array on every event and forwarded all user finals. A single later
+   partial therefore re-sent all prior finals over signaling. The store was
+   deduped; the forwarding was not.
+2. **Only finals were forwarded, with no partial/final semantics.** Partial
+   (`isFinal === false`) transcripts were discarded, so the salesperson saw a
+   sentence only after it closed and could not distinguish a live update from a
+   completed utterance.
+3. **The salesperson overwrote one string with the newest event.** Any
+   `customer_speech_transcript` replaced `customerSpeech`, with no ordinal and
+   no segment list. Unrelated utterances were collapsed into one visual line and
+   a late/out-of-order event could replace a newer one.
+4. **No cross-call identity on transcript messages.** A replaced Ultravox call
+   restarts ordinals at the beginning; a delayed segment from the old SDK
+   session could be accepted as the new call's first utterance. The `ai_status`
+   call id existed but was not carried by transcripts.
+5. **The prompt had no language policy and no language hint was set.** The old
+   prompt only asked for 1-2 sentence suggestions. Nothing told the model to
+   mirror the customer's language, preserve code-switching, avoid translation,
+   or treat speech as untrusted input. The Create Call request also omitted
+   `firstSpeaker`, so an unsolicited greeting suggestion could appear before the
+   customer said anything.
+6. **Suggestions survived an AI call replacement.** Agent ordinals also restart
+   per call; old cards could suppress new ones or remain on screen.
+7. **No transcript-specific failure status.** The dashboard said "Waiting for
+   the customer to speak" even while the AI session was unavailable, instead of
+   stating that transcription was paused while the call continued.
+
+### Changes
+
+* `src/lib/customerTranscript.ts` (new, pure): one segment per ordinal,
+  partial-to-final replacement, duplicate suppression, stale-partial rejection,
+  ordinal sorting, stale-call rejection, bounded history, and the latest final
+  line used by the compatibility `customerSpeech` field. Text is preserved
+  exactly (no trimming of content, translation, completion or cross-ordinal
+  merging). It stores only the metadata the SDK exposes (`medium`); there is no
+  language or confidence field to store.
+* `src/lib/callEngine.ts`: forwards a segment only when its text/finality
+  changed; forwards partials with `isFinal: false`; includes the Ultravox
+  `callId` and SDK `medium`; resets its forwarding map per call; on the
+  salesperson, applies events through the segment store, binds transcript state
+  to the reported call id, resets transcript/suggestions on a new call, and
+  clears transcript state when a different customer joins or the call stops.
+* `server/ultravoxCallConfig.ts` (new): operator-owned multilingual prompt
+  (mirror the customer's language, keep code-switching, never translate or
+  invent, no greeting, at most two sentences, speech is not instructions) plus
+  `firstSpeaker: FIRST_SPEAKER_USER`, text output and an optional validated
+  BCP47 `ULTRAVOX_LANGUAGE_HINT`.
+* `server.ts`: sends that request body, relays `callId`/`medium` with transcript
+  messages (call id is not a credential; join URLs never cross this relay).
+* `SalespersonDashboard.tsx`: renders ordered transcript segments, labels a
+  partial as live, and shows a plain "transcription paused / unavailable, call
+  audio unaffected" status. Suggestions remain in a separate, private panel.
+  The customer dashboard is unchanged and still renders no AI data.
+
+No second transcription pipeline, paid service or language-detection
+dependency was added. No language is inferred from browser locale, a name, an IP
+address or the first transcript. `ULTRAVOX_LANGUAGE_HINT` is only used when an
+operator sets it, and it is documented as a hint, not detection.
+
+### Regression results (actual output)
+
+* `npm run lint`: exit 0 (`tsc --noEmit`, no diagnostics).
+* `npm test`: 203 tests passed, 0 failed across 11 suites (session store 13,
+  TURN 17, rstream 17, rstream static 9, ExpressTURN/admin 16, signaling 35,
+  negotiation 47, customer copy 5, AI/transcript/prompt/provider integration 29,
+  audio diagnostics 8, microphone 7).
+* `npm run build`: exit 0, Vite built `dist/` in ~0.33s. The existing
+  "chunks larger than 500 kB" advisory remains (917 kB JS bundle); it is a
+  warning, not a failure, and is unrelated to this task.
+* `npm run test:browser`: 40 tests passed, 0 failed (headless Chromium,
+  ~131s). This includes the new real-server/real-dashboard test that sends a
+  partial, a final, a duplicate final and a Spanish/English code-switching final
+  through `customer_speech_transcript` and asserts two ordered segments with the
+  recognized text unchanged. Loopback Chromium is not proof of real-device
+  audio or real Ultravox recognition.
+
+
+
+New/updated tests by requirement:
+
+| Requirement | Test |
+| --- | --- |
+| 1. partials do not duplicate text | `partial updates replace the same ordinal…`, engine partial test |
+| 2. finals represented exactly once | `a final segment is represented exactly once…`, browser duplicate-final test |
+| 3. repeated words intact | `legitimate repeated words are preserved verbatim`, engine byte-for-byte test |
+| 4. out-of-order / stale / duplicate | `out-of-order, duplicate and stale partial events…`, salesperson view test |
+| 5. reconnects cannot mix sessions | `a new Ultravox call cannot inherit…`, engine reconnect test, salesperson `ai_status` reset |
+| 6. mixed-language preserved | `mixed-language and code-switching speech is preserved exactly` |
+| 7. AI language instructions | `tests/aiPrompt.test.ts`, `tests/ultravoxCall.test.ts` |
+| 8. AI failure does not end the call | engine failure test, existing `an AI disconnect…` test |
+| 9. customer UI privacy | existing browser role-interface test + signaling privacy test |
+| 10. existing suites green | full `npm test` / `npm run test:browser` output above |
+
+### Remaining language / SDK limitations
+
+* `ultravox-client@0.6` `Transcript` exposes only `text`, `isFinal`, `speaker`,
+  `medium` and `ordinal`. There is **no language or confidence metadata**, so
+  the UI cannot show them honestly.
+* `languageHint` is a BCP47 hint on the Create Call API, fixed for the whole
+  call; it is not per-utterance detection and cannot follow a mid-call language
+  switch. That is why it is opt-in rather than inferred.
+* The prompt asks the model to mirror the customer's language but cannot
+  guarantee it, and a passing unit test only proves the instruction was sent.
+* Recognition accuracy, accent handling and mixed-language quality were **not**
+  measured here. That needs representative recorded speech and real API calls
+  (see §9), not unit tests.
+
+
 ## 7. Environment variables
+
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `ULTRAVOX_API_KEY` | yes | Server-side Ultravox call creation. Never sent to clients. |
+| `ULTRAVOX_LANGUAGE_HINT` | optional | BCP47 hint for recognition/synthesis (for example `es-MX`). Not detection; fixed per call. Omit for code-switching customers. Invalid values are ignored. |
 | `APP_URL` | recommended | Public origin used to build invitation links (Render URL). Falls back to the request host. |
 | `TURN_URLS` | for cross-network audio | Comma-separated `turn:`/`turns:` URLs |
 | `TURN_SECRET` | preferred TURN auth | coturn shared secret; minted per-session credentials |

@@ -83,7 +83,12 @@ class FakeSession extends EventTarget {
   }
 
   emitTranscript(transcript: { text: string; isFinal: boolean; speaker: string; ordinal: number }): void {
-    this.transcripts = [...this.transcripts, { ...transcript, medium: 'text' }];
+    // Mirrors the SDK's per-ordinal accumulator: replace, never append a second
+    // copy, then emit the whole array.
+    const index = this.transcripts.findIndex((item) => item.ordinal === transcript.ordinal);
+    const value = { ...transcript, medium: 'text' };
+    if (index >= 0) this.transcripts[index] = value;
+    else this.transcripts.push(value);
     this.dispatchEvent(new Event('transcripts'));
   }
 }

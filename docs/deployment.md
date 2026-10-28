@@ -70,6 +70,7 @@ starts the Vite dev server when `NODE_ENV=production`; the server then serves
 | `NODE_ENV` | yes | `production` |
 | `APP_URL` | yes | Public `https://<service>.onrender.com`; used to build invite links. Health warns if missing/non-https/localhost. |
 | `ULTRAVOX_API_KEY` | for AI | Server-side only. The app starts, serves `/sales`, `/join` and human audio without it; AI requests return `503 MISSING_API_KEY`. |
+| `ULTRAVOX_LANGUAGE_HINT` | optional | BCP47 hint (for example `es-MX`) for Ultravox recognition/synthesis. A hint, not detection, fixed for the call. Leave unset for code-switching customers; the prompt already asks the model to mirror the customer's language. Invalid values are ignored. |
 | `TURN_URLS` | for relay | Comma-separated `turn:`/`turns:` URLs. |
 | `TURN_SECRET` | preferred auth | coturn `use-auth-secret` (TURN REST). Server mints per-session, expiring credentials. |
 | `TURN_TTL_SECONDS` | optional | Lifetime of minted credentials / provider TTL request (default 3600). |
