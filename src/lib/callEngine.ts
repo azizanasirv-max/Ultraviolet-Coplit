@@ -899,13 +899,6 @@ export class CallEngine {
   }
 
   /**
-   * Removes the only playback path.
-   *
-   * Without this a closed call leaves the element holding a dead stream (and the
-   * silent priming clip looping). A reconnect that created a second stream would
-   * then have two paths into the same output device.
-   */
-  /**
    * Frees the object URL used to prime the media element inside the join
    * gesture. It is a blob, so leaving it alive after the call leaks a resource
    * and keeps the element able to loop a silent clip.
@@ -920,6 +913,13 @@ export class CallEngine {
     this.silentClip = '';
   }
 
+  /**
+   * Removes the only playback path.
+   *
+   * Without this a closed call leaves the element holding a dead stream (and the
+   * silent priming clip looping). A reconnect that created a second stream would
+   * then have two paths into the same output device.
+   */
   private detachPlayback(reason: string): void {
     // Any play() promise still in flight belongs to the old path.
     this.playAttempt += 1;

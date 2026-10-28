@@ -692,6 +692,13 @@ that must be added.
 * Silent-call detection is derived from RTP counters (`getStats()`), not from
   decoded acoustics, in production. The automated tests do decode the received
   audio, but only in Chromium on the same host.
+* **Noise, crackle, echo and perceived loudness were NOT measured on physical
+  devices.** The automated tests prove *plumbing* (one playback path, one
+  capture, bounded recovery, no agent audio on the customer device, level
+  measurement). They cannot prove that a real microphone/speaker pair is free of
+  acoustic artefacts: Chromium's fake device has no room, no speaker and no ADC.
+  Turning AGC off in particular changes the perceived level and MUST be listened
+  to on the two-device plan below (one constant in `src/lib/microphone.ts`).
 * The customer device still captures the microphone twice (participant path +
   Ultravox SDK), so the AI capture competes with the participant capture on
   hardware that allows only one capture at a time. Now the engine releases stale
@@ -766,3 +773,22 @@ Use one desktop/laptop (salesperson) and one phone on mobile data (customer).
 14. Rotate the invitation from the laptop and join from a new browser/device.
     The new customer must get its own AI session (a new call id in the laptop
     diagnostics), not the previous dead one.
+15. **Audio quality (Task 2) on real devices.** With both participants on the
+    same physical room and no headphones, confirm there is no echo or doubled
+    voice, and that no tapping/crackling is audible while both sides are silent
+    (listen for 20 s). Then compare with headphones and with the phone's speaker
+    at maximum volume: if the artefacts only appear on speakers, the acoustic
+    path (room + device) is the cause, not the app.
+16. In the laptop diagnostics, confirm `mic processing` shows `aec on · ns on ·
+    agc off` and that `mic captures` stays at **1** for the whole call — including
+    after a reconnect, a view switch and a forced microphone interruption
+    (unplug/replug a headset on the customer device). A value above 1 after a
+    single incident means recovery ran more than once.
+17. If the customer's voice is judged too quiet with `agc off`, set
+    `PARTICIPANT_MICROPHONE_POLICY.autoGainControl = true` in
+    `src/lib/microphone.ts`, rebuild, and compare. Record which setting was
+    better on the real device; that is the only measurement that can settle it.
+18. Confirm the customer device never plays the AI agent's voice: the agent is
+    text-only (`mic processing`/logs aside, no agent audio should be audible on
+    the phone). If agent audio is heard, the speaker mute before `joinCall()` is
+    not reaching the SDK and must be reported.
