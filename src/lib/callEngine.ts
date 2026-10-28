@@ -27,6 +27,13 @@ import {
   PlaybackState,
   SOUND_FRESH_MS,
 } from './audioDiagnostics';
+import {
+  AppliedMicrophoneProcessing,
+  buildMicrophoneConstraints,
+  describeMicrophoneProcessing,
+  isCapturePublishable,
+  readAppliedMicrophoneProcessing,
+} from './microphone';
 
 
 export type ParticipantRole = 'customer' | 'salesperson';
@@ -84,6 +91,16 @@ export interface CallDiagnostics {
   inboundAudioLevel: number | null;
   /** Measured RMS of this participant's own microphone (null = not measurable). */
   localAudioLevel: number | null;
+  /**
+   * Processing the browser reports it applied to this participant's microphone
+   * (`aec on · ns on · agc off · 1ch · 48000 Hz`). "unmeasured" when the
+   * browser does not report it — never assumed. Diagnostics only.
+   */
+  microphoneProcessing: string;
+  /** Reported echo-cancellation state of the capture (null = not reported). */
+  echoCancellationActive: boolean | null;
+  /** getUserMedia captures this engine opened (proves no repeated re-open). */
+  micCaptures: number;
   /** Milliseconds since measured inbound sound (null = never). */
   lastSoundAgoMs: number | null;
   /** Negotiated direction of this participant's audio transceiver. */
@@ -270,8 +287,18 @@ const RENEGOTIATE_REQUEST_INTERVAL_MS = 10000;
  * How often a dead outbound capture is re-acquired per incident. `track.stop()`
  * and some OS-level revocations end a capture *without* firing `ended`, so the
  * track state must be checked instead of trusted to emit an event.
+ *
+ * Every recovery path shares this budget: the `mute` timer, the `ended` event
+ * and the periodic supervisor used to be independent, so a device that muted
+ * every new capture could re-open the microphone indefinitely (a click and a
+ * second processing pipeline per attempt, and a degraded AI capture).
  */
 const MAX_LOCAL_MIC_RECOVERY_ATTEMPTS = 2;
+/**
+ * A capture that stays publishable this long proves that a recovery worked, so
+ * the per-incident budget is released again.
+ */
+const MIC_RECOVERY_HEALTHY_MS = 15000;
 /** A `disconnected` transport may recover on its own; only then is it broken. */
 const DISCONNECT_GRACE_MS = 4000;
 /** Actionable, credential-free terminal error shown to both participants. */
@@ -389,7 +416,7 @@ const silentClipUrl = (): string => {
 export class CallEngine {
   private readonly options: CallEngineOptions;
   private readonly apiBase: string;
-  private readonly silentClip: string;
+  private silentClip: string;
 
   // Media / signaling objects
   private ws: WebSocket | null = null;
@@ -465,6 +492,19 @@ export class CallEngine {
   private lastRenegotiateRequestAt = 0;
   /** Bounded re-acquires of a capture the browser ended without an event. */
   private localMicRecoveryAttempts = 0;
+  /**
+   * Total microphone captures this engine opened. Exposed in diagnostics so
+   * "the audio keeps clicking" can be told apart from "the engine keeps
+   * reopening the microphone": each open is a device click and a new processing
+   * pipeline (and a new capture competing with the customer's AI capture).
+   */
+  private micCaptures = 0;
+  /** What the browser reports about the current capture (never assumed). */
+  private micProcessing: AppliedMicrophoneProcessing = readAppliedMicrophoneProcessing(null);
+  /** When the current capture last became publishable (resets the mic budget). */
+  private captureHealthySince: number | null = null;
+  /** Removers for the listeners attached to the current capture's tracks. */
+  private localTrackCleanups: Array<() => void> = [];
 
   // Timers
   private reconnectTimer: number | null = null;
@@ -558,6 +598,9 @@ export class CallEngine {
     playbackState: 'no_track',
     inboundAudioLevel: null,
     localAudioLevel: null,
+    microphoneProcessing: describeMicrophoneProcessing(readAppliedMicrophoneProcessing(null)).summary,
+    echoCancellationActive: null,
+    micCaptures: 0,
     lastSoundAgoMs: null,
     audioDirection: 'unknown',
     inboundPackets: 0,
@@ -714,7 +757,7 @@ export class CallEngine {
     if (!element) return false;
     element.muted = this.speakerMuted;
     element.volume = 1;
-    if (!element.srcObject && !element.hasAttribute('src')) {
+    if (!element.srcObject && !element.hasAttribute('src') && this.silentClip) {
       // Prime the element inside the gesture: a silent, looping clip keeps the
       // media element "started" so a later srcObject attach is allowed.
       element.src = this.silentClip;
@@ -833,6 +876,12 @@ export class CallEngine {
       this.log('Remote audio element is not mounted yet; the stream will attach on mount.');
       return;
     }
+    if (element.srcObject === stream && !element.paused && this.playbackState === 'playing') {
+      // Already the one and only playback path: a repeated ontrack, a presence
+      // refresh or a re-attach must not restart playback (each restart is an
+      // audible gap and a chance for a second decoded path).
+      return;
+    }
     element.muted = this.speakerMuted;
     element.volume = 1;
     element.loop = false;
@@ -850,6 +899,54 @@ export class CallEngine {
   }
 
   /**
+   * Removes the only playback path.
+   *
+   * Without this a closed call leaves the element holding a dead stream (and the
+   * silent priming clip looping). A reconnect that created a second stream would
+   * then have two paths into the same output device.
+   */
+  /**
+   * Frees the object URL used to prime the media element inside the join
+   * gesture. It is a blob, so leaving it alive after the call leaks a resource
+   * and keeps the element able to loop a silent clip.
+   */
+  private releaseSilentClip(): void {
+    if (!this.silentClip) return;
+    try {
+      URL.revokeObjectURL(this.silentClip);
+    } catch {
+      // Already revoked or unsupported.
+    }
+    this.silentClip = '';
+  }
+
+  private detachPlayback(reason: string): void {
+    // Any play() promise still in flight belongs to the old path.
+    this.playAttempt += 1;
+    this.playbackState = 'no_track';
+    this.playbackBlocked = false;
+    this.playbackError = null;
+    const element = this.audioElement;
+    if (!element) return;
+    if (element.srcObject === null && element.paused && !element.hasAttribute('src')) {
+      // Nothing was attached: no log spam, and no state change to report.
+      return;
+    }
+    try {
+      if (!element.paused) element.pause();
+      if (element.srcObject !== null) element.srcObject = null;
+      if (typeof element.hasAttribute === 'function' && element.hasAttribute('src')) {
+        element.removeAttribute('src');
+        if (typeof element.load === 'function') element.load();
+      }
+      element.loop = false;
+    } catch {
+      // A detached element can throw; there is nothing left to release.
+    }
+    this.log(`Detached the remote audio playback path (${reason}).`);
+  }
+
+  /**
    * Detects an outbound capture that died without firing `ended`.
    *
    * `MediaStreamTrack.stop()` (and some OS-level revocations) leave the track
@@ -863,15 +960,21 @@ export class CallEngine {
     const pc = this.pc;
     if (!pc || (pc.connectionState !== 'connected' && pc.connectionState !== 'connecting')) return;
     const track = this.localStream?.getAudioTracks()[0] ?? null;
-    if (track && track.readyState === 'live') {
-      this.localMicRecoveryAttempts = 0;
+    if (isCapturePublishable(track, this.micMuted)) {
+      // A capture that stays publishable proves the last recovery worked, so the
+      // per-incident budget is released (and a later, genuine failure gets its
+      // own bounded attempts instead of inheriting an exhausted budget).
+      if (this.captureHealthySince === null) this.captureHealthySince = Date.now();
+      else if (Date.now() - this.captureHealthySince >= MIC_RECOVERY_HEALTHY_MS) {
+        this.localMicRecoveryAttempts = 0;
+      }
       return;
     }
-    if (this.localMicRecoveryAttempts >= MAX_LOCAL_MIC_RECOVERY_ATTEMPTS) return;
-    this.localMicRecoveryAttempts += 1;
+    // recoverLocalTrack() owns the budget, the single-flight gate and the
+    // healthy-capture check: incrementing here would consume two attempts per
+    // recovery and could still re-open a capture that is fine.
     this.log(
-      `Outbound microphone track is ${track ? track.readyState : 'missing'}; re-acquiring it ` +
-        `(attempt ${this.localMicRecoveryAttempts}/${MAX_LOCAL_MIC_RECOVERY_ATTEMPTS}).`
+      `Outbound microphone track is ${track ? `${track.readyState}${track.muted ? '/muted' : ''}` : 'missing'}; requesting recovery.`
     );
     void this.recoverLocalTrack(track ? 'track ended without an event' : 'track missing');
   }
@@ -1261,6 +1364,9 @@ export class CallEngine {
     this.resetPeerRecoveryState('call stopped');
     this.releaseLocalMedia(reason);
     this.releaseAudioMeasurement();
+    // Idempotent: closePeerConnection already detached the playback path.
+    this.detachPlayback(`call stopped: ${reason}`);
+    this.releaseSilentClip();
 
     this.participantId = null;
     this.peerParticipantId = null;
@@ -1466,16 +1572,16 @@ export class CallEngine {
         throw new Error('Microphone access is not available in this browser context.');
       }
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
+        // AEC on, NS on, AGC off, mono — one documented policy for the human
+        // path (see src/lib/microphone.ts for the reasoning and trade-offs).
+        audio: buildMicrophoneConstraints(),
       });
+      this.micCaptures += 1;
       this.localStream = stream;
       const track = stream.getAudioTracks()[0];
       if (track) track.enabled = !this.micMuted;
       this.micPermission = 'granted';
+      this.recordMicrophoneProcessing(track ?? null);
       this.watchLocalTrack(stream);
       // Measure the microphone this participant publishes: a track can be
       // `live` and `enabled` yet carry nothing (another capture on the same
@@ -1508,6 +1614,36 @@ export class CallEngine {
       this.log(`Microphone error: ${error?.name || 'Error'} - ${error?.message || error}`);
       return null;
     }
+  }
+
+  /**
+   * Records what the browser actually applied to the capture.
+   *
+   * The three processing requests used to be taken on faith. A browser or
+   * platform that silently drops echo cancellation is exactly how a call ends up
+   * with echo/feedback while every transport counter stays healthy, so the
+   * applied state is measured and reported instead of assumed.
+   */
+  private recordMicrophoneProcessing(track: MediaStreamTrack | null): void {
+    let settings: Record<string, unknown> | null = null;
+    try {
+      if (track && typeof track.getSettings === 'function') {
+        settings = track.getSettings() as unknown as Record<string, unknown>;
+      }
+    } catch {
+      // Some environments expose getSettings() but throw for a fake track.
+      settings = null;
+    }
+    this.micProcessing = readAppliedMicrophoneProcessing(settings);
+    const report = describeMicrophoneProcessing(this.micProcessing);
+    this.diagnostics = {
+      ...this.diagnostics,
+      microphoneProcessing: report.summary,
+      echoCancellationActive: report.echoCancellationActive,
+      micCaptures: this.micCaptures,
+    };
+    this.log(`Microphone processing: ${report.summary}.`);
+    for (const warning of report.warnings) this.log(`Microphone note: ${warning}`);
   }
 
   setMicMuted(muted: boolean): void {
@@ -1560,11 +1696,37 @@ export class CallEngine {
     );
   }
 
+  /** Removes every listener attached to the current capture's tracks. */
+  private clearLocalTrackWatchers(): void {
+    const cleanups = this.localTrackCleanups;
+    this.localTrackCleanups = [];
+    for (const cleanup of cleanups) {
+      try {
+        cleanup();
+      } catch {
+        // A track from a closed stream can throw; nothing is left to release.
+      }
+    }
+    if (this.micRecoveryTimer !== null) {
+      window.clearTimeout(this.micRecoveryTimer);
+      this.micRecoveryTimer = null;
+    }
+  }
+
+  /**
+   * Watches one capture for the two ways a browser silently stops publishing.
+   *
+   * Listeners are stored so they can be removed: a replaced capture must not
+   * keep dispatching `mute`/`ended` into the engine, which would otherwise start
+   * a recovery for a track that is no longer in use.
+   */
   private watchLocalTrack(stream: MediaStream): void {
+    this.clearLocalTrackWatchers();
     stream.getAudioTracks().forEach((track) => {
-      track.addEventListener('mute', () => {
+      const onMute = () => {
         this.log('Local microphone track muted by the browser.');
         this.emit();
+        this.captureHealthySince = null;
         if (this.micRecoveryTimer !== null) window.clearTimeout(this.micRecoveryTimer);
         this.micRecoveryTimer = window.setTimeout(() => {
           this.micRecoveryTimer = null;
@@ -1572,33 +1734,85 @@ export class CallEngine {
             void this.recoverLocalTrack('track muted by the browser');
           }
         }, 2500);
-      });
-      track.addEventListener('unmute', () => {
+      };
+      const onUnmute = () => {
         this.log('Local microphone track unmuted.');
+        this.captureHealthySince = Date.now();
         this.emit();
         if (this.micRecoveryTimer !== null) {
           window.clearTimeout(this.micRecoveryTimer);
           this.micRecoveryTimer = null;
         }
-      });
-      track.addEventListener('ended', () => {
+      };
+      const onEnded = () => {
         this.log('Local microphone track ended by the browser.');
+        this.captureHealthySince = null;
         this.emit();
+        // One incident, one recovery: a pending mute recovery for the same track
+        // must not queue a second capture.
+        if (this.micRecoveryTimer !== null) {
+          window.clearTimeout(this.micRecoveryTimer);
+          this.micRecoveryTimer = null;
+        }
         if (!this.micMuted) void this.recoverLocalTrack('track ended');
-      });
+      };
+      try {
+        track.addEventListener('mute', onMute);
+        track.addEventListener('unmute', onUnmute);
+        track.addEventListener('ended', onEnded);
+        this.localTrackCleanups.push(() => {
+          track.removeEventListener('mute', onMute);
+          track.removeEventListener('unmute', onUnmute);
+          track.removeEventListener('ended', onEnded);
+        });
+      } catch {
+        // A track without listener support cannot be supervised; nothing to do.
+      }
     });
   }
 
   /**
-   * Mobile browsers can end/mute the microphone track when a second capture
-   * starts (the customer device also runs the Ultravox AI session). Reacquire
-   * and replace the outbound track instead of silently going dead.
+   * Replaces a capture the browser has muted or ended.
+   *
+   * This is intentionally idempotent and bounded:
+   *   - a capture that is still publishable is never replaced (each
+   *     `getUserMedia` of a live device is a click, a new processing pipeline
+   *     and a competitor for the customer's AI capture),
+   *   - the dead capture is released *before* the new one is opened so two
+   *     captures of the same device never overlap,
+   *   - every path (mute timer, ended event, supervisor) shares one budget that
+   *     is only released once the new capture has stayed healthy.
    */
   private async recoverLocalTrack(reason: string): Promise<void> {
     if (this.recoveryInFlight) return;
+    if (this.stopped || this.intentionalLeave) return;
+
+    const current = this.localStream?.getAudioTracks()[0] ?? null;
+    if (isCapturePublishable(current, this.micMuted)) {
+      this.log(`Microphone recovery skipped: the capture is already healthy (${reason}).`);
+      return;
+    }
+    if (this.localMicRecoveryAttempts >= MAX_LOCAL_MIC_RECOVERY_ATTEMPTS) {
+      this.log(
+        `Microphone recovery budget exhausted (${MAX_LOCAL_MIC_RECOVERY_ATTEMPTS} attempts); ` +
+          `keeping the call as it is (${reason}).`
+      );
+      return;
+    }
+
+    this.localMicRecoveryAttempts += 1;
     this.recoveryInFlight = true;
+    this.captureHealthySince = null;
     try {
-      this.log(`Recovering local microphone track (${reason})...`);
+      this.log(
+        `Recovering local microphone track (${reason}), attempt ` +
+          `${this.localMicRecoveryAttempts}/${MAX_LOCAL_MIC_RECOVERY_ATTEMPTS}...`
+      );
+      // Free the dead capture first: a second simultaneous capture of the same
+      // device is exactly what mutes the replacement on mobile browsers.
+      if (current && !isCapturePublishable(current, this.micMuted)) {
+        this.releaseCaptureTrack(current, `replaced capture (${reason})`);
+      }
       const stream = await this.ensureLocalStream(true);
       const track = stream?.getAudioTracks()[0];
       if (!track) {
@@ -1610,6 +1824,7 @@ export class CallEngine {
         return;
       }
       await this.attachOutboundAudioTrack(track, stream as MediaStream);
+      if (isCapturePublishable(track, this.micMuted)) this.captureHealthySince = Date.now();
       this.log('Outbound microphone track replaced after recovery.');
       if (this.options.role === 'salesperson') {
         void this.makeOffer({ reason: 'microphone recovery' });
@@ -1663,17 +1878,41 @@ export class CallEngine {
     }
   }
 
+  /**
+   * Stops one capture track and drops the watchers of its stream.
+   *
+   * The old capture must go away entirely: a stopped track that keeps a `mute`
+   * listener can start a recovery for a capture that is no longer published, and
+   * a live second capture of the same device keeps the microphone "in use" (it
+   * competes with the customer's AI capture and mutes the replacement on some
+   * mobile browsers).
+   */
+  private releaseCaptureTrack(track: MediaStreamTrack, reason: string): void {
+    this.clearLocalTrackWatchers();
+    try {
+      track.stop();
+    } catch {
+      // Already ended.
+    }
+    this.log(`Stopped the previous microphone capture (${reason}).`);
+  }
+
   private releaseLocalMedia(reason: string): void {
     this.detachOutboundAnalyser();
+    this.clearLocalTrackWatchers();
     if (this.localStream) {
-      this.localStream.getTracks().forEach((track) => track.stop());
+      const stream = this.localStream;
       this.localStream = null;
+      for (const track of stream.getTracks()) {
+        try {
+          track.stop();
+        } catch {
+          // Already ended.
+        }
+      }
       this.log(`Released microphone tracks (${reason}).`);
     }
-    if (this.micRecoveryTimer !== null) {
-      window.clearTimeout(this.micRecoveryTimer);
-      this.micRecoveryTimer = null;
-    }
+    this.captureHealthySince = null;
   }
 
   // -------------------------------------------------------------------------
@@ -1964,6 +2203,10 @@ export class CallEngine {
       }
       this.log(`Closed peer connection (${reason}).`);
     }
+    // The element must not keep the stream of a closed connection: a reconnect
+    // builds a new MediaStream, and an element still holding the old one would
+    // be a second (dead) playback path.
+    this.detachPlayback(`peer connection closed: ${reason}`);
     this.remoteStream = null;
     this.remoteTrack = null;
     this.detachInboundAnalyser();
@@ -2139,6 +2382,18 @@ export class CallEngine {
   ): void {
     const isStale = () => this.pc !== pc || this.pcGeneration !== generation;
     const previous = this.remoteTrack;
+
+    if (previous === track && this.remoteStream?.getAudioTracks().includes(track)) {
+      // The same track arriving again (a second `ontrack` for one m-line, the
+      // receiver fallback, a re-emitted event) must not rebuild anything: a new
+      // analyser would reset the measured sound clock and a fresh play() would
+      // restart the one playback path.
+      if (this.audioElement && this.audioElement.srcObject !== this.remoteStream) {
+        this.attachRemoteStream(this.remoteStream as MediaStream);
+      }
+      return;
+    }
+
     if (previous && previous !== track) {
       previous.onmute = null;
       previous.onunmute = null;
@@ -3473,6 +3728,23 @@ export class CallEngine {
       this.ultravox = session;
       this.aiEverConnected = false;
       this.aiConnectedSince = null;
+      // The agent is text-only in this product, so its audio output must be
+      // silenced BEFORE the room is joined. `ultravox-client` enables a
+      // subscribed agent-audio publication unless its own speaker mute flag is
+      // already set (`TrackSubscribed` -> `setEnabled(!isSpeakerMuted)`), and the
+      // engine used to mute only after the first LISTENING/IDLE status - i.e.
+      // after the agent's first utterance had already been rendered on the
+      // customer's speakers. That audio is picked up by BOTH of the customer
+      // device's microphone captures (the participant capture and the Ultravox
+      // capture), which doubles the agent's voice with the salesperson's and lets
+      // the AI hear itself (repeated words).
+      try {
+        session.muteSpeaker();
+        session.setOutputMedium(Medium.TEXT);
+      } catch {
+        // Older SDKs reject an early output-medium change; the status handler
+        // below re-applies both once the session is live.
+      }
       this.setAi({
         state: 'connecting',
         status: UltravoxSessionStatus.CONNECTING,
@@ -4056,6 +4328,12 @@ export class CallEngine {
         audioDirection: this.diagnostics.audioDirection,
         playbackState: this.diagnostics.playbackState,
         playbackError: this.diagnostics.playbackError,
+        // Capture processing the browser reported (never assumed) plus how many
+        // times the microphone was opened. `micCaptures` is the evidence that a
+        // recovery did not turn into repeated device re-opens.
+        micProcessing: this.diagnostics.microphoneProcessing,
+        micEchoCancellation: this.diagnostics.echoCancellationActive,
+        micCaptures: this.diagnostics.micCaptures,
       },
     });
   }

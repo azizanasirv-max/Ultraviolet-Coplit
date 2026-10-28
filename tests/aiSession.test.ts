@@ -36,6 +36,8 @@ class FakeSession extends EventTarget {
   }> = [];
   micSourceNode: unknown = undefined;
   joinCalls: string[] = [];
+  /** Whether the agent speaker was already muted when each join happened. */
+  speakerMutedAtJoin: boolean[] = [];
   leaveCalls = 0;
   outputMedium: string | null = null;
   speakerMuted = false;
@@ -48,6 +50,7 @@ class FakeSession extends EventTarget {
 
   joinCall(joinUrl: string): void {
     this.joinCalls.push(joinUrl);
+    this.speakerMutedAtJoin.push(this.speakerMuted);
     this.setStatus(UltravoxSessionStatus.CONNECTING);
   }
 
@@ -184,6 +187,37 @@ test('manual retry creates a brand new Ultravox call and a new SDK session', asy
     assert.equal(reported.at(-1).connected, false);
     assert.equal(reported.at(-1).state, 'connecting');
     assert.doesNotMatch(JSON.stringify(state.logs), /wss:\/\/ai\.invalid/);
+  } finally {
+    await engine.stop('test');
+    restoreFetch();
+  }
+});
+
+test('the agent speaker is muted and the output is text-only before the room is joined', async () => {
+  // Why this matters: `ultravox-client` enables a subscribed agent-audio
+  // publication unless its speaker mute flag is already set, so muting only after
+  // the first live status lets the agent's greeting play on the customer's
+  // speakers. Both of the customer's microphone captures pick that up: the voice
+  // is doubled with the salesperson's and the AI hears itself (repeated words).
+  const harness = makeHarness();
+  const { engine, sessions, restoreFetch } = harness;
+  try {
+    await engine.retryAi();
+    const session = sessions[0];
+
+    assert.deepEqual(session.joinCalls, ['wss://ai.invalid/join-1']);
+    assert.deepEqual(
+      session.speakerMutedAtJoin,
+      [true],
+      'the agent speaker must already be muted when the call is joined'
+    );
+    assert.equal(session.outputMedium, 'text', 'the agent is text-only from the start');
+    assert.equal(session.speakerMuted, true);
+
+    // The same guarantees survive a live status (the SDK may re-subscribe).
+    session.setStatus(UltravoxSessionStatus.LISTENING);
+    assert.equal(session.speakerMuted, true);
+    assert.equal(session.outputMedium, 'text');
   } finally {
     await engine.stop('test');
     restoreFetch();

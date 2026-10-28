@@ -1014,6 +1014,8 @@ export const SalespersonDashboard: React.FC = () => {
                       ['rtp lost / jitter', `${snapshot?.diagnostics.inboundPacketsLost ?? 0} / ${Math.round((snapshot?.diagnostics.inboundJitter ?? 0) * 1000)}ms`],
                       ['inbound level', formatAudioLevel(snapshot?.diagnostics.inboundAudioLevel)],
                       ['mic level', formatAudioLevel(snapshot?.diagnostics.localAudioLevel)],
+                      ['mic processing', snapshot?.diagnostics.microphoneProcessing ?? 'not measured'],
+                      ['mic captures', String(snapshot?.diagnostics.micCaptures ?? 0)],
                       ['sound last', snapshot?.diagnostics.lastSoundAgoMs === null || snapshot?.diagnostics.lastSoundAgoMs === undefined
                         ? 'never'
                         : `${Math.round(snapshot.diagnostics.lastSoundAgoMs / 1000)}s ago`],

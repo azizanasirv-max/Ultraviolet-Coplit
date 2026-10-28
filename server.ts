@@ -1096,6 +1096,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       'audioFlow', 'lastMediaAgoMs', 'inboundPackets', 'inboundPacketsLost',
       'inboundJitter', 'inboundAudioLevel', 'localAudioLevel', 'inboundSoundDetected',
       'lastSoundAgoMs', 'audioDirection', 'playbackState', 'playbackError',
+      'micProcessing', 'micEchoCancellation', 'micCaptures',
     ]);
     const out: Record<string, unknown> = {};
     for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {

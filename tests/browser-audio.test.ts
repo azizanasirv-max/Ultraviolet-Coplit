@@ -88,6 +88,22 @@ const openContext = async (browser: Browser): Promise<BrowserContext> => {
     // Registry of every microphone track handed to this page, so a test can
     // prove that recovery/reconnect leaves exactly one live capture.
     (window as any).__micTracks = [];
+    /**
+     * Every element that started playback while holding a MediaStream, keyed by
+     * a per-element id. More than one id means more than one playback path, which
+     * is exactly the "doubled voice" regression this suite must catch.
+     */
+    (window as any).__playbackIds = [];
+    let nextPlaybackId = 0;
+    const originalPlay = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function (this: HTMLMediaElement) {
+      if ((this as any).srcObject) {
+        const tagged = this as unknown as { __playbackId?: number };
+        if (tagged.__playbackId === undefined) tagged.__playbackId = nextPlaybackId++;
+        (window as any).__playbackIds.push(tagged.__playbackId);
+      }
+      return originalPlay.apply(this);
+    };
     const mediaDevices = navigator.mediaDevices;
     if (mediaDevices?.getUserMedia) {
       const originalGetUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
@@ -1312,6 +1328,45 @@ const probeAudio = (page: Page, durationMs = 2600): Promise<AudioProbe> =>
     };
   }, durationMs);
 
+interface AudioPathAudit {
+  /** `<audio>`/`<video>` elements currently in the DOM. */
+  elements: number;
+  /** Elements currently holding a MediaStream (each one is a playback path). */
+  streamElements: number;
+  /** Distinct elements that ever played a stream (1 = no duplicate playback). */
+  playbackIds: number[];
+  /** Elements that received a stream but are not playing right now. */
+  pausedStreamElements: number;
+  /** Microphone captures opened by the engine (from its own diagnostics). */
+  micCaptures: number | null;
+  /** Processing the browser reported for the capture (null = not measured). */
+  micProcessing: string | null;
+  /** Live microphone tracks handed to this page. */
+  liveCaptures: number;
+}
+
+/**
+ * Audits the playback and capture side of one page: how many playback paths
+ * exist, whether a stale element kept a stream, and how many times the
+ * microphone was opened. This is measurement, not assertion.
+ */
+const auditAudioPaths = (page: Page): Promise<AudioPathAudit> =>
+  page.evaluate(() => {
+    const media = Array.from(document.querySelectorAll('audio,video')) as HTMLMediaElement[];
+    const withStream = media.filter((element) => Boolean(element.srcObject));
+    const snapshot = (window as any).__prototype2?.getSnapshot?.() ?? null;
+    const micTracks = (window as any).__micTracks || [];
+    return {
+      elements: media.length,
+      streamElements: withStream.length,
+      playbackIds: Array.from(new Set<number>((window as any).__playbackIds || [])),
+      pausedStreamElements: withStream.filter((element) => element.paused).length,
+      micCaptures: snapshot?.diagnostics?.micCaptures ?? null,
+      micProcessing: snapshot?.diagnostics?.microphoneProcessing ?? null,
+      liveCaptures: micTracks.filter((track: MediaStreamTrack) => track.readyState === 'live').length,
+    };
+  });
+
 test('prototype2 participant audio is non-silent in both directions and independent of the AI path', async (t) => {
   const salesWav = writeToneWav(path.join(toneDir, 'sales.wav'), SALESPERSON_TONE_HZ);
   const customerWav = writeToneWav(path.join(toneDir, 'customer.wav'), CUSTOMER_TONE_HZ);
@@ -1433,6 +1488,58 @@ test('prototype2 participant audio is non-silent in both directions and independ
     assert.ok(probe.stats.outbound && probe.stats.outbound.bytes > 0);
     assert.equal(probe.openPcs, 1);
   });
+
+  await t.test('each direction has exactly one playback path and no duplicate elements', async () => {
+    for (const [page, label] of [
+      [salespersonPage, 'salesperson'],
+      [customerPage, 'customer'],
+    ] as Array<[Page, string]>) {
+      const audit = await auditAudioPaths(page);
+      assert.equal(audit.streamElements, 1, `${label}: exactly one element may hold a stream`);
+      assert.deepEqual(audit.playbackIds, [0], `${label}: only one element may ever play a stream`);
+      assert.equal(audit.pausedStreamElements, 0, `${label}: the one path must be playing`);
+
+      // One capture for this participant. The customer device also holds the
+      // Ultravox capture, which is a separate, deliberately independent capture
+      // (it is not connected in this fake-AI environment).
+      assert.equal(audit.micCaptures, 1, `${label}: the microphone must be opened exactly once`);
+      assert.equal(audit.liveCaptures, 1, `${label}: exactly one live capture`);
+      assert.ok(audit.micProcessing, `${label}: the applied microphone processing must be reported`);
+      assert.match(
+        String(audit.micProcessing),
+        /aec (on|unmeasured)/,
+        `${label}: echo cancellation must be requested (measured state reported): ${audit.micProcessing}`
+      );
+    }
+    const elementCount = await salespersonPage.locator('[data-testid="remote-audio"]').count();
+    assert.equal(elementCount, 1, 'the salesperson dashboard mounts exactly one audio element');
+  });
+
+  await t.test('switching views while live neither remounts a second element nor reopens the mic', async () => {
+    const before = await auditAudioPaths(salespersonPage);
+    await salespersonPage.click('[data-testid="show-invitation"]');
+    await salespersonPage.waitForSelector('[data-testid="salesperson-invite-url"]', { timeout: 20000 });
+    await salespersonPage.click('[data-testid="back-to-dashboard"]');
+    await salespersonPage.waitForSelector('[data-testid="join-call"], [data-testid="leave-call"]', {
+      timeout: 20000,
+    });
+    // Audio must keep flowing through the same single path.
+    await waitFor(
+      () => snapshot(salespersonPage),
+      (value) => value.playbackState === 'playing' && value.diagnostics.inboundPackets > 0,
+      20000
+    );
+    const after = await auditAudioPaths(salespersonPage);
+    assert.equal(after.streamElements, 1, 'a view switch must not create a second playback path');
+    assert.deepEqual(after.playbackIds, [0], 'a view switch must not start a second element');
+    assert.equal(after.micCaptures, before.micCaptures, 'a view switch must not reopen the microphone');
+    assert.equal(
+      await salespersonPage.locator('[data-testid="remote-audio"]').count(),
+      1,
+      'still exactly one audio element'
+    );
+  });
+
 
   await t.test('the AI path is separate: its capture is not the participant audio path', async () => {
     // The customer device is the only one that may start an Ultravox session.
@@ -1632,6 +1739,39 @@ test('prototype2 participant audio is non-silent in both directions and independ
     const customerAudio = await snapshot(customerPage);
     assert.ok(customerAudio.mediaFlowing, 'the customer must report working audio');
     assert.equal(customerAudio.diagnostics.audioFlow, 'both');
+
+    // A reconnect is a new peer connection, not a new microphone: the capture
+    // count must stay at one and each side must keep a single playback path.
+    for (const [page, label] of [
+      [salespersonPage, 'salesperson'],
+      [customerPage, 'customer'],
+    ] as Array<[Page, string]>) {
+      const audit = await auditAudioPaths(page);
+      assert.equal(audit.micCaptures, 1, `${label}: a reconnect must not reopen the microphone`);
+      assert.equal(audit.streamElements, 1, `${label}: a reconnect must leave one playback path`);
+      assert.deepEqual(audit.playbackIds, [0], `${label}: no second element may play the stream`);
+    }
+  });
+
+  await t.test('leaving the call releases the capture and the playback path', async () => {
+    const before = await auditAudioPaths(salespersonPage);
+    assert.equal(before.streamElements, 1);
+
+    await salespersonPage.click('[data-testid="leave-call"]');
+    // Leaving clears the engine, so the exposed snapshot becomes null and the
+    // pre-join screen returns: that is the observable "call ended" state.
+    await salespersonPage.waitForSelector('[data-testid="join-call"]', { timeout: 20000 });
+
+    const after = await auditAudioPaths(salespersonPage);
+    assert.equal(after.streamElements, 0, 'no element may keep a stream after leaving');
+    assert.equal(after.liveCaptures, 0, 'the microphone capture must be released');
+    assert.equal(after.pausedStreamElements, 0);
+    const elementState = await salespersonPage.evaluate(() => {
+      const element = document.querySelector('[data-testid="remote-audio"]') as HTMLAudioElement | null;
+      return { paused: element?.paused ?? true, hasStream: Boolean(element?.srcObject) };
+    });
+    assert.equal(elementState.hasStream, false, 'the released element must not hold the stream');
+    assert.equal(elementState.paused, true);
   });
 
   await t.test('the customer never sees internal audio diagnostics or AI internals', async () => {
