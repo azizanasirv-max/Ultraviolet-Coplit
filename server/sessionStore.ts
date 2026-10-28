@@ -58,6 +58,11 @@ export interface UltravoxCallRecord {
   joinUrl: string;
   createdAt: number;
   createdByParticipantId: string;
+  /**
+   * Non-secret id of the configured key that created this call, used only for
+   * best-effort cleanup. The key itself is never stored in a session.
+   */
+  apiKeyId?: string;
 }
 
 /**

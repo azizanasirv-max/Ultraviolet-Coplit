@@ -69,7 +69,12 @@ starts the Vite dev server when `NODE_ENV=production`; the server then serves
 | --- | --- | --- |
 | `NODE_ENV` | yes | `production` |
 | `APP_URL` | yes | Public `https://<service>.onrender.com`; used to build invite links. Health warns if missing/non-https/localhost. |
-| `ULTRAVOX_API_KEY` | for AI | Server-side only. The app starts, serves `/sales`, `/join` and human audio without it; AI requests return `503 MISSING_API_KEY`. |
+| `ULTRAVOX_API_KEY` | for AI (legacy) | Server-side single key. The app starts, serves `/sales`, `/join` and human audio without it; AI requests return `503 MISSING_API_KEY`. Still supported. |
+| `ULTRAVOX_API_KEYS` | for AI (preferred) | Server-side multi-key configuration. JSON array `[{"id":"primary","key":"..."}]` or list `primary=...,backup=...`. Takes precedence over `ULTRAVOX_API_KEY`; ids are non-secret, keys never reach browsers/logs/diagnostics. |
+| `ULTRAVOX_MAX_KEY_ATTEMPTS` | optional | Attempt budget per AI-call creation (default 3, clamped 1-5). Effective budget is also capped by the number of configured keys. |
+| `ULTRAVOX_KEY_QUOTA_COOLDOWN_SECONDS` | optional | Fallback quota cooldown when the provider gives no reset hint (default 3600, 60-86400). |
+| `ULTRAVOX_KEY_RATE_LIMIT_COOLDOWN_SECONDS` | optional | Fallback rate-limit cooldown without `Retry-After` (default 30, 1-60). `Retry-After` wins, capped at 5 minutes. |
+| `ULTRAVOX_KEY_AUTH_COOLDOWN_SECONDS` | optional | Diagnostics cooldown after 401 (default 300, 30-3600). It does not cause key cycling. |
 | `ULTRAVOX_LANGUAGE_HINT` | optional | BCP47 hint (for example `es-MX`) for Ultravox recognition/synthesis. A hint, not detection, fixed for the call. Leave unset for code-switching customers; the prompt already asks the model to mirror the customer's language. Invalid values are ignored. |
 | `TURN_URLS` | for relay | Comma-separated `turn:`/`turns:` URLs. |
 | `TURN_SECRET` | preferred auth | coturn `use-auth-secret` (TURN REST). Server mints per-session, expiring credentials. |
@@ -384,8 +389,10 @@ configured correctly; STUN-only success proves nothing about mobile/CGNAT peers.
 
 ## 6. AI session lifecycle deployment notes
 
-The AI recovery fix does **not** add or rename environment variables. Keep the
-existing `ULTRAVOX_API_KEY` (server-side only). No TURN change is involved.
+The Task 1 AI recovery fix does **not** add or rename environment variables. Keep
+the existing `ULTRAVOX_API_KEY` (server-side only). No TURN change is involved.
+Task 4 adds the optional multi-key variables documented in §7; the legacy key
+continues to work.
 
 A redeploy of this branch is required for the fix to take effect. After the
 deploy:
@@ -401,4 +408,180 @@ deploy:
    customer device creates a new one (bounded to 3 automatic attempts); the
    salesperson can press **Restart AI** to force another fresh call without
    interrupting the human audio call.
+
+## 7. Ultravox multi-key rotation and quota-aware failover (Task 4)
+
+### Provider error semantics consulted (2026-10)
+
+Sources:
+
+* <https://docs.ultravox.ai/api-reference/introduction.md> (API overview,
+  `X-API-Key`, rate-limit tables)
+* <https://docs.ultravox.ai/gettingstarted/concurrency.md> (429/503 semantics,
+  `Retry-After`, concurrency)
+* <https://docs.ultravox.ai/gettingstarted/faq.md> (30 free minutes per account)
+* <https://api.ultravox.ai/api/schema/> (OpenAPI schema; used to confirm that
+  Create Call documents no idempotency key and no error-body schema)
+
+What the provider actually documents:
+
+* Authentication is `X-API-Key`; keys are 41 characters (`8` + `.` + `32`) and
+  must never be exposed to client code.
+* API request limits apply at **both account level (500 req/s) and API-key level
+  (200 req/s)**.
+* Call-creation limits are plan/account scoped: Free/PAYGO 5/s and 30/min; Pro
+  10/s and 120/min.
+* Call concurrency is account scoped: Free/PAYGO has a hard cap of 5 concurrent
+  calls; paid plans have no hard cap but can still return 429 under load.
+* A 429 can mean account concurrency, call-creation limiting or general load. It
+  is **not** evidence that an individual key's quota is exhausted.
+* 503 is used when the provider cannot create a call (for example priority
+  capacity), and `Retry-After` is documented for 429 **and** 503 (seconds or an
+  HTTP date).
+* 401 means missing/invalid API key; 403 means insufficient authorization. They
+  are separate from 429.
+* Create Call has **no documented idempotency key**, so the outcome of a
+  timed-out/network-failed POST is ambiguous.
+* The free allowance is **account-wide** (30 free minutes). No documented
+  endpoint exposes "remaining quota per key"; the call-usage endpoint is
+  aggregate historical usage, not a remaining-quota/reset API.
+
+**Consequence:** multiple keys only add independent capacity when they belong
+to **separate Ultravox accounts/projects**. Keys generated inside one account
+share its concurrency, call-creation and quota limits. The server still rotates
+on quota/rate evidence within a finite budget, but it does not claim that this
+bypasses an account-wide limit.
+
+### Configuration
+
+Preferred (Render dashboard → Environment → `ULTRAVOX_API_KEYS`, `sync: false`):
+
+```json
+[{"id":"primary","key":"<key 1>"},{"id":"backup","key":"<key 2>"}]
+```
+
+Compact list form is also accepted:
+
+```text
+primary=<key 1>,backup=<key 2>
+```
+
+Rules (also in `.env.example`):
+
+* ids are non-secret, unique, 1–32 chars of `A-Z a-z 0-9 . _ -`; generated ids
+  (`key-1`, `key-2`) are ordinal, never derived from key material;
+* keys are trimmed; empty, placeholder (`MY_...`, `CHANGEME`, `<...>`),
+  duplicate, whitespace-containing and over-long entries are rejected;
+* at most 10 keys are read;
+* `ULTRAVOX_API_KEYS` takes precedence when it yields at least one valid key;
+  the legacy `ULTRAVOX_API_KEY` is then ignored with a warning;
+* if `ULTRAVOX_API_KEYS` is present but invalid/empty, a valid legacy
+  `ULTRAVOX_API_KEY` is used as a safe fallback (warning), so a typo does not
+  silently disable the AI;
+* with neither variable (or only a placeholder) the app still serves all human
+  audio and returns `503 MISSING_API_KEY` / `ULTRAVOX_KEY_CONFIG_INVALID`.
+
+Keys are read only by the Node server. They are never embedded in Vite output,
+API responses, join URLs, transcript messages, logs or diagnostics. Only the
+non-secret id is used in operator output.
+
+
+### Rotation rules
+
+| Provider result | Category | Action | Key state |
+| --- | --- | --- | --- |
+| 200 with valid call payload | none | stop | success timestamp only |
+| 402 | quota exhausted | rotate (if budget left) | quota cooldown (reset hint or 1 h fallback) |
+| 403 with explicit quota/billing wording | quota exhausted | rotate | quota cooldown |
+| 403 otherwise | permission | **fail, no cycling** | unchanged |
+| 429 with explicit quota/billing wording | quota exhausted | rotate | quota cooldown |
+| 429 with account/concurrency/plan wording | rate limited | **wait** (no rotation) | rate cooldown from `Retry-After` |
+| 429 with key-level wording or no scope evidence | rate limited | rotate within budget | rate cooldown from `Retry-After` |
+| 401 | authentication | **fail, no cycling** | short auth/diagnostic cooldown |
+| 400/404/409/413/415/422 | invalid request | **fail, no retry** | unchanged |
+| 408/5xx/network error on Create Call | transient | **fail** (ambiguous; no retry) | unchanged |
+| any unclassified status | unknown | **fail** | unchanged |
+
+Bounded retry policy:
+
+* the attempt budget per logical Create Call is
+  `min(configured keys, ULTRAVOX_MAX_KEY_ATTEMPTS)` (default 3, hard max 5);
+* a key can appear at most once in one operation;
+* no rotation or retry on authentication, permission, validation, unknown or
+  transient failures;
+* the server never sleeps inside the AI-call HTTP request. A documented
+  `Retry-After` is returned as `retryAfterSeconds`; the existing client recovery
+  loop remains bounded to 3 attempts;
+* POST /calls is non-idempotent. A network failure/5xx is reported with
+  `ambiguous: true` and the key is **not** marked exhausted, because a retry
+  could create a second live AI session. The classification module does support
+  `retry_same_key` for genuinely idempotent operations (for example DELETE), but
+  Create Call does not use it.
+
+`Retry-After` is capped at 5 minutes for a rate-limit cooldown; the quota
+fallback is 1 hour with a 24-hour hard maximum. All cooldowns expire by time and
+are then reconsidered deterministically in configuration order.
+
+### Security and concurrency safeguards
+
+* Raw keys exist only in process memory and the outbound `X-API-Key` header.
+  Provider error bodies are read for classification only and are never logged
+  or returned. The old `details` field was removed from the AI-call error.
+* Diagnostics contain config **counts**, non-secret ids, health
+  (`eligible` / `cooling_down` / `quota_exhausted` / `authentication_failed`),
+  cooldown expiry, last category/reason and the last operation summary.
+* The diagnostics endpoint remains salesperson-authenticated. `/api/health` only
+  exposes `ready`, `keyCount`, `keySource` and the legacy `hasUltravoxKey`.
+* Key state mutations are synchronous; cooldown deadlines use `Math.max`, so
+  concurrent failures can only extend (never shorten) another request's
+  evidence. A success does not clear a cooldown another in-flight request just
+  recorded. Only time expiry makes a key eligible again.
+* Selection is deterministic config order with an explicit exclude set. There is
+  no random jitter loop and no unbounded retry.
+* Existing live calls are reused without key selection. A `replace: true`
+  request clears the old record first; the new call stores only the non-secret
+  `apiKeyId` used. If creation fails, no join URL is cached and the human WebRTC
+  path is untouched.
+
+
+### Operator diagnosis
+
+1. `GET /api/health` → `ai.ready`, `ai.keyCount`, `ai.keySource`. Readiness only
+   means at least one valid key is configured; it is not proof of a live call.
+2. Salesperson `GET /api/sessions/:id/diagnostics` → `ultravoxKeys` with:
+   `configuredCount`, `eligibleCount`, `coolingDownCount`,
+   `quotaExhaustedCount`, `authenticationFailedCount`, `maxAttempts`,
+   `configErrors`, `configWarnings`, `lastOperation` (including
+  `finalCategory`, `finalAction`, `failover`, `allKeysExhausted`) and per-key
+  health/id.
+3. Server logs use safe lines such as
+   `[ai] Ultravox attempt key=primary status=429 category=quota_exhausted
+   action=rotate reason=http-429-quota-evidence attempt=1/2`.
+   Startup logs `[ai] Ultravox keys: N configured key(s), source=multi,
+   attempt budget=N` and key-free `[ai] KEY CONFIG: ...` errors.
+
+Common diagnosis:
+
+* `ULTRAVOX_KEY_CONFIG_INVALID` → `ultravoxKeys.configErrors` names the entry
+  number/id and the rule; no key material appears.
+* `ULTRAVOX_AUTH_FAILED` → one key was rejected with 401. The pool does not try
+  the other keys because that would hide a credential problem. Verify the key
+  in the Ultravox console, then redeploy.
+* `ULTRAVOX_QUOTA_EXHAUSTED` / `ULTRAVOX_KEYS_EXHAUSTED` → keys are cooling
+  down; `availableInSeconds`/`retryAfterSeconds` show the bounded wait.
+* `ULTRAVOX_RATE_LIMITED` with an `accountScoped` reason in logs → likely
+  account concurrency/call-creation limit; another key in the same account will
+  not help.
+
+### Deployment limitations
+
+* Key state is **in-memory and per process**. Render restart, spin-down or
+  redeploy clears cooldowns; a second instance would have independent state. No
+  Redis/database is used for this demo.
+* The provider does not document per-key quota remaining/reset semantics. The
+  implementation treats body/`Retry-After` reset hints as evidence, not truth.
+* Keys in the same account share quotas/concurrency; rotation cannot bypass an
+  account-wide limit.
+* No live provider quota/429 scenario was exercised. Tests use mocked responses
+  and a fake clock; they do not prove real quota behaviour.
 

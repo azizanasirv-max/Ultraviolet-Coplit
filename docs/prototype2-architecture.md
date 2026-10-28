@@ -423,6 +423,7 @@ rising while `answers` stays 0) without reading the frontend console.
 | `npm run test:signaling` | Real HTTP + WebSocket server: join authentication, role enforcement, offer/answer/ICE relay including the customer's role-checked `ice_restart` request and role-checked `renegotiate` request, AI text relay to the salesperson only, cross-session isolation, reconnect identity, `peer_left`, invalid JSON, diagnostics authorization, customer-only Ultravox call, **AI call rotation, failed-creation retry, AI status relay/role enforcement/redaction, customer-disconnect AI state**, authenticated ICE endpoint, TURN static/ephemeral/provider delivery, relay misconfiguration, APP_URL, AI readiness without a key, secrecy | 35/35 pass |
 | `npm run test:negotiation` | Deterministic fake WebRTC/WebSocket: repeated `session_state` never creates a duplicate offer, no offer while `have-local-offer`, queued ICE restart runs when stable, an unanswered offer is rolled back and retried within a bounded budget, signaling-send/createOffer/setLocalDescription failures each consume one bounded attempt, bounded recovery reaches terminal with no busy loop, a later attempt within budget can recover, watchdog never rolls back an in-flight answer, a failed answer re-arms the watchdog, stale-peer answers cannot cancel a new watchdog, signaling rejoin after terminal starts a fresh negotiation, duplicate failure events coalesce, no PC churn after terminal, replacement cancels timers/ignores stale callbacks, customer restart request path, transient disconnect, AI independence, **late microphone attaches through a sendrecv transceiver + replaceTrack with one sender**, **microphone recovery stops the stale capture**, **a connected call with no inbound RTP recovers through a forced bounded ICE restart and then fails honestly**, **real inbound RTP never causes an ICE restart**, **inbound audio is only reported as working when sound is measurable (RMS), silence is reported as silence**, **blocked/aborted/supervised playback**, **a replaced remote track reuses one stream and one playback path**, **a receiver track is adopted when `ontrack` never fires**, **an ended track is reported and a replacement restores audio**, **the customer requests a renegotiation when the negotiated direction cannot carry its microphone (bounded)**, **the salesperson renegotiates a `sendonly` (one-way) negotiation but never a healthy `sendrecv` one**, **an outbound capture that ended without an event is re-acquired**, **the salesperson never creates an Ultravox session**, **a repeated `ontrack` keeps one playback path/analyser and does not reset the measured sound state**, **a remounted `<audio>` element leaves exactly one playback path**, **a reconnect detaches the old playback path before the new stream exists**, **stopping the call releases the capture, its listeners, the analysers, the timers and playback**, **quiet speech is measured and never gated**, **each participant publishes its own microphone and plays only the remote track**, **a healthy capture is never reopened and a dead one is replaced without overlap**, **microphone recovery is bounded and cannot reopen the device in a loop**, **recovery removes the replaced capture's listeners** | 47/47 pass |
 | `npm run test:ai` | **Mocked `UltravoxSession` + mocked `fetch`**: new-call-per-retry, connected only from live SDK status, mic-published reporting, abnormal-close recovery, stale-callback isolation, bounded retries with real error text, duplicate-retry suppression, salesperson restart over signaling, AI failure leaves WebRTC state untouched, **the agent speaker is already muted and the output is text-only before the room is joined** | 9/9 pass |
+| `npm run test:ai-keys` | **Mocked provider HTTP + fake clock**: single-key backward compatibility, multi-key JSON/list parsing and validation, quota classification/failover, `Retry-After`/reset parsing, authentication/permission/invalid-request non-cycling, transient non-retry for non-idempotent Create Call, unknown failure, finite attempt budget, concurrent cooldown extension, cooldown expiry, all-key exhaustion, secret-free logs/responses/diagnostics, live-call reuse, and healthy participant signaling after an AI failure | 17/17 pass |
 | `npm run test:audio` | Pure inbound-audio state machine: a fully measured call is the only "working audio" state; connected-without-packets, packets-without-sound, blocked/paused playback, locally muted speaker, absent customer and pending transport are all distinguished; level formatting | 8/8 pass |
 | `npm run test:microphone` | Pure capture policy: exact requested constraints (AEC/NS on, AGC off, mono, `ideal` never `exact`, no gate/threshold keys), applied-settings parsing where "not reported" is not "off", the measured summary, warnings when the browser dropped AEC/NS/AGC/mono, and the publishable-capture rule that keeps a deliberately muted capture from being re-acquired | 7/7 pass |
 | `npm run test:browser` | Chromium, two isolated browser contexts, synthetic media: role-specific UIs, invitation scoping/replay rejection, legacy URL rejection, bidirectional RTP, `<audio>` playing, mute/unmute on both sides, reconnect without duplicate participants/tracks, **presence-refresh flood smoke test (real Chromium; the deterministic suite is the D1 regression proof)**, AI text on the correct dashboard, AI failure isolated **and visible on the salesperson dashboard**, **salesperson-triggered AI restart without dropping audio**, **rotated invitation creates a new AI call**, server-side client diagnostics, TURN applied to every PC (incl. reconnect), relay-only policy applied, relay-only-without-TURN refuses to start, no credential leakage in DOM/snapshot, **two browser instances with different microphone tones (440 Hz / 1200 Hz) prove non-silent decoded audio in each direction independently with matching inbound RTP bytes/packets/audioLevel**, **the salesperson's measured inbound level/dBFS and `playbackState` prove audible, playing audio (not just RTP) and the `sendrecv` direction**, **a live-but-silent customer microphone produces `inboundSoundDetected: false`, a visible actionable warning and a headline that does not claim working audio**, **a paused remote audio element is resumed by playback supervision with one stream and one peer connection**, **an interrupted customer capture is re-acquired and audio returns with exactly one live capture and no duplicate playback**, **the AI capture is a separate capture and an AI failure never interrupts participant audio**, **reconnect leaves exactly one live, enabled capture and audio still flowing**, **the customer DOM shows no RTP/ICE/TURN error or AI internals**, **each direction has exactly one playback path and one capture (`diagnostics.micCaptures === 1`, only one element ever plays a stream)**, **switching views while live neither remounts a second element nor reopens the mic**, **a reconnect leaves `micCaptures === 1` and one playback path per side**, **leaving the call releases the capture and the playback path** | 39/39 pass |
@@ -793,11 +794,69 @@ New/updated tests by requirement:
   (see §9), not unit tests.
 
 
+## 6c. Ultravox API-key rotation and quota-aware failover (Task 4)
+
+`server/ultravoxKeys.ts` owns configuration parsing, classification, per-key
+eligibility and diagnostics. It is server-only; no client bundle imports it.
+
+### Why a 429 alone is not quota exhaustion
+
+Ultravox documents `429` for account concurrency (Free/PAYGO cap of 5),
+call-creation rate limits and general load. Request limits exist at both account
+(500 req/s) and API-key (200 req/s) level, but call-creation and concurrency
+limits are account/plan scoped. The account's free minutes are account-wide.
+The API does **not** expose a documented remaining-quota-per-key endpoint, and
+Create Call has no documented idempotency key. Classification therefore treats
+the response body only as evidence:
+
+* quota/billing wording (or 402) → `quota_exhausted`;
+* account/concurrency/plan wording → `rate_limited`, action `wait`;
+* other 429 → `rate_limited`, bounded rotation;
+* 401 → `authentication`, fail without cycling;
+* 403 without quota wording → `permission`, fail without cycling;
+* 400/404/409/413/415/422 → `invalid_request`, no retry;
+* 408/5xx/network → `transient`, never marks a key exhausted; Create Call is
+  not retried because the outcome is ambiguous;
+* anything else → `unknown`, fail safely.
+
+`Retry-After` (seconds or HTTP date) and conservative reset fields
+(`retry_after_seconds`, `reset_at`, etc.) are parsed. Cooldown deadlines use
+`Math.max`, so concurrent reports can only extend them. Success does not clear a
+cooldown recorded by another in-flight request; only expiry makes a key
+eligible again. The per-operation attempt budget is
+`min(keys, ULTRAVOX_MAX_KEY_ATTEMPTS)`, each key is tried at most once, and
+selection is deterministic config order.
+
+### Lifecycle boundaries
+
+Key selection is independent of WebRTC. A failed AI call creation writes no call
+record and no join URL; participant audio continues. An existing call is reused
+without selecting a key, so a live call/transcript cannot be silently associated
+with a different key or session. Explicit replacement clears the record before
+contacting the provider and records only the non-secret `apiKeyId`.
+
+Diagnostics (`GET /api/sessions/:id/diagnostics`, salesperson only) expose
+`ultravoxKeys` counts, ids, health, cooldown expiry, last category/action/reason
+and whether failover succeeded. Raw keys, authorization headers, provider
+payloads and transcripts are never included. Logs include only
+`key=<id> status=<n> category=<c> action=<a> reason=<r> attempt=<n>/<budget>`.
+
+State is in process memory: restart/redeploy clears cooldowns and a second
+instance is independent. Operators must therefore not treat cooldowns as
+durable. Rotation only helps across separate Ultravox accounts/projects, not
+multiple keys inside one account.
+
+
 ## 7. Environment variables
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `ULTRAVOX_API_KEY` | yes | Server-side Ultravox call creation. Never sent to clients. |
+| `ULTRAVOX_API_KEY` | legacy | Server-side single Ultravox key for call creation. Never sent to clients. Still supported. |
+| `ULTRAVOX_API_KEYS` | preferred | Server-side multi-key JSON array/list (`primary=...`). Non-secret ids are used in diagnostics; raw keys never leave the server. Takes precedence over the legacy variable. |
+| `ULTRAVOX_MAX_KEY_ATTEMPTS` | optional | Per-operation attempt budget (default 3, 1–5, also capped by key count). |
+| `ULTRAVOX_KEY_QUOTA_COOLDOWN_SECONDS` | optional | Fallback quota cooldown (default 3600, 60–86400). |
+| `ULTRAVOX_KEY_RATE_LIMIT_COOLDOWN_SECONDS` | optional | Fallback rate cooldown (default 30, 1–60); `Retry-After` wins, capped at 5 min. |
+| `ULTRAVOX_KEY_AUTH_COOLDOWN_SECONDS` | optional | Diagnostics cooldown after 401 (default 300). Does not trigger cycling. |
 | `ULTRAVOX_LANGUAGE_HINT` | optional | BCP47 hint for recognition/synthesis (for example `es-MX`). Not detection; fixed per call. Omit for code-switching customers. Invalid values are ignored. |
 | `APP_URL` | recommended | Public origin used to build invitation links (Render URL). Falls back to the request host. |
 | `TURN_URLS` | for cross-network audio | Comma-separated `turn:`/`turns:` URLs |
@@ -810,9 +869,10 @@ New/updated tests by requirement:
 | `MAX_SESSIONS` | optional | Cap on in-memory sessions (default 500) |
 | `PORT` | Render-provided | HTTP/WS port |
 
-No new environment variables are required for the AI lifecycle fix. The same
-`ULTRAVOX_API_KEY` is used for call creation and for the best-effort termination
-of superseded calls.
+Task 4 adds the optional multi-key variables above. `ULTRAVOX_API_KEYS` is used
+for call creation and the non-secret per-call `apiKeyId` selects the key for
+best-effort termination of superseded calls; the raw key is never stored in a
+session.
 
 Render: keep the existing web service (`npm start`, build `npm run build`,
 `NODE_ENV=production`). Build/start commands and the dependency strategy are
@@ -824,6 +884,11 @@ that must be added.
 ## 8. Remaining limitations
 
 * In-memory sessions: restart/redeploy loses sessions and invitations.
+* Ultravox key cooldowns/quota state are also in-memory and per process. They
+  are cleared by restart and are not shared by multiple instances.
+* Multiple keys do not bypass account-wide Ultravox concurrency, call-creation
+  or quota limits; they help only across separate accounts/projects. The
+  provider does not document a per-key remaining-quota/reset API.
 * Single instance only; no shared state across Render instances.
 * No real TURN relay was available during development: relay media flow is NOT
   verified. Static and short-lived credential generation, provider fetching (with
