@@ -1093,7 +1093,9 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       'aiConnected', 'aiState', 'aiAudioReaching', 'aiLastResponseAt', 'aiReconnectAttempt',
       'reconnectAttempt', 'candidates', 'iceConfigLoaded', 'turnConfigured',
       'turnCredentialMode', 'relayCandidates', 'mediaFlowing', 'dtlsState',
-      'audioFlow', 'lastMediaAgoMs',
+      'audioFlow', 'lastMediaAgoMs', 'inboundPackets', 'inboundPacketsLost',
+      'inboundJitter', 'inboundAudioLevel', 'localAudioLevel', 'inboundSoundDetected',
+      'lastSoundAgoMs', 'audioDirection', 'playbackState', 'playbackError',
     ]);
     const out: Record<string, unknown> = {};
     for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
@@ -1396,6 +1398,24 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
           return;
         }
         relayToCounterpart(session, current, 'ice_restart', {
+          reason: typeof data.reason === 'string' ? data.reason.slice(0, 120) : 'customer requested',
+        });
+        return;
+      }
+
+      if (type === 'renegotiate') {
+        // The customer is the answerer and cannot create an offer. This asks the
+        // salesperson for a fresh negotiation (used when the negotiated audio
+        // direction cannot carry the customer's microphone).
+        if (state.role !== 'customer') {
+          rejectMessage(
+            session.sessionId,
+            'INVALID_SIGNALING_ROLE',
+            'Only the customer may request a renegotiation.'
+          );
+          return;
+        }
+        relayToCounterpart(session, current, 'renegotiate', {
           reason: typeof data.reason === 'string' ? data.reason.slice(0, 120) : 'customer requested',
         });
         return;

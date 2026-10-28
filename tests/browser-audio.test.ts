@@ -1149,6 +1149,28 @@ const writeToneWav = (file: string, hz: number, sampleRate = 48000, seconds = 2)
   return file;
 };
 
+/** Writes a 16-bit mono WAV of pure silence (a live but silent microphone). */
+const writeSilentWav = (file: string, sampleRate = 48000, seconds = 2): string => {
+  const frames = sampleRate * seconds;
+  const buffer = Buffer.alloc(44 + frames * 2);
+  buffer.write('RIFF', 0);
+  buffer.writeUInt32LE(36 + frames * 2, 4);
+  buffer.write('WAVE', 8);
+  buffer.write('fmt ', 12);
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20);
+  buffer.writeUInt16LE(1, 22);
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(sampleRate * 2, 28);
+  buffer.writeUInt16LE(2, 32);
+  buffer.writeUInt16LE(16, 34);
+  buffer.write('data', 36);
+  buffer.writeUInt32LE(frames * 2, 40);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, buffer);
+  return file;
+};
+
 const SALESPERSON_TONE_HZ = 440;
 const CUSTOMER_TONE_HZ = 1200;
 
@@ -1367,6 +1389,29 @@ test('prototype2 participant audio is non-silent in both directions and independ
     assert.ok(probe.stats.inbound && probe.stats.inbound.bytes > 0, 'inbound RTP bytes must increase');
     assert.ok(probe.stats.inbound && probe.stats.inbound.packets > 0, 'inbound RTP packets must arrive');
     assert.equal(probe.openPcs, 1);
+
+    // Packets are not sound: the salesperson must also measure real audio
+    // energy in the decoded inbound stream and prove playback is running.
+    const measured = await waitFor(
+      () => snapshot(salespersonPage),
+      (value) => value.inboundSoundDetected === true,
+      20000
+    );
+    assert.equal(measured.playbackState, 'playing', 'the browser must be playing the stream');
+    assert.ok(
+      (measured.diagnostics.inboundAudioLevel ?? 0) > 0.004,
+      `inbound audio level too low (${measured.diagnostics.inboundAudioLevel})`
+    );
+    assert.ok(measured.diagnostics.inboundPackets > 0, 'inbound RTP packets must be counted');
+    assert.equal(measured.diagnostics.audioDirection, 'sendrecv', 'the audio m-line must be bidirectional');
+
+    // The dashboard presents the five facts separately and raises no warning
+    // when everything is measured as working.
+    const soundText = (await salespersonPage.textContent('[data-testid="audio-sound"]')) || '';
+    const playbackText = (await salespersonPage.textContent('[data-testid="audio-playback"]')) || '';
+    assert.match(soundText, /audible/);
+    assert.match(playbackText, /playing/);
+    assert.equal(await salespersonPage.locator('[data-testid="customer-audio-warning"]').count(), 0);
   });
 
   await t.test('salesperson microphone reaches the customer as non-silent audio', async () => {
@@ -1523,6 +1568,81 @@ test('prototype2 participant audio is non-silent in both directions and independ
     assert.equal(await customerPage.locator('[data-testid="diagnostics-panel"]').count(), 0);
     assert.equal(await customerPage.locator('[data-testid="ai-suggestions"]').count(), 0);
   });
+});
+
+test('prototype2 reports connected-but-silent customer audio instead of claiming it works', async (t) => {
+  const salesWav = writeToneWav(path.join(toneDir, 'sales-silent-case.wav'), SALESPERSON_TONE_HZ);
+  // The customer's microphone is live and negotiated, but carries no sound: the
+  // exact production symptom of a microphone held by another capture on the
+  // device, where RTP keeps flowing as silence.
+  const silentWav = writeSilentWav(path.join(toneDir, 'customer-silent.wav'));
+
+  const server = await createPrototype2Server({
+    port: 0,
+    serveFrontend: true,
+    ultravoxFetch: fakeUltravoxFetch,
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  const salesBrowser = await launchToneBrowser(salesWav);
+  const customerBrowser = await launchToneBrowser(silentWav);
+  t.after(async () => {
+    await salesBrowser.close();
+    await customerBrowser.close();
+    await server.close();
+  });
+
+  const salespersonContext = await openContext(salesBrowser);
+  const salespersonPage = await salespersonContext.newPage();
+  const customerContext = await openContext(customerBrowser);
+  const customerPage = await customerContext.newPage();
+
+  await salespersonPage.goto(`${base}/sales`, { waitUntil: 'domcontentloaded' });
+  const inviteUrl = await readInvitationAndOpenDashboard(salespersonPage);
+  await customerPage.goto(inviteUrl, { waitUntil: 'domcontentloaded' });
+  await customerPage.waitForSelector('[data-testid="customer-prejoin"]', { timeout: 20000 });
+
+  await salespersonPage.click('[data-testid="join-call"]');
+  await customerPage.click('[data-testid="join-call"]');
+
+  // Transport-level success: connected, packets arriving, playback running.
+  const connected = await waitFor(
+    () => snapshot(salespersonPage),
+    (value) => value.callState === 'connected' && value.diagnostics.pcState === 'connected',
+    40000
+  );
+  assert.equal((await snapshot(customerPage)).callState, 'connected');
+
+  const silent = await waitFor(
+    () => snapshot(salespersonPage),
+    (value) => value.diagnostics.inboundPackets > 0 && value.inboundSoundDetected === false,
+    30000
+  );
+  assert.ok(
+    (silent.diagnostics.inboundAudioLevel ?? 0) < 0.002,
+    `a silent stream must measure silence, got ${silent.diagnostics.inboundAudioLevel}`
+  );
+  assert.equal(connected.playbackState !== 'blocked', true, 'playback itself is not the problem here');
+
+  // The dashboard must warn instead of claiming working audio.
+  await salespersonPage.waitForSelector('[data-testid="customer-audio-warning"]', { timeout: 20000 });
+  const warningText = (await salespersonPage.textContent('[data-testid="customer-audio-warning"]')) || '';
+  assert.match(warningText, /silence/i);
+  assert.equal(
+    await salespersonPage.locator('[data-testid="customer-audio-warning-action"]').count(),
+    1,
+    'the warning must offer an action'
+  );
+  const headline = (await salespersonPage.textContent('[data-testid="call-state"]')) || '';
+  assert.ok(!/playing/i.test(headline), `the headline must not claim working audio: "${headline}"`);
+  const soundText = (await salespersonPage.textContent('[data-testid="audio-sound"]')) || '';
+  assert.match(soundText, /silent/);
+  const packetsText = (await salespersonPage.textContent('[data-testid="audio-packets"]')) || '';
+  assert.match(packetsText, /received/, 'packets are still reported separately from sound');
+
+  // The salesperson's own microphone keeps working in the other direction: a
+  // silent customer must never break the audio this side publishes.
+  const customerProbe = await probeAudio(customerPage);
+  assert.ok(customerProbe.remote.peak > 0.02, 'the customer must still hear the salesperson');
 });
 
 test('main app exposes Admin Settings and no Standalone or Prototype 1 UI', async (t) => {
