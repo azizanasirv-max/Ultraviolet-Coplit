@@ -71,8 +71,9 @@ def default_loader(model_id: str, device: str) -> Any:
 
     ``torch_dtype`` is bfloat16 on GPU (the checkpoint's own dtype) and float32
     on CPU, where bfloat16 matmuls are impractically slow. ``transformers`` is
-    pinned to 4.48.1, the version the checkpoint was exported with; newer major
-    versions renamed ``torch_dtype`` and dropped this custom pipeline.
+    pinned to 4.48.1, the release this checkpoint was exported with; its custom
+    code depends on 4.x internals such as ``torch_dtype`` and ``_init_weights``
+    that later majors changed.
     """
     import torch
     import transformers

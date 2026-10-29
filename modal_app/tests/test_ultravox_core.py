@@ -5,12 +5,10 @@ from __future__ import annotations
 import base64
 import io
 import math
-import os
 import time
 import unittest
 import wave
 from array import array
-from unittest import mock
 
 from modal_app import ultravox_core as core
 
@@ -293,6 +291,41 @@ class DeadlineTests(unittest.TestCase):
     def test_exceptions_propagate(self):
         with self.assertRaises(ZeroDivisionError):
             core.call_with_deadline(lambda: 1 / 0, 1.0)
+
+
+class PurePythonFallbackTests(unittest.TestCase):
+    """The stdlib fallback used when audioop is unavailable (Python >= 3.13)."""
+
+    def test_fallback_matches_audioop_for_stereo_48k(self):
+        frames = array("h")
+        for index in range(4800):
+            value = int(9000 * math.sin(2 * math.pi * 300 * index / 48000))
+            frames.extend([value, value // 2])
+        raw = frames.tobytes()
+
+        fast = array("h")
+        fast.frombytes(
+            core._downmix_and_resample(raw, width=2, channels=2, rate=48000)
+        )
+        slow = array("h")
+        slow.frombytes(
+            core._downmix_and_resample_python(
+                raw, width=2, channels=2, rate=48000
+            )
+        )
+
+        self.assertEqual(len(fast), len(slow))
+        self.assertEqual(len(fast), 1600)
+        # Linear interpolation differs from audioop by at most one LSB.
+        worst = max(abs(a - b) for a, b in zip(fast, slow))
+        self.assertLessEqual(worst, 2)
+
+    def test_fallback_rejects_non_16_bit(self):
+        with self.assertRaises(core.ServiceError) as ctx:
+            core._downmix_and_resample_python(
+                b"\x00" * 10, width=1, channels=1, rate=8000
+            )
+        self.assertEqual(ctx.exception.code, "UNSUPPORTED_AUDIO_FORMAT")
 
 
 if __name__ == "__main__":  # pragma: no cover

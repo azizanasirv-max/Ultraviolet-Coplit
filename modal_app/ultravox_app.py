@@ -76,8 +76,9 @@ image = (
         "numpy==2.1.3",
         # torch 2.5.1 ships CUDA 12.4 wheels; A100 (sm_80) is supported.
         "torch==2.5.1",
-        # 4.48.1 is the version this checkpoint was exported with and the last
-        # line that ships the ultravox-pipeline custom pipeline this code uses.
+        # 4.48.1 is the transformers release this checkpoint was exported with
+        # (config.transformers_version); its custom code relies on 4.x
+        # torch_dtype/_init_weights internals, so majors are not interchangeable.
         "transformers==4.48.1",
         "accelerate==1.3.0",
         # Required by the checkpoint's custom ultravox_model.py (imported even

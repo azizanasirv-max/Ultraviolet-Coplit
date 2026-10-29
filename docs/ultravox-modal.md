@@ -54,11 +54,11 @@ Two consequences that drive the design:
 | --- | --- | --- |
 | Python | 3.11 | `audioop` (used for fast resampling) is deprecated in 3.12 and removed in 3.13 |
 | torch | 2.5.1 | CUDA 12.4 wheels, supports A100 (sm_80) and L40S (sm_89) |
-| transformers | 4.48.1 | the version this checkpoint was exported and tagged with; it still accepts `torch_dtype` and registers the checkpoint's `ultravox-pipeline`. Major v5 renamed `torch_dtype` and no longer documents this pipeline, so it is deliberately not used |
+| transformers | 4.48.1 | the release this checkpoint was exported with (`config.transformers_version`); its custom code depends on 4.x internals such as `torch_dtype` and `_init_weights` that later majors changed |
 | accelerate | 1.3.0 | required by the checkpoint's `torch_dtype`/`device_map` load path |
 | peft | 0.14.0 | `ultravox_model.py` imports `peft` unconditionally; no adapters are applied at inference (`r=0`) |
 | numpy | 2.1.3 | audio array + Whisper feature extractor |
-
+| fastapi / python-multipart | 0.115.6 / 0.0.20 | HTTP API + multipart uploads |
 
 ## 2. API contract
 
@@ -131,10 +131,6 @@ arbitrary text (the endpoint only accepts recent `context`):
 The final chat turn is the documented `<|audio|>` placeholder, so the audio is
 the last thing in the model's context.
 
-| fastapi / python-multipart | 0.115.6 / 0.0.20 | API + multipart uploads |
-
-
-
 ## 3. Secrets and deployment (do not run until approved)
 
 ### 3.1 Required secrets
@@ -175,6 +171,7 @@ modal run modal_app/ultravox_app.py::download_models
 
 # 3. Deploy. First build installs torch/transformers/ffmpeg (~3-6 min).
 modal deploy modal_app/ultravox_app.py
+# add --stream-logs to watch the container start (optional)
 ```
 
 `modal deploy` prints the web URL, e.g.
@@ -310,7 +307,7 @@ npm run test:ultravox
 python3 -m unittest discover -s modal_app/tests -t . -p 'test_ultravox*.py'
 ```
 
-80 tests, all passing in this checkout (Python 3.11, fake model). Coverage:
+82 tests, all passing in this checkout (Python 3.11, fake model). Coverage:
 
 | Requirement | Tests |
 | --- | --- |
@@ -378,7 +375,7 @@ Run in order; stop at the first failure and report it.
 ```bash
 modal app stop ultravox-v05-service        # stops containers immediately
 modal volume ls ultravox-model-cache       # inspect cached weights (17.5 GB)
-modal volume rm ultravox-model-cache       # delete them when done, free storage
+modal volume delete ultravox-model-cache   # delete them when done, free storage
 modal secret delete ultravox-service       # remove both credentials
 ```
 

@@ -256,6 +256,15 @@ def _downmix_and_resample_python(  # pragma: no cover - fallback path
     if rate == SAMPLE_RATE:
         return array("h", mono).tobytes()
     ratio = SAMPLE_RATE / float(rate)
+    out_len = int(len(mono) * ratio)
+    out = array("h")
+    for index in range(out_len):
+        position = index / ratio
+        before = int(position)
+        after = min(before + 1, len(mono) - 1)
+        frac = position - before
+        out.append(int(mono[before] * (1.0 - frac) + mono[after] * frac))
+    return out.tobytes()
 
 
 def decode_wav(
@@ -550,13 +559,3 @@ def decode_audio(
     if looks_like_wav(data):
         return decode_wav(data, max_seconds=max_seconds)
     return transcode_with_ffmpeg(data, max_seconds=max_seconds, runner=ffmpeg_runner)
-
-    out_len = int(len(mono) * ratio)
-    out = array("h")
-    for index in range(out_len):
-        position = index / ratio
-        before = int(position)
-        after = min(before + 1, len(mono) - 1)
-        frac = position - before
-        out.append(int(mono[before] * (1.0 - frac) + mono[after] * frac))
-    return out.tobytes()
