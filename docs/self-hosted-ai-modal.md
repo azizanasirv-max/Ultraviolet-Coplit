@@ -266,6 +266,8 @@ After changing models, the first request downloads new weights into the
 | "AI service stopped responding" | The WebSocket died. The engine retries up to three times; the human call is unaffected. Check `modal app logs`. |
 | AI chip stays on *Connecting AI* | The microphone capture or the WebSocket failed. Check browser permissions and the Modal logs; the 20 s connect timeout eventually reports an error. |
 | Cold start takes minutes | Model download on the first ever run. Later starts use the Volume; warm the app before a demo. |
+| `Could not load library libcudnn_ops.so` / CUDA errors in Modal logs | The image already installs `nvidia-cudnn-cu12`/`nvidia-cublas-cu12` and sets `LD_LIBRARY_PATH`. If you change the Python version or torch pin, update that path (`python3.11` in the image) or deploy with `AI_DEVICE=cpu` to confirm the rest of the wiring. |
+| Suggestions arrive but are poor | Expected with a 3B model. Raise `LLM_MODEL` to a larger instruct model (A10/L40S GPU) or refine the system prompt in `server.ts` (it is operator-controlled and never taken from the browser). |
 
 **Rollback:** the previous hosted implementation is one revert away:
 

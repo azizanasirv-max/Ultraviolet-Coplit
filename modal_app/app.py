@@ -75,6 +75,10 @@ image = (
         "accelerate==1.2.1",
         "sentencepiece==0.2.0",
         "huggingface-hub==0.27.1",
+        # CTranslate2 (faster-whisper) loads cuDNN/cuBLAS at runtime; pip puts
+        # them under site-packages/nvidia/*, so point the loader at them.
+        "nvidia-cublas-cu12==12.4.5.8",
+        "nvidia-cudnn-cu12==9.1.0.70",
     )
     .env(
         {
@@ -88,6 +92,10 @@ image = (
             "MAX_SEGMENTS_PER_CALL": str(MAX_SEGMENTS_PER_CALL),
             "MAX_NEW_TOKENS": os.environ.get("MAX_NEW_TOKENS", "96"),
             "AI_DEVICE": os.environ.get("AI_DEVICE", "cuda"),
+            "LD_LIBRARY_PATH": (
+                "/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:"
+                "/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib"
+            ),
         }
     )
 )
