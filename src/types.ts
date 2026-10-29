@@ -1,4 +1,4 @@
-import { Role } from 'ultravox-client';
+import { Role } from './lib/aiSession';
 
 export interface TranscriptEntry {
   ordinal: number;

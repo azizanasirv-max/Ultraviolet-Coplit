@@ -1,15 +1,15 @@
 /**
  * AI session lifecycle tests for CallEngine.
  *
- * IMPORTANT: these tests use a FAKE `UltravoxSession` (injected through
+ * IMPORTANT: these tests use a FAKE `AiVoiceSession` (injected through
  * `createAiSession`) and a mocked `fetch`. They prove the recovery logic,
  * generation guards, bounded retries and reporting behaviour. They do NOT
- * prove connectivity to the real Ultravox service; that needs a real API key
- * and network access (see docs/prototype2-architecture.md).
+ * prove connectivity to the self-hosted Modal service or that audio streams;
+ * that needs a deployed service (see docs/self-hosted-ai-modal.md).
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { UltravoxSessionStatus } from 'ultravox-client';
+import { AiSessionStatus } from '../src/lib/aiSession';
 import { CallEngine } from '../src/lib/callEngine';
 
 // The engine uses browser timers in the AI paths.
@@ -24,9 +24,9 @@ import { CallEngine } from '../src/lib/callEngine';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Minimal stand-in for ultravox-client's UltravoxSession. */
+/** Minimal stand-in for the real `SelfHostedAiSession`. */
 class FakeSession extends EventTarget {
-  status: UltravoxSessionStatus = UltravoxSessionStatus.DISCONNECTED;
+  status: AiSessionStatus = AiSessionStatus.DISCONNECTED;
   transcripts: Array<{
     text: string;
     isFinal: boolean;
@@ -41,20 +41,20 @@ class FakeSession extends EventTarget {
   speakerMuted = false;
   micMuted = false;
 
-  setStatus(status: UltravoxSessionStatus): void {
+  setStatus(status: AiSessionStatus): void {
     this.status = status;
     this.dispatchEvent(new Event('status'));
   }
 
   joinCall(joinUrl: string): void {
     this.joinCalls.push(joinUrl);
-    this.setStatus(UltravoxSessionStatus.CONNECTING);
+    this.setStatus(AiSessionStatus.CONNECTING);
   }
 
   async leaveCall(): Promise<void> {
     this.leaveCalls += 1;
-    this.setStatus(UltravoxSessionStatus.DISCONNECTING);
-    this.setStatus(UltravoxSessionStatus.DISCONNECTED);
+    this.setStatus(AiSessionStatus.DISCONNECTING);
+    this.setStatus(AiSessionStatus.DISCONNECTED);
   }
 
   setOutputMedium(medium: string): void {
@@ -162,7 +162,7 @@ const makeHarness = (options: {
 
 const snapshot = (engine: CallEngine) => engine.getSnapshot();
 
-test('manual retry creates a brand new Ultravox call and a new SDK session', async () => {
+test('manual retry creates a brand new AI call and a new AI session', async () => {
   const harness = makeHarness();
   const { engine, sessions, requests, signals, restoreFetch } = harness;
   try {
@@ -201,12 +201,12 @@ test('a live SDK status is the only way to become connected, and audio reaching 
     assert.equal(snapshot(engine).ai.connected, false);
 
     session.micSourceNode = {};
-    session.setStatus(UltravoxSessionStatus.LISTENING);
+    session.setStatus(AiSessionStatus.LISTENING);
 
     const state = snapshot(engine);
     assert.equal(state.ai.state, 'connected');
     assert.equal(state.ai.connected, true);
-    assert.equal(state.aiStatus, UltravoxSessionStatus.LISTENING);
+    assert.equal(state.aiStatus, AiSessionStatus.LISTENING);
     assert.equal(state.ai.audioReachingAi, true);
     assert.equal(session.outputMedium, 'text', 'AI output stays text-only');
 
@@ -234,7 +234,7 @@ test('an AI disconnect is reported with code and detail, and audio call state is
     await engine.retryAi();
     const session = sessions[0];
     session.micSourceNode = {};
-    session.setStatus(UltravoxSessionStatus.LISTENING);
+    session.setStatus(AiSessionStatus.LISTENING);
 
     // The engine's WebRTC state is independent of the AI lifecycle.
     (engine as any).callState = 'connected';
@@ -266,10 +266,10 @@ test('recovery after an abnormal close requests a new call and ignores stale cal
     await engine.retryAi();
     const first = sessions[0];
     first.micSourceNode = {};
-    first.setStatus(UltravoxSessionStatus.LISTENING);
+    first.setStatus(AiSessionStatus.LISTENING);
 
     first.emitError('Session socket closed abnormally. code=1006 reason=');
-    first.setStatus(UltravoxSessionStatus.DISCONNECTED);
+    first.setStatus(AiSessionStatus.DISCONNECTED);
 
     let state = snapshot(engine);
     assert.equal(state.ai.state, 'reconnecting');
@@ -290,7 +290,7 @@ test('recovery after an abnormal close requests a new call and ignores stale cal
 
     // A late error/status from the OLD session must not overwrite the new one.
     first.emitError('Session socket closed abnormally. code=1006 reason=stale');
-    first.setStatus(UltravoxSessionStatus.DISCONNECTED);
+    first.setStatus(AiSessionStatus.DISCONNECTED);
     await sleep(10);
     state = snapshot(engine);
     assert.equal(state.ai.callId, 'call_2');
@@ -299,7 +299,7 @@ test('recovery after an abnormal close requests a new call and ignores stale cal
 
     // The new session can still become live.
     second.micSourceNode = {};
-    second.setStatus(UltravoxSessionStatus.LISTENING);
+    second.setStatus(AiSessionStatus.LISTENING);
     assert.equal(snapshot(engine).ai.connected, true);
     assert.equal(snapshot(engine).ai.callId, 'call_2');
   } finally {
@@ -310,7 +310,7 @@ test('recovery after an abnormal close requests a new call and ignores stale cal
 
 test('automatic recovery is bounded and surfaces the real failure instead of a false connected state', async () => {
   const failingFetch = (async () => {
-    throw new Error('connect ECONNREFUSED api.ultravox.ai:443');
+    throw new Error('connect ECONNREFUSED ai.invalid:443');
   }) as unknown as typeof fetch;
   const harness = makeHarness({ delays: [5, 5, 5], fetchImpl: failingFetch });
   const { engine, snapshots, restoreFetch } = harness;
@@ -414,7 +414,7 @@ test('salesperson displays the customer-reported AI state and sanitises failure 
     state: 'error',
     connected: false,
     error:
-      'Session socket closed abnormally. code=1006 reason= see wss://api.ultravox.ai/join?token=super-secret',
+      'Session socket closed abnormally. code=1006 reason= see wss://ai.invalid/join?token=super-secret',
   });
   state = snapshot(engine);
   assert.equal(state.ai.state, 'error');

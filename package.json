@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "test": "npm run test:unit && npm run test:turn && npm run test:rstream && npm run test:rstream-static && npm run test:expressturn && npm run test:signaling && npm run test:negotiation && npm run test:customer && npm run test:ai",
+    "test": "npm run test:unit && npm run test:turn && npm run test:rstream && npm run test:rstream-static && npm run test:expressturn && npm run test:signaling && npm run test:negotiation && npm run test:customer && npm run test:ai && npm run test:ai-client && npm run test:ai-service",
     "test:unit": "node --import tsx --test tests/sessionStore.test.ts",
     "test:customer": "node --import tsx --test tests/customerMessages.test.ts",
     "test:signaling": "node --import tsx --test tests/signaling.test.ts",
@@ -23,7 +23,10 @@
     "test:turn": "node --import tsx --test tests/turn.test.ts",
     "test:rstream": "node --import tsx --test tests/rstream.test.ts",
     "test:rstream-static": "node --import tsx --test tests/rstreamStatic.test.ts",
-    "test:expressturn": "node --import tsx --test tests/expressTurn.test.ts tests/adminTurn.test.ts"
+    "test:expressturn": "node --import tsx --test tests/expressTurn.test.ts tests/adminTurn.test.ts",
+    "test:ai-client": "node --import tsx --test tests/aiClient.test.ts",
+    "test:ai-service": "node --import tsx --test tests/aiService.test.ts",
+    "test:ai-pipeline": "python3 -m unittest discover -s modal_app/tests -t ."
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -37,7 +40,6 @@
     "react-dom": "^19.0.1",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
-    "ultravox-client": "^0.6.0",
     "vite": "^8.3.0",
     "ws": "^8.22.0"
   },

@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import WebSocket from 'ws';
 import { createPrototype2Server } from '../server';
 
-// Injected server-side key; the browser never sees it.
-process.env.ULTRAVOX_API_KEY = 'test-ultravox-key';
+// Injected server-side AI service config; the browser never sees the token.
+process.env.AI_SERVICE_URL = 'https://ai.invalid';
+process.env.AI_SERVICE_TOKEN = 'test-ai-token';
 
 interface Harness {
   base: string;
@@ -12,13 +13,13 @@ interface Harness {
 }
 
 const startServer = async (
-  options: { turnFetch?: typeof fetch; ultravoxFetch?: typeof fetch } = {}
+  options: { turnFetch?: typeof fetch; aiServiceFetch?: typeof fetch } = {}
 ): Promise<Harness> => {
   const instance = await createPrototype2Server({
     serveFrontend: false,
     port: 0,
-    ultravoxFetch:
-      options.ultravoxFetch ??
+    aiServiceFetch:
+      options.aiServiceFetch ??
       ((async () =>
         new Response(JSON.stringify({ callId: 'call_test', joinUrl: 'wss://ai.invalid/join' }), {
           status: 200,
@@ -607,18 +608,18 @@ test('prototype2 HTTP authorization and invitations', async (t) => {
     const fixture = await createFixture(harness.base);
     const bySalesperson = await post(
       harness.base,
-      `/api/sessions/${fixture.sessionId}/ultravox-call`,
+      `/api/sessions/${fixture.sessionId}/ai-call`,
       {},
       fixture.salespersonKey
     );
     assert.equal(bySalesperson.status, 403);
 
-    const unauthenticated = await post(harness.base, `/api/sessions/${fixture.sessionId}/ultravox-call`, {});
+    const unauthenticated = await post(harness.base, `/api/sessions/${fixture.sessionId}/ai-call`, {});
     assert.equal(unauthenticated.status, 403);
 
     const byCustomer = await post(
       harness.base,
-      `/api/sessions/${fixture.sessionId}/ultravox-call`,
+      `/api/sessions/${fixture.sessionId}/ai-call`,
       {},
       fixture.customerKey
     );
@@ -627,7 +628,7 @@ test('prototype2 HTTP authorization and invitations', async (t) => {
 
     const reused = await post(
       harness.base,
-      `/api/sessions/${fixture.sessionId}/ultravox-call`,
+      `/api/sessions/${fixture.sessionId}/ai-call`,
       {},
       fixture.customerKey
     );
@@ -654,7 +655,8 @@ test('prototype2 ICE/TURN delivery is session-authenticated and secret-safe', as
     ICE_TRANSPORT_POLICY: process.env.ICE_TRANSPORT_POLICY,
     STUN_URLS: process.env.STUN_URLS,
     APP_URL: process.env.APP_URL,
-    ULTRAVOX_API_KEY: process.env.ULTRAVOX_API_KEY,
+    AI_SERVICE_URL: process.env.AI_SERVICE_URL,
+    AI_SERVICE_TOKEN: process.env.AI_SERVICE_TOKEN,
   };
 
   process.env.TURN_URLS =
@@ -791,25 +793,27 @@ test('prototype2 ICE/TURN delivery is session-authenticated and secret-safe', as
     delete process.env.APP_URL;
   });
 
-  await t.test('starts and serves health without an AI key, with a clear AI error', async () => {
-    delete process.env.ULTRAVOX_API_KEY;
+  await t.test('starts and serves health without AI service config, with a clear AI error', async () => {
+    delete process.env.AI_SERVICE_URL;
+    delete process.env.AI_SERVICE_TOKEN;
 
     const health = await get(harness.base, '/api/health');
     assert.equal(health.status, 200);
     assert.equal(health.body.ai.ready, false);
-    assert.deepEqual(health.body.ai.missing, ['ULTRAVOX_API_KEY']);
+    assert.deepEqual(health.body.ai.missing, ['AI_SERVICE_URL', 'AI_SERVICE_TOKEN']);
     assert.match(health.body.ai.message, /Human-to-human audio is unaffected/i);
 
     const aiCall = await post(
       harness.base,
-      `/api/sessions/${fixture.sessionId}/ultravox-call`,
+      `/api/sessions/${fixture.sessionId}/ai-call`,
       {},
       fixture.customerKey
     );
     assert.equal(aiCall.status, 503);
-    assert.equal(aiCall.body.error, 'MISSING_API_KEY');
+    assert.equal(aiCall.body.error, 'AI_SERVICE_NOT_CONFIGURED');
 
-    process.env.ULTRAVOX_API_KEY = 'test-ultravox-key';
+    process.env.AI_SERVICE_URL = 'https://ai.invalid';
+    process.env.AI_SERVICE_TOKEN = 'test-ai-token';
   });
 });
 
@@ -995,7 +999,7 @@ test('TURN credential provider is fetched server-side and never exposed', async 
 test('prototype2 AI call rotation and status relay', async (t) => {
   const calls: Array<{ method: string; url: string; body: any }> = [];
   let failNext = false;
-  const ultravoxFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const aiServiceFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const method = init?.method ?? 'GET';
     const body = init?.body ? JSON.parse(String(init.body)) : null;
     calls.push({ method, url: String(input), body });
@@ -1010,13 +1014,13 @@ test('prototype2 AI call rotation and status relay', async (t) => {
         callId: `call_${created}`,
         // Deliberately secret-looking: it must never reach the salesperson.
         joinUrl: `wss://ai.invalid/join-${created}?token=secret-${created}`,
-        model: 'ultravox-v0.7',
+        model: 'test-model',
       }),
       { status: 200, headers: { 'Content-Type': 'application/json' } }
     );
   }) as unknown as typeof fetch;
 
-  const harness = await startServer({ ultravoxFetch });
+  const harness = await startServer({ aiServiceFetch });
   t.after(async () => {
     await harness.close();
   });
@@ -1025,7 +1029,7 @@ test('prototype2 AI call rotation and status relay', async (t) => {
     const fixture = await createFixture(harness.base, 'rotate');
     const first = await post(
       harness.base,
-      `/api/sessions/${fixture.sessionId}/ultravox-call`,
+      `/api/sessions/${fixture.sessionId}/ai-call`,
       {},
       fixture.customerKey
     );
@@ -1035,7 +1039,7 @@ test('prototype2 AI call rotation and status relay', async (t) => {
 
     const reused = await post(
       harness.base,
-      `/api/sessions/${fixture.sessionId}/ultravox-call`,
+      `/api/sessions/${fixture.sessionId}/ai-call`,
       {},
       fixture.customerKey
     );
@@ -1045,7 +1049,7 @@ test('prototype2 AI call rotation and status relay', async (t) => {
     // This is what the client sends for every recovery attempt.
     const rotated = await post(
       harness.base,
-      `/api/sessions/${fixture.sessionId}/ultravox-call`,
+      `/api/sessions/${fixture.sessionId}/ai-call`,
       { replace: true },
       fixture.customerKey
     );
@@ -1067,16 +1071,16 @@ test('prototype2 AI call rotation and status relay', async (t) => {
     failNext = true;
     const failed = await post(
       harness.base,
-      `/api/sessions/${fixture.sessionId}/ultravox-call`,
+      `/api/sessions/${fixture.sessionId}/ai-call`,
       {},
       fixture.customerKey
     );
     assert.equal(failed.status, 503);
-    assert.equal(failed.body.error, 'ULTRAVOX_API_ERROR');
+    assert.equal(failed.body.error, 'AI_SERVICE_ERROR');
 
     const retried = await post(
       harness.base,
-      `/api/sessions/${fixture.sessionId}/ultravox-call`,
+      `/api/sessions/${fixture.sessionId}/ai-call`,
       { replace: true },
       fixture.customerKey
     );

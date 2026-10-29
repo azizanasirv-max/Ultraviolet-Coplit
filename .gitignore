@@ -13,3 +13,7 @@ coverage/
 
 # Local investigation scratch (mock TURN, repro harness)
 .repro/
+
+# Python bytecode from the Modal service
+__pycache__/
+*.pyc

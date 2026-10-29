@@ -1,23 +1,23 @@
 /**
- * Shared, UI-safe description of the customer-side Ultravox session.
+ * Shared, UI-safe description of the customer-side self-hosted AI session.
  *
  * The AI session only exists in the customer's browser (it publishes the
- * customer microphone to Ultravox). The salesperson therefore consumes a
+ * customer microphone to the self-hosted model service). The salesperson therefore consumes a
  * *reported* copy of this state over signaling. These types and labels are
  * shared by the engine and both dashboards so a state is never rendered with a
  * different meaning on each side.
  */
-import { UltravoxSessionStatus } from 'ultravox-client';
+import { AiSessionStatus, isLiveAiSessionStatus } from './aiSession';
 
 /** Lifecycle states that are meaningful to a human reading the dashboard. */
 export type AiLifecycleState =
   /** AI disabled for this participant (the salesperson never starts one). */
   | 'off'
-  /** Asking the server for a *new* Ultravox call. */
+  /** Asking the server for a *new* AI call. */
   | 'creating'
-  /** A join URL was obtained and the SDK is opening the session. */
+  /** A join URL was obtained and the AI transport is opening. */
   | 'connecting'
-  /** The SDK reports a live session (idle/listening/thinking/speaking). */
+  /** The AI transport reports a live session (idle/listening/thinking/speaking). */
   | 'connected'
   /** A previous session failed and a new one is being created. */
   | 'reconnecting'
@@ -30,13 +30,13 @@ export type AiLifecycleState =
 
 export interface AiStatus {
   state: AiLifecycleState;
-  /** Raw `ultravox-client` status while a session object exists. */
-  status: UltravoxSessionStatus | null;
-  /** True only while the SDK reports a live session. */
+  /** Raw transport status while a session object exists. */
+  status: AiSessionStatus | null;
+  /** True only while the transport reports a live session. */
   connected: boolean;
   /** Safe explanation of the most recent failure (no URLs or credentials). */
   error: string | null;
-  /** Ultravox call id (not a credential) of the current/last attempt. */
+  /** AI call id (not a credential) of the current/last attempt. */
   callId: string | null;
   /** Bounded automatic recovery attempt counter (0 = none running). */
   reconnectAttempt: number;
@@ -46,13 +46,13 @@ export interface AiStatus {
   reconnecting: boolean;
   /** The customer microphone is captured and published to the AI. */
   audioReachingAi: boolean;
-  /** Last time any SDK status/transcript event was observed. */
+  /** Last time any AI status/transcript event was observed. */
   lastEventAt: number | null;
   /** Last time an agent suggestion was received. */
   lastSuggestionAt: number | null;
   /** Last time the AI produced any response for this session. */
   lastResponseAt: number | null;
-  /** Where this view came from: the local SDK or the other participant. */
+  /** Where this view came from: this device or the other participant. */
   source: 'local' | 'remote';
 }
 
@@ -77,16 +77,9 @@ export const emptyAiStatus = (source: AiStatus['source'] = 'local'): AiStatus =>
   source,
 });
 
-/** Statuses that the SDK only reports after the media session is live. */
-const LIVE_STATUSES = new Set<string>([
-  UltravoxSessionStatus.IDLE,
-  UltravoxSessionStatus.LISTENING,
-  UltravoxSessionStatus.THINKING,
-  UltravoxSessionStatus.SPEAKING,
-]);
-
-export const isLiveAiStatus = (status: UltravoxSessionStatus | null): boolean =>
-  Boolean(status && LIVE_STATUSES.has(status));
+/** Statuses that only arrive after the audio transport is live. */
+export const isLiveAiStatus = (status: AiSessionStatus | null): boolean =>
+  isLiveAiSessionStatus(status);
 
 export type AiTone = 'emerald' | 'amber' | 'red' | 'slate' | 'indigo';
 

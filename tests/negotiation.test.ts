@@ -9,7 +9,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { UltravoxSessionStatus } from 'ultravox-client';
+import { AiSessionStatus } from '../src/lib/aiSession';
 import { CallEngine } from '../src/lib/callEngine';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -301,7 +301,7 @@ class FakeWebSocket {
 (globalThis as any).WebSocket = FakeWebSocket;
 
 class FakeUltravoxSession extends EventTarget {
-  status: UltravoxSessionStatus = UltravoxSessionStatus.DISCONNECTED;
+  status: AiSessionStatus = AiSessionStatus.DISCONNECTED;
   leaveCalls = 0;
   joinCalls: string[] = [];
   micSourceNode: unknown = { fake: true };
@@ -312,13 +312,13 @@ class FakeUltravoxSession extends EventTarget {
   unmuteMic() {}
   joinCall(url: string) {
     this.joinCalls.push(url);
-    this.setStatus(UltravoxSessionStatus.CONNECTING);
+    this.setStatus(AiSessionStatus.CONNECTING);
   }
   async leaveCall() {
     this.leaveCalls += 1;
-    this.setStatus(UltravoxSessionStatus.DISCONNECTED);
+    this.setStatus(AiSessionStatus.DISCONNECTED);
   }
-  setStatus(status: UltravoxSessionStatus) {
+  setStatus(status: AiSessionStatus) {
     this.status = status;
     this.dispatchEvent(new Event('status'));
   }
@@ -376,7 +376,7 @@ const installFetch = (
         iceTransportPolicy: options.healthPolicy ?? 'all',
       });
     }
-    if (url.includes('/ultravox-call')) {
+    if (url.includes('/ai-call')) {
       return jsonResponse({ callId: 'call_test', joinUrl: 'wss://ai.invalid/join', isReused: false });
     }
     return jsonResponse({});
@@ -700,7 +700,7 @@ test('the customer requests a restart over signaling and AI state survives WebRT
   await sleep(20);
   const ai = sessions[0];
   assert.ok(ai, 'the customer must create an AI session');
-  ai.setStatus(UltravoxSessionStatus.LISTENING);
+  ai.setStatus(AiSessionStatus.LISTENING);
   await sleep(10);
   assert.equal(engine.getSnapshot().ai.state, 'connected');
   const leaveCallsBefore = ai.leaveCalls;

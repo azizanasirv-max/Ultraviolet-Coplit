@@ -1,9 +1,9 @@
 /**
  * Prototype 2 server: session API, invitation redemption, role-enforcing
- * WebSocket signaling and the Ultravox proxy.
+ * WebSocket signaling and the self-hosted AI call proxy.
  *
  * Trust boundaries:
- *   - The browser never sees ULTRAVOX_API_KEY. TURN credentials are only sent to
+ *   - The browser never sees AI_SERVICE_TOKEN. TURN credentials are only sent to
  *     browsers that need to establish media.
  *   - Session membership is proven by a credential (salesperson key or the
  *     customer key derived from a redeemed invitation). A URL parameter alone
@@ -55,6 +55,15 @@ import {
   getExpressTurnStatus,
   setExpressTurnCredentials,
 } from './server/expressTurn';
+import {
+  AiServiceError,
+  aiServiceReadiness,
+  createAiCall,
+  endAiCallQuietly,
+  resolveAiServiceSettings,
+  sanitizeAiCallId,
+  sanitizeProviderDetail,
+} from './server/aiService';
 
 dotenv.config();
 
@@ -66,34 +75,14 @@ const JOIN_DEADLINE_MS = 10000;
 const REDEEM_RATE_LIMIT = 30;
 const REDEEM_RATE_WINDOW_MS = 60_000;
 
-/** True when the server has a usable Ultravox key (never the key itself). */
-const ultravoxReady = (): boolean => Boolean(ultravoxApiKey());
+/** AI readiness: the app serves human audio even when the AI is unconfigured. */
+const aiReadiness = () => aiServiceReadiness(process.env);
 
 const configuredPublicUrl = (): string | null => {
   const value = process.env.APP_URL?.trim();
   if (!value || value === 'MY_APP_URL') return null;
   if (!/^https?:\/\//i.test(value)) return null;
   return value.replace(/\/+$/, '');
-};
-
-const ultravoxApiKey = (): string | null => {
-  const key = process.env.ULTRAVOX_API_KEY?.trim();
-  if (!key || key === 'MY_ULTRAVOX_API_KEY') return null;
-  return key;
-};
-
-/** AI readiness: the app serves human audio even when the AI key is absent. */
-const aiReadiness = () => {
-  const ready = Boolean(ultravoxApiKey());
-  return {
-    ready,
-    provider: 'ultravox',
-    model: 'ultravox-v0.7',
-    missing: ready ? [] : ['ULTRAVOX_API_KEY'],
-    message: ready
-      ? 'The server can create Ultravox calls. Readiness is not proof that a live AI session is connected; see the session AI state.'
-      : 'AI suggestions are unavailable until ULTRAVOX_API_KEY is set on the server. Human-to-human audio is unaffected.',
-  };
 };
 
 /** AI lifecycle states the customer device is allowed to report. */
@@ -124,14 +113,6 @@ const sanitizeAiDetail = (value: unknown, maxLength = 300): string | null => {
   text = text.replace(/\s+/g, ' ').trim();
   if (!text) return null;
   return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
-};
-
-/** Accepts only a plausible call id; call ids are not secrets but keep them bounded. */
-const sanitizeCallId = (value: unknown): string | null => {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  if (!trimmed || trimmed.length > 100 || !/^[A-Za-z0-9._:-]+$/.test(trimmed)) return null;
-  return trimmed;
 };
 
 /** Rejects non-epoch or far-future timestamps from a browser. */
@@ -196,7 +177,14 @@ export interface CreateServerOptions {
   store?: SessionStore;
   /** Disable Vite/static serving (API + WebSocket only test mode). */
   serveFrontend?: boolean;
-  /** Injected for tests so no real Ultravox call is created. */
+  /**
+   * Injected for tests so no real self-hosted AI call is created.
+   *
+   * `ultravoxFetch` is accepted as a deprecated alias so older test harnesses
+   * keep working; it has the same meaning.
+   */
+  aiServiceFetch?: typeof fetch;
+  /** @deprecated Use `aiServiceFetch`. */
   ultravoxFetch?: typeof fetch;
   /** Injected for tests so no real TURN credential provider is called. */
   turnFetch?: typeof fetch;
@@ -218,7 +206,7 @@ interface SocketState {
 
 export async function createPrototype2Server(options: CreateServerOptions = {}) {
   const store = options.store ?? new SessionStore();
-  const fetchImpl = options.ultravoxFetch ?? fetch;
+  const aiServiceFetch = options.aiServiceFetch ?? options.ultravoxFetch ?? fetch;
   const turnFetch = options.turnFetch ?? fetch;
   const turnCache = options.turnCache ?? new Map<string, ProviderIceResult>();
   const rstreamCache = options.rstreamCache ?? new Map<string, RstreamTurnResult>();
@@ -232,31 +220,9 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
 
   /**
    * One in-flight AI call creation per session. Two concurrent "reconnect"
-   * presses must not create (and pay for) two Ultravox calls.
+   * presses must not create (and pay for) two GPU calls.
    */
   const aiCallInFlight = new Set<string>();
-
-  /**
-   * Best-effort termination of a superseded Ultravox call so a replaced
-   * session stops consuming provider minutes. Never awaited on a path that can
-   * block the new call for long, and the call id/URL are never logged.
-   */
-  const endUltravoxCallQuietly = async (callId: string, apiKey: string): Promise<void> => {
-    try {
-      const response = await Promise.race([
-        fetchImpl(`https://api.ultravox.ai/api/calls/${encodeURIComponent(callId)}`, {
-          method: 'DELETE',
-          headers: { 'X-API-Key': apiKey },
-        }),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500)),
-      ]);
-      if (response && !response.ok) {
-        console.warn(`[ai] previous Ultravox call cleanup returned HTTP ${response.status}`);
-      }
-    } catch {
-      console.warn('[ai] previous Ultravox call cleanup failed (ignored).');
-    }
-  };
 
   const app = express();
   app.set('trust proxy', true);
@@ -416,14 +382,14 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       diagnostics,
       // Summary only: never include TURN credentials here.
       ice: turnSummary(),
-      hasUltravoxKey: Boolean(ultravoxApiKey()),
+      hasAiService: aiReadiness().ready,
       ai: aiReadiness(),
     });
   });
 
   /**
    * Redeems a customer invitation. Returns a session-scoped customer key that is
-   * required for the WebSocket join and for the Ultravox call request.
+   * required for the WebSocket join and for the AI call request.
    */
   app.post('/api/invitations/redeem', (req, res) => {
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
@@ -460,17 +426,18 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
   });
 
   /**
-   * Creates (or, when `replace` is true, replaces) the single Ultravox call for
-   * this session. Only the customer may fetch the join URL: it is a media
-   * credential.
+   * Creates (or, when `replace` is true, replaces) the single AI call for this
+   * session on the self-hosted service. Only the customer may fetch the join URL:
+   * it is a short-lived media credential that costs GPU time while connected.
    *
-   * Why replacement exists: an Ultravox call has a finite lifetime, and its
-   * join URL belongs to that call. Once the call's socket closes, the SDK
-   * cannot reconnect and the same join URL cannot revive the call. Reusing the
-   * cached record here was the reason "Reconnect" and new invitations could
-   * never restore the AI. A fresh call is the supported recovery.
+   * Why replacement exists: a call has a finite lifetime and its signed join URL
+   * belongs to that call. Once the socket closes, the same join URL cannot
+   * revive it, so "Reconnect" and new invitations must ask for a fresh call.
+   *
+   * `/ai-call` is the current path. `/ultravox-call` is kept as an alias for
+   * older clients; both share this single handler.
    */
-  app.post('/api/sessions/:sessionId/ultravox-call', async (req, res) => {
+  const createAiCallRoute = async (req: Request, res: Response) => {
     const session = store.getSession(req.params.sessionId);
     if (!session || store.isExpiredSession(session.sessionId)) {
       res.status(404).json({ error: 'SESSION_NOT_FOUND', message: 'Unknown or expired session.' });
@@ -481,7 +448,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     if (!isCustomer) {
       store.countSignal(session.sessionId, 'rejectedMessages');
       console.warn(
-        `[session:${session.sessionId.slice(0, 8)}] rejected Ultravox call request: not the session customer`
+        `[session:${session.sessionId.slice(0, 8)}] rejected AI call request: not the session customer`
       );
       res.status(403).json({
         error: 'FORBIDDEN',
@@ -498,86 +465,57 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
         joinUrl: existing.joinUrl,
         isReused: true,
         createdAt: existing.createdAt,
-        model: 'ultravox-v0.7',
+        model: aiReadiness().model,
       });
       return;
     }
 
-    const apiKey = ultravoxApiKey();
-    if (!apiKey) {
+    const settings = resolveAiServiceSettings(process.env);
+    if (!settings) {
       res.status(503).json({
-        error: 'MISSING_API_KEY',
-        message: 'The server is missing ULTRAVOX_API_KEY. Ask the operator to configure it.',
+        error: 'AI_SERVICE_NOT_CONFIGURED',
+        message:
+          'The server is missing AI_SERVICE_URL and/or AI_SERVICE_TOKEN. Ask the operator to configure the self-hosted AI service.',
       });
       return;
     }
 
     if (aiCallInFlight.has(session.sessionId)) {
       res.status(409).json({
-        error: 'ULTRAVOX_CALL_IN_PROGRESS',
+        error: 'AI_CALL_IN_PROGRESS',
         message: 'A new AI call is already being created for this session. Retry in a moment.',
       });
       return;
     }
     aiCallInFlight.add(session.sessionId);
 
-    // Forget the old record before contacting Ultravox: if creation fails, a
+    // Forget the old record before contacting the service: if creation fails, a
     // subsequent retry must not hand out the dead join URL again.
     const previous = replace ? store.clearUltravoxCall(session.sessionId) : null;
-    if (previous) void endUltravoxCallQuietly(previous.callId, apiKey);
+    if (previous) void endAiCallQuietly(aiServiceFetch, settings, previous.callId);
 
     // The prompt is operator-controlled: a customer must not be able to steer the
-    // paid model with arbitrary instructions.
+    // model with arbitrary instructions.
     const systemPrompt =
       'You are an AI sales copilot assisting a salesperson in a live sales call. Listen attentively to the customer statements, questions, and objections. Generate concise, natural, 1-2 sentence ready-to-read sales responses and qualification questions for the salesperson to read aloud.';
 
     try {
-      const response = await fetchImpl('https://api.ultravox.ai/api/calls', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-        body: JSON.stringify({
-          model: 'ultravox-v0.7',
-          initialOutputMedium: 'MESSAGE_MEDIUM_TEXT',
-          maxDuration: '3600s',
-          systemPrompt,
-          temperature: 0.1,
-        }),
+      const call = await createAiCall(aiServiceFetch, settings, {
+        sessionId: session.sessionId,
+        systemPrompt,
       });
-
-      if (!response.ok) {
-        const errText = await response.text().catch(() => '');
-        store.recordError(session.sessionId, `Ultravox HTTP ${response.status}`);
-        console.warn(
-          `[ai] Ultravox call creation failed for session ${session.sessionId.slice(0, 8)}: HTTP ${response.status}`
+      const callId = sanitizeAiCallId(call.callId);
+      if (!callId) {
+        throw new AiServiceError(
+          'AI_SERVICE_INVALID_RESPONSE',
+          502,
+          'The self-hosted AI service did not return a usable call id and join URL.'
         );
-        res.status(response.status).json({
-          error: 'ULTRAVOX_API_ERROR',
-          status: response.status,
-          message: `Ultravox API returned HTTP ${response.status}`,
-          details: sanitizeAiDetail(errText, 500),
-        });
-        return;
-      }
-
-      const data = (await response.json()) as { callId?: unknown; joinUrl?: unknown; model?: unknown };
-      const callId = sanitizeCallId(data.callId);
-      const joinUrl = typeof data.joinUrl === 'string' ? data.joinUrl.trim() : '';
-      const validJoinUrl = /^wss?:\/\/\S+$/i.test(joinUrl) && joinUrl.length <= 2048;
-      if (!callId || !validJoinUrl) {
-        store.recordError(session.sessionId, 'Ultravox returned an invalid call payload');
-        console.warn(
-          `[ai] Ultravox returned an unusable call payload for session ${session.sessionId.slice(0, 8)}`
-        );
-        res.status(502).json({
-          error: 'ULTRAVOX_INVALID_RESPONSE',
-          message: 'Ultravox did not return a usable call id and join URL.',
-        });
-        return;
       }
 
       store.setUltravoxCall(session.sessionId, {
         callId,
-        joinUrl,
+        joinUrl: call.joinUrl,
         createdAt: Date.now(),
         createdByParticipantId: session.customer?.participantId || 'unknown',
       });
@@ -593,26 +531,42 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
 
       res.json({
         callId,
-        joinUrl,
+        joinUrl: call.joinUrl,
         isReused: false,
         createdAt: Date.now(),
-        model: typeof data.model === 'string' ? data.model : 'ultravox-v0.7',
+        model: call.model,
       });
     } catch (err) {
-      store.recordError(session.sessionId, 'Ultravox request failed');
+      const failure =
+        err instanceof AiServiceError
+          ? err
+          : new AiServiceError(
+              'AI_SERVICE_UNREACHABLE',
+              502,
+              sanitizeProviderDetail((err as Error)?.message, 200) ||
+                'Failed to reach the self-hosted AI service.'
+            );
+
+      store.recordError(session.sessionId, `AI service: ${failure.code}`);
       console.warn(
-        `[ai] Ultravox request failed for session ${session.sessionId.slice(0, 8)}: ${
-          sanitizeAiDetail((err as Error)?.message, 160) || 'network error'
-        }`
+        `[ai] call creation failed for session ${session.sessionId.slice(0, 8)}: ${failure.code} (${
+          failure.status
+        })`
       );
-      res.status(502).json({
-        error: 'ULTRAVOX_UNREACHABLE',
-        message: sanitizeAiDetail((err as Error)?.message, 200) || 'Failed to reach Ultravox.',
+      res.status(failure.status).json({
+        error: failure.code,
+        status: failure.status,
+        message: failure.message,
+        ...(failure.detail ? { details: failure.detail } : {}),
       });
     } finally {
       aiCallInFlight.delete(session.sessionId);
     }
-  });
+  };
+
+  app.post('/api/sessions/:sessionId/ai-call', createAiCallRoute);
+  /** Deprecated alias kept for older clients; same handler, same rules. */
+  app.post('/api/sessions/:sessionId/ultravox-call', createAiCallRoute);
 
   // -------------------------------------------------------------------------
   // Shared session endpoints
@@ -741,9 +695,9 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     const ai = aiReadiness();
     res.json({
       status: 'ok',
-      model: 'ultravox-v0.7',
+      model: ai.model,
       ai,
-      hasUltravoxKey: ai.ready,
+      hasAiService: ai.ready,
       ice,
       hasTurn: ice.configured,
       iceTransportPolicy: ice.iceTransportPolicy,
@@ -1326,7 +1280,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
           state: aiState,
           connected,
           error: sanitizeAiDetail(data.error),
-          callId: sanitizeCallId(data.callId),
+          callId: sanitizeAiCallId(data.callId),
           reconnectAttempt:
             typeof data.reconnectAttempt === 'number' &&
             Number.isFinite(data.reconnectAttempt) &&

@@ -42,7 +42,7 @@ export default function App() {
           <div>
             <h1 className="text-sm font-bold text-slate-100 tracking-tight">Sales Copilot</h1>
             <p className="text-[10px] text-slate-400">
-              Ultravox Hosted API • Model: <span className="font-mono text-cyan-300">ultravox-v0.7</span>
+              Self-hosted AI • Model: <span className="font-mono text-cyan-300">qwen2.5-3b / whisper</span>
             </p>
           </div>
         </div>

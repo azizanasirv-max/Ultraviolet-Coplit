@@ -25,8 +25,17 @@ services:
         value: production
       - key: APP_URL
         sync: false
-      - key: ULTRAVOX_API_KEY
+      # Self-hosted AI model service on Modal (see docs/self-hosted-ai-modal.md).
+      # AI_SERVICE_URL is the public Modal app origin; AI_SERVICE_TOKEN must
+      # match the Modal secret AI_SERVICE_TOKEN. Both stay server-side.
+      - key: AI_SERVICE_URL
         sync: false
+      - key: AI_SERVICE_TOKEN
+        sync: false
+      - key: AI_SERVICE_MODEL
+        sync: false
+      - key: AI_MAX_CALL_SECONDS
+        value: '3600'
       # TURN relay. TURN_SECRET (coturn REST style, short-lived credentials) is
       # preferred; TURN_USERNAME + TURN_CREDENTIAL are the static fallback.
       - key: TURN_URLS

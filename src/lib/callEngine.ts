@@ -6,12 +6,12 @@
  *   - WebSocket signaling (join, offer/answer/ICE relay, AI text relay)
  *   - the single RTCPeerConnection used for salesperson <-> customer audio
  *   - microphone acquisition, mute, track recovery and diagnostics
- *   - the customer-side Ultravox session that feeds the AI pipeline
+ *   - the customer-side self-hosted AI session that feeds the AI pipeline
  *
  * Negotiation policy: the salesperson is always the offerer, the customer is
  * always the answerer. This removes glare by construction.
  */
-import { UltravoxSession, UltravoxSessionStatus, Role, Medium } from 'ultravox-client';
+import { AiSessionStatus, AiVoiceSession, Medium, Role, SelfHostedAiSession } from './aiSession';
 import {
   AI_RECONNECT_DELAYS_MS,
   AI_RECONNECT_MAX_ATTEMPTS,
@@ -97,7 +97,7 @@ export interface EngineSnapshot {
   speakerMuted: boolean;
   audioUnlocked: boolean;
   playbackBlocked: boolean;
-  aiStatus: UltravoxSessionStatus | AiLifecycleState;
+  aiStatus: AiSessionStatus | AiLifecycleState;
   aiError: string | null;
   /** Full AI lifecycle state (local for the customer, reported for the salesperson). */
   ai: AiStatus;
@@ -138,15 +138,15 @@ export interface CallEngineOptions {
   resumeToken?: string | null;
   apiBase?: string;
   onUpdate: (snapshot: EngineSnapshot) => void;
-  /** Customer only: start the Ultravox AI session after joining. */
+  /** Customer only: start the self-hosted AI session after joining. */
   enableAi?: boolean;
   /** Notified when the server rotates/returns the resume token. */
   onResumeToken?: (token: string) => void;
   /**
-   * Test seam: replace the real `UltravoxSession`. Production never sets this.
-   * The fake must implement the same subset of the SDK API.
+   * Test seam: replace the real `SelfHostedAiSession`. Production never sets
+   * this. The fake must implement the `AiVoiceSession` interface.
    */
-  createAiSession?: () => UltravoxSession;
+  createAiSession?: () => AiVoiceSession;
   /** Test seam: override automatic AI recovery backoff (ms per attempt). */
   aiRetryDelaysMs?: readonly number[];
   /** Test seam: backoff before each automatic ICE-restart attempt. */
@@ -352,8 +352,8 @@ export class CallEngine {
   private localStream: MediaStream | null = null;
   private remoteStream: MediaStream | null = null;
   private audioElement: HTMLAudioElement | null = null;
-  private ultravox: UltravoxSession | null = null;
-  private readonly createAiSession: () => UltravoxSession;
+  private aiVoice: AiVoiceSession | null = null;
+  private readonly createAiSession: () => AiVoiceSession;
 
   // Lifecycle flags
   private started = false;
@@ -491,7 +491,7 @@ export class CallEngine {
     this.apiBase = options.apiBase ?? '';
     this.resumeToken = options.resumeToken ?? null;
     this.silentClip = silentClipUrl();
-    this.createAiSession = options.createAiSession ?? (() => new UltravoxSession());
+    this.createAiSession = options.createAiSession ?? (() => new SelfHostedAiSession());
     this.ai = emptyAiStatus(options.role === 'customer' ? 'local' : 'remote');
   }
 
@@ -732,7 +732,7 @@ export class CallEngine {
   // -------------------------------------------------------------------------
   // Salesperson captions (browser SpeechRecognition -> signaling -> customer)
   //
-  // The salesperson's microphone is NOT sent to Ultravox and is NOT merged into
+  // The salesperson's microphone is NOT sent to the AI and is NOT merged into
   // the customer's AI audio path. Captions are produced locally by the browser's
   // speech recognizer and forwarded as text over the authenticated signaling
   // socket, which only relays them to the paired customer.
@@ -1142,10 +1142,10 @@ export class CallEngine {
     // The customer's microphone feeds two paths: the peer connection and the
     // AI. Muting must silence both, otherwise the AI keeps transcribing a
     // customer who believes they are muted.
-    if (this.options.role === 'customer' && this.ultravox) {
+    if (this.options.role === 'customer' && this.aiVoice) {
       try {
-        if (muted) this.ultravox.muteMic();
-        else if (this.ultravox.status !== UltravoxSessionStatus.DISCONNECTED) this.ultravox.unmuteMic();
+        if (muted) this.aiVoice.muteMic();
+        else if (this.aiVoice.status !== AiSessionStatus.DISCONNECTED) this.aiVoice.unmuteMic();
       } catch {
         // Ignore unsupported transitions before the AI session is live.
       }
@@ -1163,7 +1163,7 @@ export class CallEngine {
       this.ai = {
         ...this.ai,
         audioReachingAi:
-          this.ai.connected && !muted && Boolean(this.ultravox?.micSourceNode),
+          this.ai.connected && !muted && Boolean(this.aiVoice?.micSourceNode),
       };
       this.reportAiStatus();
     }
@@ -1214,7 +1214,7 @@ export class CallEngine {
 
   /**
    * Mobile browsers can end/mute the microphone track when a second capture
-   * starts (the customer device also runs the Ultravox AI session). Reacquire
+   * starts (the customer device also runs the self-hosted AI session). Reacquire
    * and replace the outbound track instead of silently going dead.
    */
   private async recoverLocalTrack(reason: string): Promise<void> {
@@ -2793,19 +2793,19 @@ export class CallEngine {
   }
 
   // -------------------------------------------------------------------------
-  // Customer-side AI pipeline (Ultravox)
+  // Customer-side AI pipeline (self-hosted model service)
   //
   // The customer device is the only place a microphone is published to the AI.
-  // The salesperson never publishes to Ultravox, so salesperson speech can
+  // The salesperson never publishes to the AI, so salesperson speech can
   // never enter the customer -> AI pipeline.
   // -------------------------------------------------------------------------
 
   /**
-   * Requests a genuinely new Ultravox call and connects a new SDK session.
+   * Requests a genuinely new AI call and connects a new AI session.
    *
-   * Replacement is the supported recovery path: Ultravox calls are finite, the
-   * SDK has no reconnect API, and a join URL belongs to one call. The server's
-   * cached call is never reused after a failure.
+   * Replacement is the supported recovery path: AI calls are finite, the
+   * transport has no reconnect API, and a join URL belongs to one call. The
+   * server's cached call is never reused after a failure.
    */
   private async startAi(options: { replace?: boolean; recovery?: boolean } = {}): Promise<void> {
     if (this.options.role !== 'customer' || !this.options.enableAi) return;
@@ -2816,7 +2816,7 @@ export class CallEngine {
     }
     // The signaling socket reconnects independently of the AI. If the SDK
     // session is still live, keep it instead of creating a new (paid) call.
-    if (!options.replace && this.ultravox && this.ai.connected) {
+    if (!options.replace && this.aiVoice && this.ai.connected) {
       this.log('AI session is already connected; not creating another one.');
       return;
     }
@@ -2852,7 +2852,7 @@ export class CallEngine {
     try {
       this.log('Requesting a new AI call from the server...');
       const response = await fetch(
-        `${this.apiBase}/api/sessions/${encodeURIComponent(this.options.sessionId)}/ultravox-call`,
+        `${this.apiBase}/api/sessions/${encodeURIComponent(this.options.sessionId)}/ai-call`,
         {
           method: 'POST',
           headers: {
@@ -2891,12 +2891,12 @@ export class CallEngine {
 
       this.log(`New AI call created (${String(call.callId).slice(0, 8)}).`);
       const session = this.createAiSession();
-      this.ultravox = session;
+      this.aiVoice = session;
       this.aiEverConnected = false;
       this.aiConnectedSince = null;
       this.setAi({
         state: 'connecting',
-        status: UltravoxSessionStatus.CONNECTING,
+        status: AiSessionStatus.CONNECTING,
         connected: false,
         error: null,
         callId: call.callId,
@@ -2904,12 +2904,12 @@ export class CallEngine {
         lastEventAt: Date.now(),
       });
 
-      const isStale = () => generation !== this.aiGeneration || this.ultravox !== session;
+      const isStale = () => generation !== this.aiGeneration || this.aiVoice !== session;
 
       session.addEventListener('status', () => {
         if (isStale()) return; // a previous session must not change this state
         const status = session.status;
-        if (status === UltravoxSessionStatus.DISCONNECTED) {
+        if (status === AiSessionStatus.DISCONNECTED) {
           this.failAiSession(
             generation,
             'closed',
@@ -2919,7 +2919,7 @@ export class CallEngine {
           );
           return;
         }
-        if (status === UltravoxSessionStatus.DISCONNECTING) {
+        if (status === AiSessionStatus.DISCONNECTING) {
           this.setAi({
             state: 'disconnected',
             status,
@@ -2936,7 +2936,7 @@ export class CallEngine {
           this.aiEverConnected = true;
           if (this.aiConnectedSince === null) this.aiConnectedSince = Date.now();
           this.clearAiConnectTimer();
-          if (status === UltravoxSessionStatus.LISTENING || status === UltravoxSessionStatus.IDLE) {
+          if (status === AiSessionStatus.LISTENING || status === AiSessionStatus.IDLE) {
             try {
               // Text-only output: the AI must not speak over the salesperson.
               session.setOutputMedium(Medium.TEXT);
@@ -3056,7 +3056,7 @@ export class CallEngine {
     // live, otherwise the lifecycle state. "Connected" therefore cannot be
     // rendered unless the SDK actually reported a live session.
     this.aiStatus = isLiveAiStatus(this.ai.status)
-      ? (this.ai.status as UltravoxSessionStatus)
+      ? (this.ai.status as AiSessionStatus)
       : this.ai.state;
     this.aiError = this.ai.error;
     this.emit();
@@ -3118,7 +3118,7 @@ export class CallEngine {
    * Tears down one SDK session without letting a broken transport delay the
    * human call. The session's callbacks are already invalidated by the caller.
    */
-  private leaveAiSession(session: UltravoxSession): void {
+  private leaveAiSession(session: AiVoiceSession): void {
     void Promise.race([
       Promise.resolve()
         .then(() => session.leaveCall())
@@ -3129,8 +3129,8 @@ export class CallEngine {
 
   private async teardownAiSession(reason: string): Promise<void> {
     this.clearAiConnectTimer();
-    const session = this.ultravox;
-    this.ultravox = null;
+    const session = this.aiVoice;
+    this.aiVoice = null;
     if (!session) return;
     this.log(`Closing the previous AI session (${reason}).`);
     await Promise.race([
@@ -3144,11 +3144,11 @@ export class CallEngine {
   /** Marks the current session dead, then performs a bounded recovery. */
   private failAiSession(generation: number, state: 'error' | 'closed', message: string): void {
     if (generation !== this.aiGeneration) return;
-    const session = this.ultravox;
+    const session = this.aiVoice;
     // Invalidate first: DISCONNECTED always follows an error event, and it must
     // not start a second recovery for the same failure.
     this.aiGeneration += 1;
-    this.ultravox = null;
+    this.aiVoice = null;
     this.clearAiConnectTimer();
     this.aiConnectedSince = null;
     if (session) this.leaveAiSession(session);
@@ -3236,7 +3236,7 @@ export class CallEngine {
     }
     this.aiRecoveryAttempt = 0;
     this.clearAiRecoveryTimer();
-    this.log('Manual AI restart requested; a brand new Ultravox call will be created.');
+    this.log('Manual AI restart requested; a brand new AI call will be created.');
     await this.startAi({ replace: true });
   }
 
@@ -3265,8 +3265,8 @@ export class CallEngine {
     this.clearAiConnectTimer();
     this.aiRecoveryAttempt = 0;
     this.aiConnectedSince = null;
-    const session = this.ultravox;
-    this.ultravox = null;
+    const session = this.aiVoice;
+    this.aiVoice = null;
     if (session) this.leaveAiSession(session);
     this.setAi(
       {

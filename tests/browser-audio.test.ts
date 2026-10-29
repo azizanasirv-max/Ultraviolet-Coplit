@@ -15,7 +15,8 @@ import { Browser, BrowserContext, Page, chromium } from 'playwright';
 import WebSocket from 'ws';
 
 process.env.NODE_ENV = 'production';
-process.env.ULTRAVOX_API_KEY = 'test-ultravox-key';
+process.env.AI_SERVICE_URL = 'https://ai.invalid';
+process.env.AI_SERVICE_TOKEN = 'test-ai-token';
 
 /** Chromium's shared libraries were unpacked locally (no root in this sandbox). */
 const collectLibraryDirs = (): string[] => {
@@ -48,13 +49,13 @@ if (fs.existsSync(fontConfig)) process.env.FONTCONFIG_FILE = fontConfig;
 // Imported after NODE_ENV is set so the server serves the production build.
 const { createPrototype2Server } = await import('../server');
 
-// Never contact the real Ultravox API from automated tests.
-let ultravoxCallRequests = 0;
-const fakeUltravoxFetch = (async () => {
-  ultravoxCallRequests += 1;
+// Never contact the real AI service from automated tests.
+let aiCallRequests = 0;
+const fakeAiServiceFetch = (async () => {
+  aiCallRequests += 1;
   return new Response(
     JSON.stringify({
-      callId: `call_browser_${ultravoxCallRequests}`,
+      callId: `call_browser_${aiCallRequests}`,
       joinUrl: 'wss://ai.invalid/join',
     }),
     { status: 200, headers: { 'Content-Type': 'application/json' } }
@@ -143,7 +144,7 @@ const launchBrowser = (): Promise<Browser> =>
   });
 
 test('prototype2 role-specific interfaces', async (t) => {
-  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, aiServiceFetch: fakeAiServiceFetch });
   const base = `http://127.0.0.1:${server.port}`;
   const browser = await launchBrowser();
   t.after(async () => {
@@ -232,7 +233,7 @@ test('prototype2 role-specific interfaces', async (t) => {
 });
 
 test('prototype2 three-path audio with synthetic media', async (t) => {
-  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, aiServiceFetch: fakeAiServiceFetch });
   const base = `http://127.0.0.1:${server.port}`;
   const browser = await launchBrowser();
   t.after(async () => {
@@ -356,7 +357,7 @@ test('prototype2 three-path audio with synthetic media', async (t) => {
   });
 
   await t.test('AI session failure is isolated from the human audio path and visible to the salesperson', async () => {
-    // No reachable Ultravox in this environment: the customer AI request must
+    // No reachable AI service in this environment: the customer AI request must
     // fail visibly, while peer audio keeps flowing.
     const customer = await snapshot(customerPage);
     assert.ok(
@@ -394,17 +395,17 @@ test('prototype2 three-path audio with synthetic media', async (t) => {
   await t.test('a salesperson AI restart requests a fresh call without interrupting the audio call', async () => {
     const before = await snapshot(salespersonPage);
     assert.equal(before.callState, 'connected');
-    const callsBefore = ultravoxCallRequests;
+    const callsBefore = aiCallRequests;
 
     await salespersonPage.click('[data-testid="ai-reconnect"]');
     await waitFor(
-      () => Promise.resolve(ultravoxCallRequests > callsBefore),
+      () => Promise.resolve(aiCallRequests > callsBefore),
       (advanced) => advanced === true,
       15000
     );
 
-    // A genuinely new Ultravox call was requested (replace=true path).
-    assert.ok(ultravoxCallRequests > callsBefore, 'a new AI call was requested');
+    // A genuinely new AI call was requested (replace=true path).
+    assert.ok(aiCallRequests > callsBefore, 'a new AI call was requested');
 
     // The human call is untouched by the AI restart.
     const after = await snapshot(salespersonPage);
@@ -458,7 +459,7 @@ test('prototype2 three-path audio with synthetic media', async (t) => {
 
   await t.test('AI response text reaches this salesperson dashboard', async () => {
     // The customer leaves so a protocol-level customer connection can stand in
-    // for the Ultravox agent. This exercises the real server route and the real
+    // for the AI agent. This exercises the real server route and the real
     // salesperson UI render path (text relay: customer -> server -> dashboard).
     await customerPage.click('[data-testid="leave-call"]');
     await sleep(400);
@@ -537,7 +538,7 @@ test('prototype2 three-path audio with synthetic media', async (t) => {
 
   await t.test('no unexpected page errors were logged', async () => {
     const relevant = consoleErrors.filter(
-      (text) => !/favicon|Ultravox|Failed to load resource|net::ERR/i.test(text)
+      (text) => !/favicon|Failed to load resource|net::ERR/i.test(text)
     );
     assert.deepEqual(relevant, []);
   });
@@ -580,7 +581,7 @@ const applyIceEnv = (values: Partial<Record<(typeof ICE_ENV_KEYS)[number], strin
 };
 
 test('prototype2 a rotated invitation starts a fresh AI call', async (t) => {
-  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, aiServiceFetch: fakeAiServiceFetch });
   const base = `http://127.0.0.1:${server.port}`;
   const browser = await launchBrowser();
   t.after(async () => {
@@ -621,7 +622,7 @@ test('prototype2 a rotated invitation starts a fresh AI call', async (t) => {
   await salesPage.click('[data-testid="show-invitation"]');
   await salesPage.waitForSelector('[data-testid="salesperson-invite-url"]', { timeout: 20000 });
   const previousInvite = await salesPage.inputValue('[data-testid="salesperson-invite-url"]');
-  const callsBeforeRotation = ultravoxCallRequests;
+  const callsBeforeRotation = aiCallRequests;
   await salesPage.click('[data-testid="regenerate-invite"]');
   await salesPage.waitForFunction(
     (oldUrl) => {
@@ -653,7 +654,7 @@ test('prototype2 a rotated invitation starts a fresh AI call', async (t) => {
     30000
   );
   assert.notEqual(secondConnected.ai.callId, firstCallId, 'a new AI call was created');
-  assert.ok(ultravoxCallRequests > callsBeforeRotation, 'the server created another Ultravox call');
+  assert.ok(aiCallRequests > callsBeforeRotation, 'the server created another AI call');
   assert.equal(secondConnected.ai.connected, false, 'unreachable provider is not reported as connected');
 
   // The salesperson dashboard reflects the new session and keeps human audio.
@@ -676,7 +677,7 @@ test('TURN configuration is fetched with session auth and applied to every peer 
     ICE_TRANSPORT_POLICY: 'all',
     STUN_URLS: null,
   });
-  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, aiServiceFetch: fakeAiServiceFetch });
   const base = `http://127.0.0.1:${server.port}`;
   const browser = await launchBrowser();
   asyncTest.after(async () => {
@@ -769,7 +770,7 @@ test('relay-only policy is applied and never reported as working audio without r
     ICE_TRANSPORT_POLICY: 'relay',
     STUN_URLS: null,
   });
-  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, aiServiceFetch: fakeAiServiceFetch });
   const base = `http://127.0.0.1:${server.port}`;
   const browser = await launchBrowser();
   asyncTest.after(async () => {
@@ -833,7 +834,7 @@ test('relay-only mode without TURN refuses to start instead of silently using ST
     ICE_TRANSPORT_POLICY: 'relay',
     STUN_URLS: null,
   });
-  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, aiServiceFetch: fakeAiServiceFetch });
   const base = `http://127.0.0.1:${server.port}`;
   const browser = await launchBrowser();
   asyncTest.after(async () => {
@@ -878,7 +879,7 @@ test('relay-only mode without TURN refuses to start instead of silently using ST
  * Loopback Chromium is not proof of NAT traversal.
  */
 test('presence refresh flood during real Chromium negotiation leaves one healthy connection (smoke)', async (t) => {
-  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, aiServiceFetch: fakeAiServiceFetch });
   const base = `http://127.0.0.1:${server.port}`;
   const browser = await launchBrowser();
   t.after(async () => {
@@ -906,7 +907,7 @@ test('presence refresh flood during real Chromium negotiation leaves one healthy
   // Flood server presence broadcasts while ICE/DTLS is still being set up.
   const presenceFlood = (async () => {
     for (let index = 0; index < 12; index += 1) {
-      await fetch(`${base}/api/sessions/${credentials.sessionId}/ultravox-call`, {
+      await fetch(`${base}/api/sessions/${credentials.sessionId}/ai-call`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1000,7 +1001,7 @@ test('customer never sees technical errors when the ICE configuration request ke
     ICE_TRANSPORT_POLICY: 'all',
     STUN_URLS: null,
   });
-  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, aiServiceFetch: fakeAiServiceFetch });
   const base = `http://127.0.0.1:${server.port}`;
   const browser = await launchBrowser();
   t.after(async () => {
@@ -1058,7 +1059,7 @@ test('relay-only ICE failure shows the customer a plain message after recovery i
     ICE_TRANSPORT_POLICY: 'relay',
     STUN_URLS: null,
   });
-  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, aiServiceFetch: fakeAiServiceFetch });
   const base = `http://127.0.0.1:${server.port}`;
   const browser = await launchBrowser();
   t.after(async () => {
@@ -1297,7 +1298,7 @@ test('prototype2 participant audio is non-silent in both directions and independ
   const server = await createPrototype2Server({
     port: 0,
     serveFrontend: true,
-    ultravoxFetch: fakeUltravoxFetch,
+    aiServiceFetch: fakeAiServiceFetch,
   });
   const base = `http://127.0.0.1:${server.port}`;
   const salesBrowser = await launchToneBrowser(salesWav);
@@ -1315,13 +1316,13 @@ test('prototype2 participant audio is non-silent in both directions and independ
 
   // Which page asked the server to create an AI call. Only the customer device
   // is allowed to; the salesperson microphone must never be forwarded to the AI.
-  const ultravoxRequests: Array<{ url: string; page: string }> = [];
+  const aiCallRequestsByPage: Array<{ url: string; page: string }> = [];
   for (const [page, label] of [
     [salespersonPage, 'salesperson'],
     [customerPage, 'customer'],
   ] as Array<[Page, string]>) {
     page.on('request', (request) => {
-      if (request.url().includes('/ultravox-call')) ultravoxRequests.push({ url: request.url(), page: label });
+      if (request.url().includes('/ai-call')) aiCallRequestsByPage.push({ url: request.url(), page: label });
     });
   }
 
@@ -1390,14 +1391,14 @@ test('prototype2 participant audio is non-silent in both directions and independ
   });
 
   await t.test('the AI path is separate: its capture is not the participant audio path', async () => {
-    // The customer device is the only one that may start an Ultravox session.
+    // The customer device is the only one that may start an AI session.
     assert.equal(
-      ultravoxRequests.filter((entry) => entry.page === 'salesperson').length,
+      aiCallRequestsByPage.filter((entry) => entry.page === 'salesperson').length,
       0,
-      'the salesperson device must never request an Ultravox call'
+      'the salesperson device must never request an AI call'
     );
     assert.ok(
-      ultravoxRequests.some((entry) => entry.page === 'customer'),
+      aiCallRequestsByPage.some((entry) => entry.page === 'customer'),
       'the customer device must still request the AI call'
     );
 
@@ -1425,7 +1426,7 @@ test('prototype2 participant audio is non-silent in both directions and independ
         peak,
         tracks: stream.getAudioTracks().map((track) => track.readyState),
       };
-      // Exactly what UltravoxSession.leaveCall() does to its local track.
+      // Exactly what the AI session teardown does to its local track.
       stream.getTracks().forEach((track) => track.stop());
       await context.close();
       return info;
@@ -1433,7 +1434,7 @@ test('prototype2 participant audio is non-silent in both directions and independ
     assert.ok(aiCapture.peak > 0.02, 'the AI capture must receive the customer microphone');
     assert.deepEqual(aiCapture.tracks, ['live']);
 
-    // An AI failure (this environment has no reachable Ultravox) must not end
+    // An AI failure (this environment has no reachable AI service) must not end
     // the human call: it stays connected and audio keeps flowing.
     const customer = await waitFor(
       () => snapshot(customerPage),
@@ -1526,7 +1527,7 @@ test('prototype2 participant audio is non-silent in both directions and independ
 });
 
 test('main app exposes Admin Settings and no Standalone or Prototype 1 UI', async (t) => {
-  const server = await createPrototype2Server({ port: 0, serveFrontend: true, ultravoxFetch: fakeUltravoxFetch });
+  const server = await createPrototype2Server({ port: 0, serveFrontend: true, aiServiceFetch: fakeAiServiceFetch });
   const base = `http://127.0.0.1:${server.port}`;
   const browser = await launchBrowser();
   t.after(async () => {

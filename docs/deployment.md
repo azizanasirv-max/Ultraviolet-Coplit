@@ -69,7 +69,10 @@ starts the Vite dev server when `NODE_ENV=production`; the server then serves
 | --- | --- | --- |
 | `NODE_ENV` | yes | `production` |
 | `APP_URL` | yes | Public `https://<service>.onrender.com`; used to build invite links. Health warns if missing/non-https/localhost. |
-| `ULTRAVOX_API_KEY` | for AI | Server-side only. The app starts, serves `/sales`, `/join` and human audio without it; AI requests return `503 MISSING_API_KEY`. |
+| `AI_SERVICE_URL` | for AI | Public origin of the self-hosted Modal app (e.g. `https://<workspace>--sales-copilot-ai-web.modal.run`). See [self-hosted-ai-modal.md](./self-hosted-ai-modal.md). |
+| `AI_SERVICE_TOKEN` | for AI | Server-side only; must equal the Modal secret `AI_SERVICE_TOKEN`. Never sent to browsers. |
+| `AI_SERVICE_MODEL` | optional | Label shown in `/api/health`; the models are chosen in the Modal app. |
+| `AI_MAX_CALL_SECONDS` | optional | Upper bound requested per AI call (max 3600). |
 | `TURN_URLS` | for relay | Comma-separated `turn:`/`turns:` URLs. |
 | `TURN_SECRET` | preferred auth | coturn `use-auth-secret` (TURN REST). Server mints per-session, expiring credentials. |
 | `TURN_TTL_SECONDS` | optional | Lifetime of minted credentials / provider TTL request (default 3600). |
@@ -381,23 +384,36 @@ configured correctly; STUN-only success proves nothing about mobile/CGNAT peers.
    and `media flowing: yes (RTP received)` in both directions. Only then is TURN
    verified; the automated tests use mocks and cannot prove relay media.
 
-## 6. AI session lifecycle deployment notes
+## 6. AI service deployment notes (self-hosted Modal)
 
-The AI recovery fix does **not** add or rename environment variables. Keep the
-existing `ULTRAVOX_API_KEY` (server-side only). No TURN change is involved.
+The hosted Ultravox dependency has been replaced by a self-hosted model service
+deployed on Modal. Full instructions, cost notes and a device verification
+checklist are in [self-hosted-ai-modal.md](./self-hosted-ai-modal.md).
 
-A redeploy of this branch is required for the fix to take effect. After the
-deploy:
+Required on Render:
 
-1. `GET /api/health` should still report `ai.ready: true`. This only means the
-   server can create calls — it is not proof of a live session.
-2. On `/sales`, the **AI copilot status** panel (and header chip) must move
-   through *Creating AI session → Connecting AI → AI connected* only when the
-   customer device actually reports a live Ultravox session.
+- `AI_SERVICE_URL` — the Modal app origin (https, no path).
+- `AI_SERVICE_TOKEN` — the same value as the Modal secret `AI_SERVICE_TOKEN`.
+
+`ULTRAVOX_API_KEY` is no longer read; remove it from Render. Human-to-human
+audio, sessions, invitations, TURN/Admin Settings and authentication are
+unchanged and do not depend on the AI service.
+
+After deploying:
+
+1. `GET /api/health` reports `ai.ready: true` **only** when both variables are
+   valid. That is configuration, not proof that the Modal app is reachable or
+   that audio streams.
+2. On `/sales`, the **AI copilot status** panel (and header chip) moves through
+   *Creating AI session → Connecting AI → AI connected* only when the customer
+   device reports a live session from the self-hosted service.
 3. Server logs contain `[ai] ...` lines for failures and superseded-call cleanup.
-   They never contain the API key, a join URL, or a token.
-4. Ultravox calls are capped at `maxDuration: 3600s`. When a call ends, the
-   customer device creates a new one (bounded to 3 automatic attempts); the
-   salesperson can press **Restart AI** to force another fresh call without
-   interrupting the human audio call.
+   They never contain the service token, a join URL or a call secret.
+4. AI calls are capped at one hour (`AI_MAX_CALL_SECONDS`, maximum 3600). When a
+   call ends, the customer device creates a new one (bounded to 3 automatic
+   attempts); the salesperson can press **Restart AI** to force a fresh call
+   without interrupting the human audio call.
+5. Streaming audio to the deployed service has **not** been verified in
+   automated tests. Run the checklist in section 7 of
+   [self-hosted-ai-modal.md](./self-hosted-ai-modal.md) before a real call.
 

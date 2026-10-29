@@ -9,7 +9,7 @@ export interface SessionPublicState {
   customerConnected: boolean;
   invitationStatus: 'active' | 'redeemed' | 'revoked' | 'expired' | 'missing';
   invitationExpiresAt: number | null;
-  /** A server-side Ultravox call record exists (not proof of a live session). */
+  /** A server-side AI call record exists (not proof of a live session). */
   aiReady: boolean;
   aiCallCreated: boolean;
   /** Live AI state reported by the customer device. */
@@ -96,12 +96,15 @@ export interface SessionDiagnosticsResponse {
   };
   ai: {
     ready: boolean;
+    /** 'modal-self-hosted': the server only reports configuration, not liveness. */
     provider: string;
     model: string;
+    /** Missing environment variable names; never values. */
     missing: string[];
     message: string;
+    transport?: string;
   };
-  hasUltravoxKey: boolean;
+  hasAiService: boolean;
 }
 
 export interface HealthResponse {
@@ -113,8 +116,9 @@ export interface HealthResponse {
     model: string;
     missing: string[];
     message: string;
+    transport?: string;
   };
-  hasUltravoxKey: boolean;
+  hasAiService: boolean;
   ice: {
     configured: boolean;
     credentialMode: 'ephemeral' | 'static' | 'provider' | 'none';
