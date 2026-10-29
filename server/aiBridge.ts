@@ -103,10 +103,7 @@ interface BridgeRuntime {
   error: string | null;
   reconnectAttempt: number;
   ended: boolean;
-  createdAt: number;
   lastMessageAt: number;
-  lastAudioAt: number | null;
-  audioBytes: number;
   audioReachingAi: boolean;
   lastResponseAt: number | null;
   lastSuggestionAt: number | null;
@@ -206,12 +203,19 @@ export class AiBridgeManager {
     }
 
     const existing = this.runtimes.get(sessionId);
-    if (existing && !existing.ended && isOpen(existing.socket)) {
-      return {
-        callId: existing.callId ?? '',
-        model: existing.model ?? settings.model,
-        reused: true,
-      };
+    if (existing && !existing.ended) {
+      // Reuse a live socket, or one that is still being established. Anything
+      // else is dead: terminate it before a replacement is created so its
+      // timers can never resurrect an orphaned upstream call.
+      const establishing = existing.state === 'connecting' && existing.socket !== null;
+      if (isOpen(existing.socket) || establishing) {
+        return {
+          callId: existing.callId ?? '',
+          model: existing.model ?? settings.model,
+          reused: true,
+        };
+      }
+      this.end(sessionId, 'replaced');
     }
 
     const inFlight = this.pending.get(sessionId);
@@ -240,8 +244,6 @@ export class AiBridgeManager {
     } catch {
       return false;
     }
-    runtime.audioBytes += pcm.length;
-    runtime.lastAudioAt = this.now();
     if (!runtime.audioReachingAi) {
       runtime.audioReachingAi = true;
       this.emitStatus(runtime);
@@ -346,10 +348,7 @@ export class AiBridgeManager {
       error: null,
       reconnectAttempt: 0,
       ended: false,
-      createdAt: this.now(),
       lastMessageAt: this.now(),
-      lastAudioAt: null,
-      audioBytes: 0,
       audioReachingAi: false,
       lastResponseAt: null,
       lastSuggestionAt: null,
@@ -539,7 +538,11 @@ export class AiBridgeManager {
       runtime.expiryTimer = setTimeout(() => {
         if (runtime.ended) return;
         runtime.error = 'The AI call reached its maximum duration.';
-        this.end(runtime.sessionId, 'max-duration');
+        runtime.state = 'error';
+        runtime.audioReachingAi = false;
+        // Keep the error visible instead of overwriting it with `off`.
+        this.emitStatus(runtime);
+        this.end(runtime.sessionId, 'max-duration', { silent: true });
       }, remaining);
       (runtime.expiryTimer as unknown as { unref?: () => void }).unref?.();
     }
@@ -586,7 +589,6 @@ export class AiBridgeManager {
       runtime.model = call.model;
       runtime.expiresAt = call.expiresAt;
       runtime.error = null;
-      runtime.audioBytes = 0;
       runtime.audioReachingAi = false;
       this.connect(runtime, call.joinUrl);
       this.emitStatus(runtime);

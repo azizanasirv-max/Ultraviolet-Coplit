@@ -119,25 +119,32 @@ test('one live upstream call per room, reused until it is actually open', async 
   const socket = FakeSocket.instances[0];
   assert.ok(socket);
 
-  // The socket is not open yet: a retry must create a new call rather than hand
-  // out a dead upstream.
-  const second = await manager.ensure('room-a');
-  assert.equal(second.callId, 'call_2');
-  assert.equal(FakeSocket.instances.length, 2);
+  // While the upstream is still being established, a retry reuses it: two
+  // "reconnect" presses must not create two paid calls.
+  const pending = await manager.ensure('room-a');
+  assert.equal(pending.callId, 'call_1');
+  assert.equal(pending.reused, true);
+  assert.equal(FakeSocket.instances.length, 1);
 
-  const live = FakeSocket.instances[1];
-  live.open();
-  live.message({ type: 'ready' });
+  socket.open();
+  socket.message({ type: 'ready' });
   const reused = await manager.ensure('room-a');
-  assert.equal(reused.callId, 'call_2');
+  assert.equal(reused.callId, 'call_1');
   assert.equal(reused.reused, true);
+  assert.equal(FakeSocket.instances.length, 1);
+
+  // A dead upstream is replaced, never handed out again.
+  socket.close(1006, 'network');
+  const replacement = await manager.ensure('room-a');
+  assert.equal(replacement.callId, 'call_2');
+  assert.equal(replacement.reused, false);
   assert.equal(FakeSocket.instances.length, 2);
 
   // Status is observable and never contains the upstream URL or token.
-  const status = lastStatus(events);
-  assert.ok(status);
-  assert.equal(status.state, 'listening');
-  assert.equal(status.connected, true);
+  const statuses = events
+    .filter((entry) => entry.event.type === 'status')
+    .map((entry) => entry.event as Extract<AiBridgeEvent, { type: 'status' }>);
+  assert.ok(statuses.some((status) => status.state === 'listening' && status.connected));
   assert.doesNotMatch(JSON.stringify(events), /ai\.example|sig=secret|server-token/);
 });
 

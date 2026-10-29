@@ -2693,6 +2693,17 @@ export class CallEngine {
         : 'error';
       this.applyRemoteAi({
         state,
+        activity: (['idle', 'connecting', 'listening', 'generating', 'error'] as string[]).includes(
+          String(data.activity)
+        )
+          ? (data.activity as AiStatus['activity'])
+          : state === 'connected'
+            ? 'listening'
+            : state === 'error'
+              ? 'error'
+              : state === 'off'
+                ? 'idle'
+                : 'connecting',
         status: null,
         connected: data.connected === true && state === 'connected',
         error: sanitizeAiDetail(data.error),
@@ -3043,6 +3054,16 @@ export class CallEngine {
     const state = rawState as AiStatus['state'];
     this.applyRemoteAi({
       state,
+      activity:
+        state === 'connected'
+          ? this.ai.activity === 'generating'
+            ? 'generating'
+            : 'listening'
+          : state === 'error'
+            ? 'error'
+            : state === 'off' || state === 'disconnected' || state === 'closed'
+              ? 'idle'
+              : 'connecting',
       connected: runtime.connected === true && state === 'connected',
       status: null,
       error: sanitizeAiDetail(runtime.error),

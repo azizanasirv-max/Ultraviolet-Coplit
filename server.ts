@@ -326,8 +326,26 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     return { sessionId: ticket.sessionId, role: ticket.role };
   };
 
+  /**
+   * Origin of THIS request, not APP_URL: the AI socket is same-origin by
+   * design, so it must match the page the customer actually loaded (including
+   * localhost development). APP_URL is still used for invitation links.
+   */
+  const requestOrigin = (req: Request): string => {
+    const forwardedProto = req.headers['x-forwarded-proto'];
+    const proto =
+      (typeof forwardedProto === 'string' ? forwardedProto.split(',')[0].trim() : '') ||
+      (req.secure ? 'https' : 'http');
+    const forwardedHost = req.headers['x-forwarded-host'];
+    const host =
+      (typeof forwardedHost === 'string' ? forwardedHost.split(',')[0].trim() : '') ||
+      req.headers.host ||
+      'localhost';
+    return `${proto}://${host}`;
+  };
+
   const aiSocketUrlFor = (req: Request, token: string): string =>
-    `${publicBaseUrl(req).replace(/^http/i, 'ws')}/ws/ai?ticket=${encodeURIComponent(token)}`;
+    `${requestOrigin(req).replace(/^http/i, 'ws')}/ws/ai?ticket=${encodeURIComponent(token)}`;
 
   const sendSalesperson = (session: SessionRecord, payload: unknown): boolean => {
     const salesperson = session.salesperson;
@@ -371,6 +389,16 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       sendSalesperson(session, {
         type: 'ai_status',
         state: lifecycle,
+        activity:
+          event.state === 'thinking'
+            ? 'generating'
+            : event.state === 'listening'
+              ? 'listening'
+              : event.state === 'error'
+                ? 'error'
+                : event.state === 'connecting' || event.state === 'reconnecting'
+                  ? 'connecting'
+                  : 'idle',
         connected: event.connected,
         listening: event.listening,
         error: event.error,
@@ -549,7 +577,8 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       reconnectAttempt: 0,
     });
 
-    const MAX_AUDIO_BYTES = Math.max(1, Number(process.env.AI_MAX_CALL_SECONDS) || 3600) * 16000 * 2;
+    const maxSeconds = Math.min(3600, Math.max(1, Number(process.env.AI_MAX_CALL_SECONDS) || 3600));
+    const MAX_AUDIO_BYTES = maxSeconds * 16000 * 2;
     let started = false;
     let audioBytes = 0;
     let ended = false;

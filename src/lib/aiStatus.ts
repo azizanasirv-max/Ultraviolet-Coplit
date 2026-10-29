@@ -28,8 +28,12 @@ export type AiLifecycleState =
   /** Setup or the live session failed; `error` explains what happened. */
   | 'error';
 
+export type AiActivity = 'idle' | 'connecting' | 'listening' | 'generating' | 'error';
+
 export interface AiStatus {
   state: AiLifecycleState;
+  /** Finer server-reported activity: listening, generating, or error. */
+  activity: AiActivity;
   /** Raw transport status while a session object exists. */
   status: AiSessionStatus | null;
   /** True only while the transport reports a live session. */
@@ -63,6 +67,7 @@ export const AI_RECONNECT_DELAYS_MS = [1500, 4000, 9000] as const;
 
 export const emptyAiStatus = (source: AiStatus['source'] = 'local'): AiStatus => ({
   state: 'off',
+  activity: 'idle',
   status: null,
   connected: false,
   error: null,
@@ -80,6 +85,16 @@ export const emptyAiStatus = (source: AiStatus['source'] = 'local'): AiStatus =>
 /** Statuses that only arrive after the audio transport is live. */
 export const isLiveAiStatus = (status: AiSessionStatus | null): boolean =>
   isLiveAiSessionStatus(status);
+
+export const aiActivityLabel = (activity: AiActivity): string => {
+  switch (activity) {
+    case 'connecting': return 'Connecting to the model';
+    case 'listening': return 'Listening to the customer';
+    case 'generating': return 'Generating a suggestion';
+    case 'error': return 'Error';
+    default: return 'Idle';
+  }
+};
 
 export type AiTone = 'emerald' | 'amber' | 'red' | 'slate' | 'indigo';
 

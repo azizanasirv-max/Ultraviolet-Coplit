@@ -4,7 +4,7 @@ import {
   PhoneOff, RefreshCw, Sparkles, Volume2, VolumeX, Activity, UserRound,
 } from 'lucide-react';
 import { CallEngine, EngineSnapshot, ParticipantRole } from '../../lib/callEngine';
-import { aiStateLabel, aiTone, AiLifecycleState } from '../../lib/aiStatus';
+import { aiActivityLabel, aiStateLabel, aiTone, AiLifecycleState } from '../../lib/aiStatus';
 import {
   ApiError, CreatedSession, SessionDiagnosticsResponse, SessionPublicState,
   createSession, getSession, getSessionDiagnostics, rotateInvitation,
@@ -399,6 +399,9 @@ export const SalespersonDashboard: React.FC = () => {
       reconnectAttempt: reported?.reconnectAttempt ?? polled?.reconnectAttempt ?? 0,
       maxReconnectAttempts: reported?.maxReconnectAttempts ?? 3,
       audioReachingAi: Boolean((reported ? reported.audioReachingAi : polled?.audioReachingAi) && state === 'connected'),
+      activity: aiActivityLabel(
+        reported?.activity ?? (state === 'connected' ? 'listening' : state === 'error' ? 'error' : 'idle')
+      ),
       lastResponseAt: reported?.lastSuggestionAt ?? polled?.lastSuggestionAt ?? null,
       callCreated: Boolean(sessionState?.aiCallCreated ?? sessionState?.aiReady),
       callId: reported?.callId ?? null,
@@ -743,6 +746,18 @@ export const SalespersonDashboard: React.FC = () => {
                 detail={aiView.error ?? undefined}
                 testId="ai-state"
                 detailTestId="ai-error"
+              />
+              <StatusLine
+                label="AI activity"
+                value={aiView.activity}
+                tone={
+                  aiView.activity === 'error'
+                    ? 'red'
+                    : aiView.activity === 'generating' || aiView.activity === 'listening'
+                      ? 'emerald'
+                      : 'amber'
+                }
+                testId="ai-activity"
               />
               <StatusLine
                 label="Customer voice reaches the AI"
