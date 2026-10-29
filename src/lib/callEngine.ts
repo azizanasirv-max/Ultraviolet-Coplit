@@ -6,7 +6,7 @@
  *   - WebSocket signaling (join, offer/answer/ICE relay, AI text relay)
  *   - the single RTCPeerConnection used for salesperson <-> customer audio
  *   - microphone acquisition, mute, track recovery and diagnostics
- *   - the customer-side self-hosted AI session that feeds the AI pipeline
+ *   - the server-side AI session transport that feeds the AI pipeline
  *
  * Negotiation policy: the salesperson is always the offerer, the customer is
  * always the answerer. This removes glare by construction.
@@ -101,7 +101,7 @@ export interface EngineSnapshot {
   aiError: string | null;
   /** Full AI lifecycle state (local for the customer, reported for the salesperson). */
   ai: AiStatus;
-  /** Salesperson only: when they asked the customer device to restart the AI. */
+  /** Salesperson only: when they asked the server to restart the AI. */
   aiReconnectRequestedAt: number | null;
   suggestions: SuggestionCard[];
   customerSpeech: string;
@@ -1213,7 +1213,7 @@ export class CallEngine {
 
   /**
    * Mobile browsers can end/mute the microphone track when a second capture
-   * starts (the customer device also runs the self-hosted AI session). Reacquire
+   * starts (the customer device also owns the /ws/ai audio upload). Reacquire
    * and replace the outbound track instead of silently going dead.
    */
   private async recoverLocalTrack(reason: string): Promise<void> {
@@ -2367,7 +2367,7 @@ export class CallEngine {
       // owned by the bounded AI recovery loop, not by signaling reconnects.
       if (this.ai.state === 'off') void this.startAi({ replace: true });
     } else if (this.options.role === 'salesperson') {
-      // Last known AI state reported by the customer device (server-persisted).
+      // Last known AI state persisted by the server bridge.
       this.hydrateRemoteAi(data.ai ?? data.session?.ai);
     }
   }
@@ -2515,14 +2515,14 @@ export class CallEngine {
       this.remoteTrackState = 'none';
       this.callState = 'waiting';
       this.participants = Array.isArray(data.participants) ? data.participants : [];
-      // The AI session lives on the customer device; if the customer is gone the
+      // The AI audio source is the customer socket; if the customer is gone the
       // AI is gone too. Say so instead of leaving a stale "connected" badge.
       if (this.options.role === 'salesperson' && data.role === 'customer') {
         this.applyRemoteAi({
           state: 'disconnected',
           status: null,
           connected: false,
-          error: 'The customer device left; the AI session ended with it.',
+          error: 'The customer left; the AI session ended.',
           audioReachingAi: false,
           reconnecting: false,
         });
@@ -2802,7 +2802,7 @@ export class CallEngine {
   // -------------------------------------------------------------------------
   // Customer-side AI pipeline (self-hosted model service)
   //
-  // The customer device is the only place a microphone is published to the AI.
+  // The customer device is the only place a microphone is sent to the AI; the
   // The salesperson never publishes to the AI, so salesperson speech can
   // never enter the customer -> AI pipeline.
   // -------------------------------------------------------------------------
@@ -3192,7 +3192,7 @@ export class CallEngine {
 
   /**
    * Public recovery entry point. The customer restarts locally; the
-   * salesperson asks the customer device over signaling because only that
+   * salesperson asks the server over signaling because only the customer
    * device holds the AI session and the microphone.
    */
   async retryAi(): Promise<void> {
@@ -3214,13 +3214,13 @@ export class CallEngine {
     }
     const sent = this.sendSignal({ type: 'ai_reconnect', reason: 'salesperson requested' });
     if (!sent) {
-      this.lastError = 'Could not ask the customer device to restart the AI: signaling is not connected.';
+      this.lastError = 'Could not ask the server to restart the AI: signaling is not connected.';
       this.log(this.lastError);
       this.emit();
       return;
     }
     this.aiReconnectRequestedAt = Date.now();
-    this.log('Asked the customer device to create a fresh AI session.');
+    this.log('Asked the server to create a fresh AI session.');
     this.emit();
   }
 

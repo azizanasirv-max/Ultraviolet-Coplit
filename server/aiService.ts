@@ -1,8 +1,8 @@
 /**
  * Client for the self-hosted AI model service (Modal).
  *
- * This is the *only* place the application talks to an AI provider. It replaced
- * the hosted Ultravox REST call. Trust rules:
+ * This is one of only two server modules that talk to the AI provider (the other
+ * is aiBridge.ts, which owns the upstream stream). Trust rules:
  *
  *   - `AI_SERVICE_TOKEN` and `AI_CALL_SECRET` are server-side secrets. They are
  *     never sent to a browser and never logged.
@@ -118,7 +118,7 @@ export interface AiReadiness {
  *
  * `ready` means "the server is configured to create calls". It is NOT proof
  * that the deployed model service is reachable or that audio streams: only a
- * live session reported by the customer device proves that.
+ * live bridge state proves that.
  */
 export const aiServiceReadiness = (env: NodeJS.ProcessEnv = process.env): AiReadiness => {
   const settings = resolveAiServiceSettings(env);

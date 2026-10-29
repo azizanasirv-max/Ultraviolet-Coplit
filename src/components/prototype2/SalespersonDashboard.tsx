@@ -269,10 +269,10 @@ export const SalespersonDashboard: React.FC = () => {
   const reconnectAi = () => {
     const engine = engineRef.current;
     if (!engine) {
-      setActionError('Start the call before asking the customer device to restart the AI.');
+      setActionError('Start the call before asking the server to restart the AI.');
       return;
     }
-    // Salesperson-side recovery is a request: only the customer device holds the
+    // Salesperson-side recovery is a request: only the customer holds the
     // AI session and the microphone. This never touches the WebRTC audio path.
     engine.requestAiReconnect();
   };

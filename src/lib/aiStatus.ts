@@ -1,5 +1,5 @@
 /**
- * Shared, UI-safe description of the customer-side self-hosted AI session.
+ * Shared, UI-safe description of the server-side self-hosted AI session.
  *
  * The AI session only exists in the customer's browser (it publishes the
  * customer microphone to the self-hosted model service). The salesperson therefore consumes a

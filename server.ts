@@ -1512,7 +1512,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
         peers: peersOf(session, result.participantId),
         participants: connectedParticipants(session),
         session: stateFor(session, result.role),
-        // Last AI state reported by the customer device, so the salesperson
+        // Last AI state persisted by the server bridge, so the salesperson
         // dashboard is accurate immediately after (re)joining. Never sent back to
         // the customer: AI status is salesperson-only information.
         ...(result.role === 'salesperson' ? { ai: store.publicState(session).ai } : {}),

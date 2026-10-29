@@ -12,7 +12,7 @@ export interface SessionPublicState {
   /** A server-side AI call record exists (not proof of a live session). */
   aiReady: boolean;
   aiCallCreated: boolean;
-  /** Live AI state reported by the customer device. */
+  /** Live AI state owned by the server bridge. */
   ai: {
     state: string | null;
     connected: boolean;
