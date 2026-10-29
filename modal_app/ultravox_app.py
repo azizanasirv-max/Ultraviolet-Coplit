@@ -140,11 +140,14 @@ def download_models() -> str:
 
     token = _require_env("HF_TOKEN")
     hf_home = os.environ.get("HF_HOME", "/models/hf")
+    # huggingface_hub and transformers both resolve their cache to HF_HOME/hub,
+    # so the preload must not override cache_dir or the GPU container would
+    # never see these files and would re-download them on every cold start.
+    cache_dir = os.path.join(hf_home, "hub")
 
     # 1.37 GB: audio tower + projector + custom code + tokenizer.
     snapshot_download(
         repo_id=MODEL_ID,
-        cache_dir=hf_home,
         token=token,
         allow_patterns=["*.json", "*.safetensors", "*.py", "*.model"],
     )
@@ -152,18 +155,17 @@ def download_models() -> str:
     # needs a token whose account accepted the Llama 3.1 licence.
     snapshot_download(
         repo_id="meta-llama/Llama-3.1-8B-Instruct",
-        cache_dir=hf_home,
         token=token,
         allow_patterns=["*.json", "*.safetensors", "tokenizer*", "*.model"],
     )
     # The Whisper feature-extractor config the processor fetches directly.
     snapshot_download(
         repo_id="openai/whisper-large-v3-turbo",
-        cache_dir=hf_home,
+        token=token,
         allow_patterns=["*.json"],
     )
     model_cache.commit()
-    return f"weights cached in {hf_home}"
+    return f"weights cached in {cache_dir}"
 
 
 @app.cls(

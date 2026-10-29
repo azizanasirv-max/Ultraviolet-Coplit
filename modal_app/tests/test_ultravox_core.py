@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import math
+import struct
 import time
 import unittest
 import wave
@@ -41,6 +42,21 @@ def make_wav(
         handle.setframerate(rate)
         handle.writeframes(raw)
     return buffer.getvalue()
+
+
+def extensible_wav(seconds: float = 1.0, rate: int = 16000) -> bytes:
+    """PCM16 mono WAV with a WAVE_FORMAT_EXTENSIBLE header.
+
+    Desktop recorders and some editors write this; CPython's ``wave`` module
+    refuses it, so it exercises the ffmpeg fallback.
+    """
+    frames = b"\x00\x10" * int(seconds * rate)
+    subformat = struct.pack("<IHH8s", 1, 0, 0x0010, bytes.fromhex("800000aa00389b71"))
+    fmt = struct.pack("<HHIIHH", 0xFFFE, 1, rate, rate * 2, 2, 16)
+    fmt += struct.pack("<HHI", 22, 16, 0x4) + subformat
+    chunks = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt
+    chunks += b"data" + struct.pack("<I", len(frames)) + frames
+    return b"RIFF" + struct.pack("<I", len(chunks)) + chunks
 
 
 class AudioValidationTests(unittest.TestCase):
@@ -291,6 +307,62 @@ class DeadlineTests(unittest.TestCase):
     def test_exceptions_propagate(self):
         with self.assertRaises(ZeroDivisionError):
             core.call_with_deadline(lambda: 1 / 0, 1.0)
+
+
+class ExtensibleWavTests(unittest.TestCase):
+    """WAVE_FORMAT_EXTENSIBLE is rejected by CPython's wave module."""
+
+    def test_stdlib_rejects_it(self):
+        with self.assertRaises(core.ServiceError) as ctx:
+            core.decode_wav(extensible_wav(0.5))
+        self.assertEqual(ctx.exception.code, "UNSUPPORTED_AUDIO_FORMAT")
+
+    def test_decode_audio_falls_back_to_ffmpeg(self):
+        clip = core.decode_audio(
+            extensible_wav(0.5),
+            content_type="audio/wav",
+            ffmpeg_runner=lambda args, data: b"\x00\x01" * 8000,
+        )
+        self.assertEqual(clip.source_format, "ffmpeg")
+        self.assertEqual(clip.samples, 8000)
+        self.assertEqual(clip.duration_ms, 500)
+
+    def test_decode_audio_stays_415_when_ffmpeg_is_unavailable(self):
+        def missing(args, data):
+            raise core.ServiceError(415, "UNSUPPORTED_AUDIO_FORMAT", "no ffmpeg")
+
+        with self.assertRaises(core.ServiceError) as ctx:
+            core.decode_audio(extensible_wav(0.5), ffmpeg_runner=missing)
+        self.assertEqual(ctx.exception.status, 415)
+        self.assertIn("WAV", ctx.exception.message)
+
+    def test_other_wav_errors_are_not_retried_with_ffmpeg(self):
+        calls: list[int] = []
+        with self.assertRaises(core.ServiceError) as ctx:
+            core.decode_audio(
+                make_wav(2.0),
+                max_seconds=1,
+                ffmpeg_runner=lambda args, data: calls.append(1) or b"",
+            )
+        self.assertEqual(ctx.exception.code, "AUDIO_TOO_LONG")
+        self.assertEqual(calls, [])
+
+
+class HfTokenTests(unittest.TestCase):
+    def test_reads_hf_token(self):
+        self.assertEqual(core.require_hf_token({"HF_TOKEN": " hf_abc "}), "hf_abc")
+
+    def test_accepts_the_legacy_variable(self):
+        self.assertEqual(
+            core.require_hf_token({"HUGGING_FACE_HUB_TOKEN": "hf_legacy"}), "hf_legacy"
+        )
+
+    def test_missing_token_names_the_gated_repo(self):
+        with self.assertRaises(core.ServiceError) as ctx:
+            core.require_hf_token({})
+        self.assertEqual(ctx.exception.status, 503)
+        self.assertEqual(ctx.exception.code, "HF_TOKEN_MISSING")
+        self.assertIn("meta-llama/Llama-3.1-8B-Instruct", ctx.exception.message)
 
 
 class PurePythonFallbackTests(unittest.TestCase):

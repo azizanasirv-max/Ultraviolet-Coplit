@@ -10,14 +10,18 @@ yet.
 - Files: `modal_app/ultravox_app.py` (Modal app), `modal_app/ultravox_api.py`
   (HTTP), `modal_app/ultravox_engine.py` (model), `modal_app/ultravox_core.py`
   (audio rules, stdlib only), `modal_app/tests/test_ultravox*.py`,
-  `scripts/smoke_ultravox.py`
+  `scripts/smoke_ultravox.py`, `scripts/check_ultravox_env.py` (offline
+  preflight)
 
-> **Status: not deployed and not verified against real weights.**
-> This checkout had no GPU, no Modal account and no Hugging Face token, so the
-> model has never been loaded here. Everything below marked *verified* is
-> covered by the unit tests or by a local run of the API with a fake engine.
-> The *Unverified* section lists exactly what the first approved deployment
-> must confirm.
+> **Status: reviewed, not deployed, and not verified against real weights.**
+> A branch review on 2026-10-29 (see section 10) ran the pinned stack for real
+> on CPU: the checkpoint's own custom code, the `ultravox-pipeline` contract,
+> audio→16 kHz mono conversion of a real WebM/Opus recording, dependency
+> resolution and Modal pricing. It also found and fixed three defects (cache
+> path, `WAVE_FORMAT_EXTENSIBLE` fallback, GPU serialisation after a timeout).
+> **Still unverified: the real 17.5 GB weight load, live A100-40GB capacity, and
+> gated-repo access with a valid token.** No GPU has been started and nothing
+> is deployed.
 
 ## 1. What the checkpoint actually needs (verified from the model card)
 
@@ -307,21 +311,31 @@ npm run test:ultravox
 python3 -m unittest discover -s modal_app/tests -t . -p 'test_ultravox*.py'
 ```
 
-82 tests, all passing in this checkout (Python 3.11, fake model). Coverage:
+98 tests, all passing in this checkout (2026-10-29: 93 pass + 5 skipped without
+`ffmpeg`; 98/98 with a real `ffmpeg` on PATH). Coverage:
 
 | Requirement | Tests |
 | --- | --- |
-| model loading | `test_ultravox_engine.LoadingTests` (model id, device, idempotent load, load failure → `ModelLoadError`, default loader), `test_ultravox_modal_app` (checkpoint id, GPU order, conservative scaling, no Whisper/Qwen) |
-| audio validation | `test_ultravox_core.AudioValidationTests`, `WavDecodeTests`, `FfmpegTests` (empty, oversize, wrong type, corrupt WAV, 3 channels, too short/long, stereo 48 k → mono 16 k, 8-bit widening, ffmpeg path) |
+| model loading | `test_ultravox_engine.LoadingTests` (model id, device, idempotent load, load failure → `ModelLoadError`, missing `HF_TOKEN` → `HF_TOKEN_MISSING` before any download, default loader), `test_ultravox_modal_app` (checkpoint id, GPU order, conservative scaling, preload cache path, no Whisper/Qwen) |
+| audio validation | `test_ultravox_core.AudioValidationTests`, `WavDecodeTests`, `FfmpegTests`, `ExtensibleWavTests` (empty, oversize, wrong type, corrupt WAV, 3 channels, too short/long, stereo 48 k → mono 16 k, 8-bit widening, `WAVE_FORMAT_EXTENSIBLE` fallback, ffmpeg path) |
+| real recordings | `test_ultravox_audio_real` (real WebM/Opus 48 kHz mono + stereo → 16 kHz mono; real `WAVE_FORMAT_EXTENSIBLE`; multipart and base64 uploads through the API). Skipped when `ffmpeg` is absent |
 | inference response parsing | `ParseSuggestionTests`, `SuggestTests.test_output_is_cleaned`, `test_no_speech_output_becomes_empty_string`, `test_unexpected_model_output_raises_inference_error` |
 | authentication | `AuthTests` (core) + `test_ultravox_api.AuthTests` (401 missing/wrong, 503 unconfigured, no inference on failure) |
-| timeout handling | `DeadlineTests`, `SuggestTests.test_slow_generation_raises_inference_timeout`, `test_ultravox_api.FailureTests.test_inference_timeout_returns_504` |
+| timeout handling | `DeadlineTests`, `SuggestTests.test_slow_generation_raises_inference_timeout`, `test_gpu_work_stays_serialised_after_a_timeout`, `test_ultravox_api.FailureTests.test_inference_timeout_returns_504` |
 | error reporting | `test_ultravox_api.ValidationTests` + `FailureTests` (400/401/413/415/500/502/503/504, no internals leaked) |
 | input contract | `SuggestTests.test_inputs_follow_the_documented_audio_plus_turns_format` (audio float32 @16 kHz, `turns` ending in `<|audio|>`, `sampling_rate=16000`, greedy decoding) |
 
 `ultravox_core` tests need only the stdlib; engine/API/app tests use `numpy`,
 `fastapi`, `httpx` and `modal` when installed and skip cleanly when they are
-not.
+not. The real-recording tests need a real `ffmpeg` binary and skip without it:
+
+```bash
+# offline environment preflight (no network, no GPU)
+python3 scripts/check_ultravox_env.py
+
+# the 5 real WebM/Opus + WAVE_FORMAT_EXTENSIBLE tests (needs ffmpeg on PATH)
+python3 -m unittest modal_app.tests.test_ultravox_audio_real -v
+```
 
 `scripts/smoke_ultravox.py` was run against a local uvicorn instance of the app
 with a fake engine: health, JSON and multipart requests, 401 and exit codes all
@@ -332,7 +346,11 @@ behaved as documented. That is HTTP wiring coverage, not model coverage.
 Run in order; stop at the first failure and report it.
 
 1. `modal run modal_app/ultravox_app.py::download_models` → returns
-   `weights cached in /models/hf`; confirms the HF token and gated access.
+   `weights cached in /models/hf/hub`; confirms the HF token and gated access.
+   Then `modal volume ls ultravox-model-cache /hf/hub` must list
+   `models--fixie-ai--ultravox-v0_5-llama-3_1-8b` and
+   `models--meta-llama--Llama-3.1-8B-Instruct`, and the GPU container must read
+   them instead of re-downloading.
 2. `modal deploy modal_app/ultravox_app.py` → prints a `…modal.run` URL.
 3. `curl <url>/v1/health` → starts a container; in `modal app logs` confirm
    `cuda_available=True device=A100-SXM4-40GB vram_gib≈40` and
@@ -348,23 +366,21 @@ Run in order; stop at the first failure and report it.
 
 ## 7. Still unverified (do not claim otherwise)
 
-- **The model has never been loaded in this environment.** No GPU, no Modal
-  account and no HF token were available, so `transformers==4.48.1` +
-  `trust_remote_code` + this checkpoint is untested end to end. The pins come
-  from the checkpoint's `transformers_version` and its released requirements,
-  not from a successful load here.
+- **The real weights have never been loaded.** No GPU, no Modal account and no
+  valid HF token were available. The pinned stack, this checkpoint's own custom
+  code and its pipeline contract were exercised on CPU with tiny random weights
+  (section 10), but `pipeline(model="fixie-ai/…")` against the 17.5 GB
+  checkpoint is untested.
 - **Whether Modal actually provisions `A100-40GB`** in this workspace/region.
   The fallback list makes L40S automatic, but live capacity was not observed.
 - **Cold-start time, host RAM peak, tokens/s and TTFT** are estimates derived
   from the model card (A100-40GB: ~150 ms TTFT, 50-100 tok/s) and the 17.5 GB
   weight size.
-- **Pipeline return type**: the engine expects the custom pipeline to return a
-  `str` (as its `postprocess` does). Anything else becomes a 502 by design; that
-  mapping is tested, but not observed on real weights.
-- **`peft==0.14.0` / `accelerate==1.3.0`** with `transformers==4.48.1` and
-  `torch==2.5.1` was not resolved by a real image build here.
-- **ffmpeg transcoding of a real browser webm/opus recording** (unit tested with
-  an injected runner only).
+- **Gated access with a *valid* token**: the mechanism is verified (env token →
+  `Authorization: Bearer` header; 401 without it), but this account has no
+  Llama-3.1 approval, so the actual download was never completed.
+- **Modal image build**: the exact pip pins resolve together and `pip check` is
+  clean, but the image itself was never built (needs an account).
 - **Suggestion quality** on real sales audio, and whether `NO_SPEECH` triggers
   as intended on silence.
 - **Nothing is integrated into the app**: no `server/`, `src/` or `.env.example`
@@ -392,3 +408,51 @@ implementation lives on `origin/cline/b95pv7fx`.
 - One container, scale-to-zero, 5-minute idle window: no spend when unused.
 - The service returns text only and never streams audio back, so it cannot talk
   over either participant.
+
+## 10. Branch review — 2026-10-29 (no deployment, no GPU)
+
+Evidence produced without starting a GPU, creating a secret or deploying:
+
+| # | Question | Result |
+| --- | --- | --- |
+| 1 | Model card / `transformers.pipeline` contract | **Verified.** Card's snippet is exactly `pipeline(model=..., trust_remote_code=True)` + `{"audio", "turns", "sampling_rate"}`. transformers 4.48.1's `pipeline()` signature accepts `torch_dtype`, `device`, `trust_remote_code`, `token`, and infers the checkpoint's `ultravox-pipeline` from `config.custom_pipelines` (pipelines/__init__.py:855). |
+| 2 | Pin compatibility | **Verified on CPU.** `torch==2.5.1`, `transformers==4.48.1`, `peft==0.14.0`, `accelerate==1.3.0`, `numpy==2.1.3` install together, `pip check` clean, `tokenizers==0.21.4`. The checkpoint's `ultravox_model.py` imports and runs: `ModifiedWhisperEncoder` → `(1, 1500, 32)`, projector → `(1, 188, 64)`, `LlamaForCausalLM(inputs_embeds=...)` → `(1, 188, 128256)`, and `ultravox-pipeline` registers. |
+| 3 | Gated Llama backbone + server-side token | **Mechanism verified.** The Hub returns 401 for the gated file without a valid token. The checkpoint forwards **no** token (`SHARED_PRETRAINED_KWARGS` has only dtype/device options), so env auth is the only path: with `HF_TOKEN` set, `build_hf_headers()` returns `Authorization: Bearer …`; without it, none. `require_hf_token()` now fails fast with `HF_TOKEN_MISSING`. A real approved token was not available. |
+| 4 | Image build, volume, secret, GPU fallback, scale-to-zero | **Partly verified.** The Modal SDK 1.6.3 builds the app object, accepts `gpu=["A100-40GB","L40S"]`, `min_containers=0`, `max_containers=1`, `scaledown_window=300`, `@modal.concurrent` and `Secret.from_name(..., required_keys=…)`. Pins resolve. **Found and fixed: the preload wrote to `/models/hf/models--*` while transformers reads `/models/hf/hub/models--*`, so every cold start would have re-downloaded 17.5 GB on the GPU.** Actual build/volume round-trip not exercised. |
+| 5 | Real browser WebM/Opus → 16 kHz mono → text | **Audio path verified end to end**, text generation verified only with a fake model. A real `ffmpeg` 7.0.2 + libopus encode of 48 kHz mono and stereo WebM/Opus decodes to 16 kHz mono PCM16 (1 s → ~16 000 samples) and returns 200 through `/v1/suggest` via both multipart and base64. **Found and fixed:** `WAVE_FORMAT_EXTENSIBLE` WAV (common from desktop recorders) was rejected with 415 on a WAV magic match; it now falls back to ffmpeg. |
+| 6 | Prices / startup estimates | **Re-verified against modal.com/pricing** (see §4.2): A100-40GB $0.000583/s, A100-80GB $0.000694/s, L40S $0.000542/s, H100 $0.001097/s, CPU $0.0000131/core/s, RAM $0.00000222/GiB/s, volumes $0.09/GiB/mo with 1 TiB free, Starter $30/mo. All-in $2.48/h and 12.1 h per $30 are correct; cold start ≈ $0.06 and warm request ≈ $0.0008 match. |
+| 7 | Tests | **98 tests, all passing** (93 + 5 skipped without ffmpeg; 98/98 with it). Then re-run after the fixes: same result. |
+
+### Defects found by this review and fixed
+
+1. **Preload cache path** (`modal_app/ultravox_app.py`): removed `cache_dir=`
+   from `snapshot_download` so it writes to `HF_HOME/hub`, the path
+   `transformers` reads. Without this, the 17.5 GB download would repeat on
+   every cold start — on GPU-billed time.
+2. **`WAVE_FORMAT_EXTENSIBLE` WAV** (`modal_app/ultravox_core.py`):
+   `decode_audio` now retries such files with ffmpeg instead of returning 415.
+   Non-format errors (too long/too short) are still not retried.
+3. **GPU serialisation after a timeout** (`modal_app/ultravox_engine.py`): a
+   timed-out generation kept running while the lock was released, so the next
+   request could start a second generation on the same GPU. The engine now owns
+   a single-worker executor, so queued work waits for the abandoned generation.
+
+Additions: `require_hf_token()` preflight, `scripts/check_ultravox_env.py`
+(14 offline checks on versions/API surface/token plumbing, exits non-zero on
+failure), `modal_app/tests/test_ultravox_audio_real.py`, plus 16 new tests.
+
+### Minimum remaining steps before a controlled first deployment
+
+1. **Hugging Face access** (blocker, account-level): accept the Llama 3.1
+   licence, create a read token, and confirm
+   `hf_hub_download("meta-llama/Llama-3.1-8B-Instruct", "config.json")` succeeds
+   for that token.
+2. **Modal account/CLI** (blocker): `modal setup`, verify the workspace has
+   A100-40GB capacity (or accept the L40S fallback), and set a workspace budget
+   before the first GPU start.
+3. **Approval** for ~$0.06 (image build + CPU preload) and then ~$0.06 per cold
+   start.
+4. Then follow §3.2 → §6 exactly: preload → deploy → health → 401 check →
+   real-audio smoke test → silence test → log inspection → usage check.
+5. Only after that: wire `AI_SERVICE_URL`/token into the app server in a
+   separate change (still out of scope here).

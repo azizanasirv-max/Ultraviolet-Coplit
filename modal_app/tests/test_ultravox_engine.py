@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import time
 import unittest
+from unittest import mock
 
 from modal_app import ultravox_core as core
 from modal_app.tests.test_ultravox_core import make_wav
@@ -43,6 +45,12 @@ class LoaderSpy:
 
 
 class LoadingTests(unittest.TestCase):
+    def setUp(self):
+        # The gated Llama backbone needs HF_TOKEN in the environment.
+        env = mock.patch.dict(os.environ, {"HF_TOKEN": "hf_unit_test"}, clear=False)
+        env.start()
+        self.addCleanup(env.stop)
+
     def test_load_uses_the_model_card_id_and_device(self):
         loader = LoaderSpy()
         engine = UltravoxEngine(loader=loader)
@@ -76,14 +84,31 @@ class LoadingTests(unittest.TestCase):
         self.assertIn("gated repo", message)
         self.assertFalse(engine.loaded)
 
+    def test_load_fails_fast_without_hf_token(self):
+        loader = LoaderSpy()
+        engine = UltravoxEngine(loader=loader)
+        with mock.patch.dict(
+            os.environ,
+            {"HF_TOKEN": "", "HUGGING_FACE_HUB_TOKEN": ""},
+            clear=False,
+        ):
+            with self.assertRaises(core.ServiceError) as ctx:
+                engine.load()
+        self.assertEqual(ctx.exception.code, "HF_TOKEN_MISSING")
+        self.assertIn("Llama-3.1", ctx.exception.message)
+        self.assertEqual(loader.calls, [])
+        self.assertFalse(engine.loaded)
+
     def test_default_loader_is_used_when_none_is_injected(self):
         engine = UltravoxEngine()
         self.assertEqual(engine._loader.__name__, "default_loader")
 
 
-
 class SuggestTests(unittest.TestCase):
     def setUp(self):
+        env = mock.patch.dict(os.environ, {"HF_TOKEN": "hf_unit_test"}, clear=False)
+        env.start()
+        self.addCleanup(env.stop)
         self.clip = core.decode_wav(make_wav(1.0))
         self.pipeline = FakePipeline()
         self.engine = UltravoxEngine(loader=LoaderSpy(lambda: self.pipeline))
@@ -169,6 +194,31 @@ class SuggestTests(unittest.TestCase):
         engine = UltravoxEngine(loader=LoaderSpy())
         with self.assertRaises(core.InferenceError):
             engine.suggest(self.clip)
+
+    def test_gpu_work_stays_serialised_after_a_timeout(self):
+        state = {"active": 0, "peak": 0, "runs": 0}
+
+        def slow_pipeline(inputs, **kwargs):
+            state["active"] += 1
+            state["runs"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+            try:
+                time.sleep(0.15)
+                return "done"
+            finally:
+                state["active"] -= 1
+
+        engine = UltravoxEngine(loader=LoaderSpy(lambda: slow_pipeline))
+        engine.load()
+
+        with self.assertRaises(core.InferenceTimeout):
+            engine.suggest(self.clip, timeout_seconds=0.02)
+
+        # The abandoned generation still owns the single worker; this call waits
+        # for it instead of starting a second one on the same GPU.
+        self.assertEqual(engine.suggest(self.clip, timeout_seconds=2.0), "done")
+        self.assertEqual(state["peak"], 1)
+        self.assertEqual(state["runs"], 2)
 
 
 if __name__ == "__main__":  # pragma: no cover

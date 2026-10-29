@@ -57,6 +57,26 @@ class ModalAppTests(unittest.TestCase):
         self.assertIn("/v1/health", paths)
         self.assertIn("/v1/suggest", paths)
 
+    def test_preload_writes_to_the_cache_the_runtime_reads(self):
+        """HF_HOME implies HF_HOME/hub; overriding cache_dir would miss it."""
+        import pathlib
+
+        source = pathlib.Path(self.module.__file__).read_text(encoding="utf-8")
+        preload = source.split("def download_models", 1)[1].split("@app.cls", 1)[0]
+
+        self.assertNotIn("cache_dir=", preload)
+        self.assertIn('os.path.join(hf_home, "hub")', preload)
+        self.assertIn('"HF_HOME": "/models/hf"', source)
+        self.assertIn('volumes={"/models": model_cache}', source)
+        self.assertIn("model_cache.commit()", preload)
+
+    def test_volume_and_secret_names_are_configurable(self):
+        import pathlib
+
+        source = pathlib.Path(self.module.__file__).read_text(encoding="utf-8")
+        self.assertIn("ULTRAVOX_VOLUME_NAME", source)
+        self.assertIn("ULTRAVOX_SECRET_NAME", source)
+
     def test_secrets_are_named_and_not_inlined(self):
         import pathlib
         import re

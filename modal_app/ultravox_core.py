@@ -16,6 +16,7 @@ import base64
 import binascii
 import hmac
 import io
+import os
 import re
 import subprocess
 import wave
@@ -524,26 +525,57 @@ def decode_base64_audio(value: Any) -> bytes:
         ) from exc
 
 
-def call_with_deadline(fn: Callable[[], Any], timeout_seconds: float) -> Any:
+def call_with_deadline(
+    fn: Callable[[], Any],
+    timeout_seconds: float,
+    *,
+    executor: ThreadPoolExecutor | None = None,
+) -> Any:
     """Runs ``fn`` and raises :class:`InferenceTimeout` after the deadline.
 
     The worker thread cannot be interrupted in Python, so a timed-out
-    generation finishes in the background; the container's per-request timeout
-    and the ``max_new_tokens`` cap bound how much work that can be.
+    generation keeps running. Pass a single-worker ``executor`` that outlives
+    the call (as the engine does) to keep later jobs queued behind it, so two
+    generations never share the GPU. Without one, a throwaway executor is used
+    and the timed-out thread is left to finish on its own.
     """
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ultravox")
+    owned = executor is None
+    pool = executor or ThreadPoolExecutor(max_workers=1, thread_name_prefix="ultravox")
     try:
-        future = executor.submit(fn)
+        future = pool.submit(fn)
         return future.result(timeout=timeout_seconds)
     except FutureTimeout as exc:
         raise InferenceTimeout(
             f"Inference exceeded the {timeout_seconds:.1f}s deadline."
         ) from exc
     finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+        if owned:
+            pool.shutdown(wait=False, cancel_futures=True)
 
+
+def require_hf_token(environ: dict[str, str] | None = None) -> str:
+    """Returns the Hugging Face token, or fails with an actionable message.
+
+    The checkpoint's own ``ultravox_model.py`` loads the gated
+    ``meta-llama/Llama-3.1-8B-Instruct`` weights without forwarding a token
+    (``FROM_PRETRAINED_KWARGS`` only carries device/dtype options), so
+    ``huggingface_hub`` authenticates from the environment. Checking here turns
+    a 401 that would otherwise surface minutes into a 17.5 GB load into an
+    immediate, explicit failure.
+    """
+    env = environ if environ is not None else os.environ
+    token = (env.get("HF_TOKEN") or env.get("HUGGING_FACE_HUB_TOKEN") or "").strip()
+    if not token:
+        raise ServiceError(
+            503,
+            "HF_TOKEN_MISSING",
+            "HF_TOKEN is not set. The gated meta-llama/Llama-3.1-8B-Instruct "
+            "backbone cannot be downloaded without a Hugging Face token whose "
+            "account accepted the Llama 3.1 licence.",
+        )
+    return token
 
 
 def decode_audio(
@@ -554,8 +586,27 @@ def decode_audio(
     content_type: str = "",
     ffmpeg_runner: Callable[[Sequence[str], bytes], bytes] | None = None,
 ) -> AudioClip:
-    """Validates and normalises one uploaded audio payload."""
+    """Validates and normalises one uploaded audio payload.
+
+    WAV is decoded with the standard library and everything else with ffmpeg.
+    A WAV whose header the stdlib refuses (e.g. ``WAVE_FORMAT_EXTENSIBLE``,
+    which many desktop recorders write) is also handed to ffmpeg before the
+    request is rejected.
+    """
     validate_audio_bytes(data, max_bytes=max_bytes, content_type=content_type)
     if looks_like_wav(data):
-        return decode_wav(data, max_seconds=max_seconds)
+        try:
+            return decode_wav(data, max_seconds=max_seconds)
+        except ServiceError as exc:
+            if exc.code != "UNSUPPORTED_AUDIO_FORMAT":
+                raise
+            try:
+                return transcode_with_ffmpeg(
+                    data, max_seconds=max_seconds, runner=ffmpeg_runner
+                )
+            except ServiceError:
+                # ffmpeg is unavailable or also failed: the original message
+                # ("not a readable PCM WAV") is the clearer one.
+                raise exc from None
     return transcode_with_ffmpeg(data, max_seconds=max_seconds, runner=ffmpeg_runner)
+

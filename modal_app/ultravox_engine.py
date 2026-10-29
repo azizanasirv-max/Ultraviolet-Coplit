@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from modal_app.ultravox_core import (
@@ -42,6 +43,7 @@ from modal_app.ultravox_core import (
     build_turns,
     call_with_deadline,
     parse_suggestion,
+    require_hf_token,
 )
 
 try:  # `modal deploy modal_app/ultravox_app.py` mounts this directory itself.
@@ -57,6 +59,7 @@ try:  # `modal deploy modal_app/ultravox_app.py` mounts this directory itself.
         build_turns,
         call_with_deadline,
         parse_suggestion,
+        require_hf_token,
     )
 except ImportError:  # pragma: no cover - repo-root imports (tests)
     pass
@@ -104,6 +107,12 @@ class UltravoxEngine:
         self._loader = loader or default_loader
         self._pipeline: Any = None
         self._lock = threading.Lock()
+        # One long-lived worker keeps GPU work serialised even when a request
+        # times out: the abandoned generation still occupies the worker, so the
+        # next one queues behind it instead of running concurrently.
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="ultravox-gpu"
+        )
         self._loaded = False
 
     @property
@@ -114,6 +123,9 @@ class UltravoxEngine:
         """Downloads (if needed) and loads the model. Idempotent."""
         if self._loaded:
             return
+        # Fail fast and clearly: the checkpoint's custom code authenticates the
+        # gated Llama backbone from the environment, not from a forwarded token.
+        require_hf_token()
         try:
             pipeline = self._loader(self.model_id, self.device)
         except Exception as exc:  # noqa: BLE001 - surface every load failure
@@ -165,11 +177,13 @@ class UltravoxEngine:
                 temperature=None,
             )
 
-        # One GPU, one generation at a time. Holding the lock across the
-        # deadline call keeps a timed-out generation from overlapping the next.
+        # One GPU, one generation at a time. The lock plus the dedicated worker
+        # means a timed-out request cannot overlap the next one on the GPU.
         with self._lock:
             try:
-                output = call_with_deadline(run, timeout_seconds)
+                output = call_with_deadline(
+                    run, timeout_seconds, executor=self._executor
+                )
             except InferenceTimeout:
                 raise
             except Exception as exc:  # noqa: BLE001 - CUDA/OOM/processor errors
