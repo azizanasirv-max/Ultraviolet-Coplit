@@ -361,6 +361,15 @@ export class AiBridgeManager {
     this.runtimes.set(sessionId, runtime);
     this.emitStatus(runtime);
     this.connect(runtime, call.joinUrl);
+    if (runtime.ended) {
+      // Connection construction failed synchronously: surface a real error to the
+      // caller instead of handing out a ticket for a bridge that no longer exists.
+      throw new AiServiceError(
+        'AI_SERVICE_UNAVAILABLE',
+        502,
+        runtime.error ?? 'The AI service connection could not be established.'
+      );
+    }
     return { callId: call.callId, model: call.model, reused: false };
   }
 

@@ -264,3 +264,30 @@ test('a missing service configuration is a clear, non-throwing refusal', async (
   );
   assert.equal(manager.pushAudio('room-f', Buffer.alloc(320, 1)), false);
 });
+
+test('a socket that cannot be created fails the start request', async () => {
+  const manager = new AiBridgeManager({
+    settings,
+    fetchImpl: (async () =>
+      new Response(
+        JSON.stringify({
+          callId: 'call_x',
+          joinUrl: 'wss://ai.example/stream?call_id=call_x&sig=x',
+          model: 'test-model',
+          expiresAt: Date.now() + 60_000,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )) as unknown as typeof fetch,
+    systemPrompt: 'x',
+    onEvent: () => undefined,
+    createSocket: () => {
+      throw new Error('TLS handshake failed');
+    },
+  });
+
+  await assert.rejects(
+    manager.ensure('room-g'),
+    (error: any) => error?.code === 'AI_SERVICE_UNAVAILABLE'
+  );
+  assert.equal(manager.has('room-g'), false);
+});
