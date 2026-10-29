@@ -20,22 +20,51 @@ configuration, authentication and the dashboards are **unchanged**.
 ## 1. Architecture
 
 ```
- salesperson browser ── WebRTC audio ── customer browser
-        ▲                                      │
-        │ ai_suggestion / customer_speech       │ 16 kHz PCM16 over WSS
-        │ (text, via existing signaling)        ▼
-   Render app server ── POST /v1/calls ──► Modal app (GPU, scale-to-zero)
-        (holds AI_SERVICE_TOKEN)            faster-whisper + small instruct LLM
-                                            └─ transcript/suggestion JSON
+ salesperson browser <──> WebRTC audio <──> customer browser
+        ^  ai_suggestion / customer_speech (text, existing signaling)
+        |
+   Render app server <── /ws/ai (16 kHz PCM16, customer only)
+        |  server/aiBridge.ts = the ONE outbound AI client
+        v  POST /v1/calls + one upstream WebSocket
+   Modal app (GPU, scale-to-zero)
+        faster-whisper ASR -> Qwen2.5-3B-Instruct -> transcript/suggestion JSON
 ```
 
 - Only the customer device captures a microphone for the AI (a second capture;
   the first one is the human call). The salesperson is never published to the AI.
-- AI output is **text only**, so the model can never talk over either person.
-- The browser only ever receives a signed, short-lived `wss://` URL. The service
-  token and the signing secret stay on the server / in the Modal secret.
-- The existing endpoint `POST /api/sessions/:id/ai-call` creates a call;
-  `/ultravox-call` remains as an alias. Only the session's customer may call it.
+- Audio is forwarded server-side. The browser never learns the Modal origin or
+  the signed upstream URL: it receives one short-lived, single-use, role-bound
+  ticket for `/ws/ai` on the application origin.
+- `/ws/ai` accepts only a customer ticket. A salesperson ticket is closed with
+  code 4403, so salesperson audio cannot enter the model even if the
+  salesperson starts or restarts the AI.
+- AI output is text only, so the model can never talk over either person and no
+  audio can be injected into the WebRTC call.
+- POST /api/sessions/:id/ai-call starts or restarts the bridge (either
+  participant may call it; audio is still customer-only). /ultravox-call was
+  removed.
+
+### 1.1 Model identity (verified, not assumed)
+
+The model identifiers actually configured in `modal_app/app.py` are:
+
+| Role | Identifier | Source of truth |
+| --- | --- | --- |
+| Speech recognition | `faster-whisper` `small.en` (CTranslate2) | `ASR_MODEL` (default `small.en`) |
+| Response generation | `Qwen/Qwen2.5-3B-Instruct` (3.08B params, instruction-tuned chat model) | `LLM_MODEL` (default) |
+| Runtime | Python 3.11, `fastapi`/`uvicorn`, `transformers`, `torch` on a Modal GPU (default `T4`), 16 kHz mono PCM16 | `modal_app/app.py` image |
+
+`fixie-ai/ultravox-v0_5-llama-3_1-8b` is **not** configured anywhere in this
+repository, so it is not used. Its card describes a speech LLM built on
+`Llama-3.1-8B-Instruct` + `whisper-large-v3-turbo` that takes a 16 kHz audio
+array plus chat turns (including a system prompt) and generates text; that is
+compatible with this task, but switching to it would replace both the ASR and
+the LLM stages and change the container dependencies (~8B params). If it is
+ever wanted, the smallest change is inside `modal_app/app.py`: load
+`transformers.pipeline(model='fixie-ai/ultravox-v0_5-llama-3_1-8b',
+trust_remote_code=True)` and call it with the VAD segment plus the same system
+prompt. The browser/server contract (PCM in, `transcript`/`suggestion` text out)
+does not change. No such change was made here.
 
 ## 2. What lives where
 
@@ -45,7 +74,8 @@ configuration, authentication and the dashboards are **unchanged**.
 | `modal_app/pipeline.py` | Dependency-free VAD, prompt builder and suggestion cleaner (unit tested). |
 | `modal_app/tokens.py` | HMAC call tokens for the `wss://` URL (unit tested). |
 | `server/aiService.ts` | The only outbound provider client: URL/host validation, error mapping, redaction. |
-| `src/lib/aiSession.ts` | Browser transport: microphone → 16 kHz PCM frames → WebSocket; JSON events → the existing AI lifecycle. |
+| `server/aiBridge.ts` | Per-room upstream call: frame bounds/backpressure, bounded recovery, text de-duplication, status. |
+| `src/lib/aiSession.ts` | Browser capture: microphone → 16 kHz PCM frames → same-origin `/ws/ai`; status events only (no AI text, no audio playback). |
 
 ## 3. Prerequisites (Android-only workflow)
 
@@ -127,10 +157,10 @@ Set these in the Render dashboard (never in Git):
 | --- | --- |
 | `AI_SERVICE_URL` | The Modal web URL from section 5, e.g. `https://<workspace>--sales-copilot-ai-web.modal.run` (origin only, no path) |
 | `AI_SERVICE_TOKEN` | Same value as the Modal secret `AI_SERVICE_TOKEN` |
-| `AI_SERVICE_MODEL` | Optional label only, e.g. `small.en+Qwen2.5-3B-Instruct` |
+| `AI_SERVICE_MODEL` | Optional label only, e.g. `faster-whisper-small.en+Qwen2.5-3B-Instruct` |
 | `AI_MAX_CALL_SECONDS` | Optional, default `3600` |
 
-`ULTRAVOX_API_KEY` is no longer read. Remove it from Render to avoid confusion.
+`ULTRAVOX_API_KEY` is no longer read (nor is the hosted `ultravox-client` SDK a dependency). Remove the variable from Render to avoid confusion.
 
 Check readiness (configuration only, not liveness):
 
@@ -186,7 +216,9 @@ order; stop at the first failure.
    - a suggestion card appears with 1–2 readable sentences;
    - muting the customer stops new transcripts;
    - "Restart AI" (salesperson) creates a new call without dropping the human
-     audio (the audio waveform/RTP counters must keep increasing).
+     audio (the audio waveform/RTP counters must keep increasing);
+   - browser devtools shows no connection to a `modal.run` host: only `/ws`
+     (signaling) and `/ws/ai` (customer audio) on the application origin.
 6. **Logs:** `modal app logs sales-copilot-ai` (or the Modal dashboard) shows the
    session start/end. Transcripts and prompts are deliberately **not** logged;
    container logs must not contain `AI_SERVICE_TOKEN`, `AI_CALL_SECRET` or a

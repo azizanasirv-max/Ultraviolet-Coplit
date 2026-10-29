@@ -394,10 +394,17 @@ Required on Render:
 
 - `AI_SERVICE_URL` — the Modal app origin (https, no path).
 - `AI_SERVICE_TOKEN` — the same value as the Modal secret `AI_SERVICE_TOKEN`.
+- Optional: `AI_SERVICE_MODEL` (health label only), `AI_MAX_CALL_SECONDS`.
 
-`ULTRAVOX_API_KEY` is no longer read; remove it from Render. Human-to-human
-audio, sessions, invitations, TURN/Admin Settings and authentication are
-unchanged and do not depend on the AI service.
+`ULTRAVOX_API_KEY` is no longer read and `ultravox-client` is not a dependency;
+remove the variable from Render. Human-to-human audio, sessions, invitations,
+TURN/Admin Settings and authentication are unchanged and do not depend on the
+AI service.
+
+Audio path: the customer browser streams 16 kHz PCM to **this server** at
+`/ws/ai` with a single-use ticket; the server (`server/aiBridge.ts`) opens the
+only upstream Modal WebSocket. No Modal URL or credential reaches a browser and
+no browser audio goes directly to Modal.
 
 After deploying:
 
@@ -405,15 +412,17 @@ After deploying:
    valid. That is configuration, not proof that the Modal app is reachable or
    that audio streams.
 2. On `/sales`, the **AI copilot status** panel (and header chip) moves through
-   *Creating AI session → Connecting AI → AI connected* only when the customer
-   device reports a live session from the self-hosted service.
-3. Server logs contain `[ai] ...` lines for failures and superseded-call cleanup.
-   They never contain the service token, a join URL or a call secret.
-4. AI calls are capped at one hour (`AI_MAX_CALL_SECONDS`, maximum 3600). When a
-   call ends, the customer device creates a new one (bounded to 3 automatic
-   attempts); the salesperson can press **Restart AI** to force a fresh call
-   without interrupting the human audio call.
-5. Streaming audio to the deployed service has **not** been verified in
+   *Creating AI session → Connecting AI → AI connected* only from real bridge
+   statuses (the server is the authority; the browser cannot report AI state).
+3. Both `/ws` and `/ws/ai` use the same HTTP upgrade path. Keep WebSockets
+   enabled on Render (default) and set `APP_URL` to the public https origin.
+4. Server logs contain `[ai] ...` lines for failures and superseded-call cleanup.
+   They never contain the service token, an upstream join URL, audio or text.
+5. AI calls are capped at one hour (`AI_MAX_CALL_SECONDS`, maximum 3600). The
+   bridge retries a dropped upstream twice; after that the dashboard shows an
+   error and the salesperson can press **Restart AI** without interrupting the
+   human audio call.
+6. Streaming audio to the deployed service has **not** been verified in
    automated tests. Run the checklist in section 7 of
    [self-hosted-ai-modal.md](./self-hosted-ai-modal.md) before a real call.
 

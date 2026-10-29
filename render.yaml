@@ -27,7 +27,8 @@ services:
         sync: false
       # Self-hosted AI model service on Modal (see docs/self-hosted-ai-modal.md).
       # AI_SERVICE_URL is the public Modal app origin; AI_SERVICE_TOKEN must
-      # match the Modal secret AI_SERVICE_TOKEN. Both stay server-side.
+      # match the Modal secret AI_SERVICE_TOKEN. Both stay server-side: browsers
+      # only receive a short-lived same-origin /ws/ai ticket.
       - key: AI_SERVICE_URL
         sync: false
       - key: AI_SERVICE_TOKEN

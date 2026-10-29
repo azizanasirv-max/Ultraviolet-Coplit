@@ -207,8 +207,6 @@ class VadSegmenter:
         if not keep_preroll:
             self._preroll.clear()
 
-        return 0.0
-
 
 def _normalise_space(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()

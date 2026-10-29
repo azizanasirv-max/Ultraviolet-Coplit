@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import WebSocket from 'ws';
 import { createPrototype2Server } from '../server';
+import type { AiBridgeSocket } from '../server/aiBridge';
 
 // Injected server-side AI service config; the browser never sees the token.
 process.env.AI_SERVICE_URL = 'https://ai.invalid';
@@ -12,8 +13,76 @@ interface Harness {
   close: () => Promise<void>;
 }
 
+/**
+ * In-process stand-in for the upstream Modal WebSocket. It records every frame
+ * the server forwards and can emit any model event, so the whole server-side
+ * bridge (audio in, text out) is exercised without a GPU or a real deployment.
+ */
+class FakeUpstream implements AiBridgeSocket {
+  static instances: FakeUpstream[] = [];
+  readyState = 0;
+  bufferedAmount = 0;
+  readonly sent: Array<string | Buffer> = [];
+  private handlers = new Map<string, Array<(...args: any[]) => void>>();
+
+  constructor(readonly url: string) {
+    FakeUpstream.instances.push(this);
+  }
+
+  static latest(): FakeUpstream {
+    const instance = FakeUpstream.instances.at(-1);
+    assert.ok(instance, 'an upstream AI socket was created');
+    return instance;
+  }
+
+  static reset(): void {
+    FakeUpstream.instances = [];
+  }
+
+  send(data: string | Buffer): void {
+    this.sent.push(data);
+  }
+
+  close(code = 1000, reason = ''): void {
+    if (this.readyState === 3) return;
+    this.readyState = 3;
+    this.emit('close', code, reason);
+  }
+
+  on(event: string, handler: (...args: any[]) => void): void {
+    const list = this.handlers.get(event) ?? [];
+    list.push(handler);
+    this.handlers.set(event, list);
+  }
+
+  emit(event: string, ...args: any[]): void {
+    for (const handler of this.handlers.get(event) ?? []) handler(...args);
+  }
+
+  open(): void {
+    this.readyState = 1;
+    this.emit('open');
+  }
+
+  message(payload: unknown): void {
+    this.emit('message', JSON.stringify(payload));
+  }
+
+  get json(): any[] {
+    return this.sent.filter((item): item is string => typeof item === 'string').map((item) => JSON.parse(item));
+  }
+
+  get audio(): Buffer[] {
+    return this.sent.filter((item): item is Buffer => Buffer.isBuffer(item));
+  }
+}
+
 const startServer = async (
-  options: { turnFetch?: typeof fetch; aiServiceFetch?: typeof fetch } = {}
+  options: {
+    turnFetch?: typeof fetch;
+    aiServiceFetch?: typeof fetch;
+    aiSocketFactory?: (url: string) => AiBridgeSocket;
+  } = {}
 ): Promise<Harness> => {
   const instance = await createPrototype2Server({
     serveFrontend: false,
@@ -25,6 +94,7 @@ const startServer = async (
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         })) as unknown as typeof fetch),
+    aiSocketFactory: options.aiSocketFactory ?? ((url: string) => new FakeUpstream(url)),
     turnFetch: options.turnFetch,
   });
   return { base: `http://127.0.0.1:${instance.port}`, close: instance.close };
@@ -35,6 +105,7 @@ const post = async (base: string, path: string, body: unknown, key?: string) => 
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      Connection: 'close',
       ...(key ? { Authorization: `Bearer ${key}` } : {}),
     },
     body: JSON.stringify(body ?? {}),
@@ -267,23 +338,19 @@ test('prototype2 signaling protocol', async (t) => {
     const reverseIce = await customer.next((message) => message.type === 'ice_candidate');
     assert.match(reverseIce.candidate.candidate, /5001/);
 
-    // A. customer AI text -> salesperson only
-    customer.send({
-      type: 'ai_suggestion',
-      sessionId: fixture.sessionId,
-      text: 'Ask about their timeline.',
-      isFinal: true,
-      ordinal: 3,
-      timestamp: '10:00',
-    });
-    const suggestion = await salesperson.next((message) => message.type === 'ai_suggestion');
-    assert.equal(suggestion.text, 'Ask about their timeline.');
-    assert.equal(suggestion.from, customerJoin.participantId);
-
-    // Salesperson may not inject AI suggestions.
-    salesperson.send({ type: 'ai_suggestion', sessionId: fixture.sessionId, text: 'fake' });
-    const rejection = await salesperson.next((message) => message.type === 'error');
-    assert.equal(rejection.code, 'INVALID_SIGNALING_ROLE');
+    // A. No browser may inject AI text: the server bridge is the only sender.
+    for (const sender of [customer, salesperson]) {
+      sender.send({
+        type: 'ai_suggestion',
+        sessionId: fixture.sessionId,
+        text: 'Ask about their timeline.',
+        isFinal: true,
+        ordinal: 3,
+      });
+      const rejection = await sender.next((message) => message.type === 'error');
+      assert.equal(rejection.code, 'INVALID_SIGNALING_ROLE');
+      assert.match(rejection.message, /delivered by the server/);
+    }
 
     // The customer is the only answerer; it may not offer.
     customer.send({
@@ -337,19 +404,12 @@ test('prototype2 signaling protocol', async (t) => {
     const captionRejection = await customer.next((message) => message.type === 'error');
     assert.equal(captionRejection.code, 'INVALID_SIGNALING_ROLE');
 
-    // Customer AI output and speech reach the salesperson, and never echo back to the customer.
-    customer.send({ type: 'customer_speech_transcript', sessionId: fixture.sessionId, text: 'hello', isFinal: true, ordinal: 1 });
-    customer.send({ type: 'ai_suggestion', sessionId: fixture.sessionId, text: 'suggest', isFinal: true, ordinal: 2 });
-    const speech = await salesperson.next((message) => message.type === 'customer_speech_transcript');
-    assert.equal(speech.text, 'hello');
-    await salesperson.next((message) => message.type === 'ai_suggestion');
-    await assert.rejects(
-      customer.next(
-        (message) => message.type === 'ai_suggestion' || message.type === 'customer_speech_transcript',
-        700
-      ),
-      /Timed out/
-    );
+    // The customer may not inject AI output either: only the server sends it.
+    for (const type of ['customer_speech_transcript', 'ai_suggestion']) {
+      customer.send({ type, sessionId: fixture.sessionId, text: 'spoofed', isFinal: true });
+      const rejection = await customer.next((message) => message.type === 'error');
+      assert.equal(rejection.code, 'INVALID_SIGNALING_ROLE');
+    }
 
     // Salesperson captions are relayed to the paired customer only, never echoed.
     salesperson.send({
@@ -420,8 +480,18 @@ test('prototype2 signaling protocol', async (t) => {
       /Timed out/
     );
 
-    // Session A's AI text must not appear in session B.
-    customerA.send({ type: 'ai_suggestion', sessionId: a.sessionId, text: 'A only' });
+    // Session A's server-generated AI text must not appear in session B.
+    const startedA = await post(
+      harness.base,
+      `/api/sessions/${a.sessionId}/ai-call`,
+      {},
+      a.customerKey
+    );
+    assert.equal(startedA.status, 200);
+    const upstreamA = FakeUpstream.latest();
+    upstreamA.open();
+    upstreamA.message({ type: 'ready' });
+    upstreamA.message({ type: 'suggestion', text: 'A only', isFinal: true, ordinal: 1 });
     const suggestionA = await salesA.next((message) => message.type === 'ai_suggestion');
     assert.equal(suggestionA.text, 'A only');
     await assert.rejects(salesB.next((message) => message.type === 'ai_suggestion', 700), /Timed out/);
@@ -604,18 +674,27 @@ test('prototype2 HTTP authorization and invitations', async (t) => {
     assert.equal(diagnostics.body.diagnostics.storage, 'in-memory');
   });
 
-  await t.test('only the authorized customer may start the AI call', async () => {
-    const fixture = await createFixture(harness.base);
-    const bySalesperson = await post(
-      harness.base,
-      `/api/sessions/${fixture.sessionId}/ai-call`,
-      {},
-      fixture.salespersonKey
-    );
-    assert.equal(bySalesperson.status, 403);
+  await t.test('AI start tickets are participant-only and never expose the upstream call', async () => {
+    const fixture = await createFixture(harness.base, 'ai-ticket');
+    FakeUpstream.reset();
 
-    const unauthenticated = await post(harness.base, `/api/sessions/${fixture.sessionId}/ai-call`, {});
-    assert.equal(unauthenticated.status, 403);
+    assert.equal(
+      (await post(harness.base, `/api/sessions/${fixture.sessionId}/ai-call`, {})).status,
+      403
+    );
+
+    const other = await createFixture(harness.base, 'ai-other');
+    assert.equal(
+      (
+        await post(
+          harness.base,
+          `/api/sessions/${fixture.sessionId}/ai-call`,
+          {},
+          other.customerKey
+        )
+      ).status,
+      403
+    );
 
     const byCustomer = await post(
       harness.base,
@@ -624,16 +703,38 @@ test('prototype2 HTTP authorization and invitations', async (t) => {
       fixture.customerKey
     );
     assert.equal(byCustomer.status, 200);
-    assert.equal(byCustomer.body.joinUrl, 'wss://ai.invalid/join');
+    assert.equal(byCustomer.body.callId, 'call_test');
+    assert.match(String(byCustomer.body.aiSocketUrl), /\/ws\/ai\?ticket=/);
+    // The upstream join URL and the credential never reach the browser.
+    assert.equal(byCustomer.body.joinUrl, undefined);
+    const serialized = JSON.stringify(byCustomer.body);
+    assert.doesNotMatch(serialized, /ai\.invalid/);
+    assert.doesNotMatch(serialized, /token=secret/);
+    assert.deepEqual(byCustomer.body.audio, {
+      sampleRate: 16000,
+      format: 'pcm_s16le',
+      transport: 'websocket',
+    });
 
-    const reused = await post(
+    // The salesperson may restart the AI for their own panel; that is a control
+    // action, not an audio source.
+    const bySalesperson = await post(
       harness.base,
       `/api/sessions/${fixture.sessionId}/ai-call`,
-      {},
-      fixture.customerKey
+      { replace: true },
+      fixture.salespersonKey
     );
-    assert.equal(reused.status, 200);
-    assert.equal(reused.body.isReused, true);
+    assert.equal(bySalesperson.status, 200);
+    assert.match(String(bySalesperson.body.aiSocketUrl), /\/ws\/ai\?ticket=/);
+
+    // A salesperson ticket can never become an AI audio source: the socket is
+    // rejected before any frame is accepted.
+    const salespersonAudioClose = await new Promise<number>((resolve, reject) => {
+      const socket = new WebSocket(bySalesperson.body.aiSocketUrl);
+      socket.on('close', (code) => resolve(code));
+      socket.on('error', reject);
+    });
+    assert.equal(salespersonAudioClose, 4403);
   });
 
   await t.test('health exposes no credentials', async () => {
@@ -993,12 +1094,13 @@ test('TURN credential provider is fetched server-side and never exposed', async 
 });
 
 // ---------------------------------------------------------------------------
-// Ultravox call lifecycle (server-side; the provider HTTP call is mocked)
+// Server-side AI bridge (upstream transport mocked, real HTTP/WS used)
 // ---------------------------------------------------------------------------
 
-test('prototype2 AI call rotation and status relay', async (t) => {
+test('prototype2 AI call rotation and lifecycle', async (t) => {
   const calls: Array<{ method: string; url: string; body: any }> = [];
   let failNext = false;
+  let created = 0;
   const aiServiceFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const method = init?.method ?? 'GET';
     const body = init?.body ? JSON.parse(String(init.body)) : null;
@@ -1008,13 +1110,14 @@ test('prototype2 AI call rotation and status relay', async (t) => {
       failNext = false;
       return new Response(JSON.stringify({ error: 'provider unavailable' }), { status: 503 });
     }
-    const created = calls.filter((call) => call.method === 'POST').length;
+    created += 1;
     return new Response(
       JSON.stringify({
         callId: `call_${created}`,
-        // Deliberately secret-looking: it must never reach the salesperson.
+        // Deliberately secret-looking: it must never reach a browser.
         joinUrl: `wss://ai.invalid/join-${created}?token=secret-${created}`,
         model: 'test-model',
+        expiresAt: Date.now() + 3_600_000,
       }),
       { status: 200, headers: { 'Content-Type': 'application/json' } }
     );
@@ -1027,6 +1130,8 @@ test('prototype2 AI call rotation and status relay', async (t) => {
 
   await t.test('replace=true creates a genuinely new call and ends the old one', async () => {
     const fixture = await createFixture(harness.base, 'rotate');
+    FakeUpstream.reset();
+
     const first = await post(
       harness.base,
       `/api/sessions/${fixture.sessionId}/ai-call`,
@@ -1037,6 +1142,9 @@ test('prototype2 AI call rotation and status relay', async (t) => {
     assert.equal(first.body.callId, 'call_1');
     assert.equal(first.body.isReused, false);
 
+    // A live upstream is reused: recovery must not spawn (and pay for) a second
+    // GPU call while the first is healthy.
+    FakeUpstream.latest().open();
     const reused = await post(
       harness.base,
       `/api/sessions/${fixture.sessionId}/ai-call`,
@@ -1045,8 +1153,8 @@ test('prototype2 AI call rotation and status relay', async (t) => {
     );
     assert.equal(reused.body.isReused, true);
     assert.equal(reused.body.callId, 'call_1');
+    assert.notEqual(reused.body.aiSocketUrl, first.body.aiSocketUrl, 'a fresh single-use ticket');
 
-    // This is what the client sends for every recovery attempt.
     const rotated = await post(
       harness.base,
       `/api/sessions/${fixture.sessionId}/ai-call`,
@@ -1056,9 +1164,8 @@ test('prototype2 AI call rotation and status relay', async (t) => {
     assert.equal(rotated.status, 200);
     assert.equal(rotated.body.isReused, false);
     assert.equal(rotated.body.callId, 'call_2');
-    assert.match(rotated.body.joinUrl, /join-2/);
+    assert.doesNotMatch(JSON.stringify(rotated.body), /join-2/);
 
-    // Best-effort provider cleanup for the superseded call.
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.ok(
       calls.some((call) => call.method === 'DELETE' && call.url.endsWith('/call_1')),
@@ -1066,7 +1173,7 @@ test('prototype2 AI call rotation and status relay', async (t) => {
     );
   });
 
-  await t.test('a failed creation clears the cached record so retry cannot reuse a dead URL', async () => {
+  await t.test('a failed creation is a clear AI error and never touches the call', async () => {
     const fixture = await createFixture(harness.base, 'retry-after-failure');
     failNext = true;
     const failed = await post(
@@ -1077,6 +1184,16 @@ test('prototype2 AI call rotation and status relay', async (t) => {
     );
     assert.equal(failed.status, 503);
     assert.equal(failed.body.error, 'AI_SERVICE_ERROR');
+    assert.match(String(failed.body.message), /HTTP 503/);
+
+    // The session is still fully usable.
+    const state = await get(
+      harness.base,
+      `/api/sessions/${fixture.sessionId}`,
+      fixture.salespersonKey
+    );
+    assert.equal(state.status, 200);
+    assert.equal(state.body.session.ai.state, 'error');
 
     const retried = await post(
       harness.base,
@@ -1085,157 +1202,180 @@ test('prototype2 AI call rotation and status relay', async (t) => {
       fixture.customerKey
     );
     assert.equal(retried.status, 200);
-    assert.equal(retried.body.isReused, false);
     assert.notEqual(retried.body.callId, failed.body.callId);
   });
 });
 
-
-test('prototype2 AI status reaches the salesperson and never leaks connection secrets', async (t) => {
+test('prototype2 customer audio reaches the model and model text only the salesperson', async (t) => {
   const harness = await startServer();
   t.after(async () => {
     await harness.close();
   });
 
-  const fixture = await createFixture(harness.base, 'ai-status');
+  const fixture = await createFixture(harness.base, 'bridge');
   const salesperson = await openSocket(harness.base);
   const customer = await openSocket(harness.base);
   t.after(() => {
     salesperson.close();
     customer.close();
   });
+  FakeUpstream.reset();
 
-  const salesJoin = await join(salesperson, {
+  await join(salesperson, {
     sessionId: fixture.sessionId,
     role: 'salesperson',
     credential: fixture.salespersonKey,
   });
-  assert.equal(salesJoin.type, 'joined');
-  assert.equal(salesJoin.ai?.state ?? null, null, 'no AI state before the customer reports one');
-
-  const customerJoin = await join(customer, {
+  await join(customer, {
     sessionId: fixture.sessionId,
     role: 'customer',
     credential: fixture.customerKey,
   });
-  assert.equal(customerJoin.type, 'joined');
   await salesperson.next((message) => message.type === 'peer_joined');
 
-  // A connected report with a message that embeds a join URL and a token.
-  const now = Date.now();
-  customer.send({
-    type: 'ai_status',
-    sessionId: fixture.sessionId,
-    state: 'connected',
-    connected: true,
-    audioReachingAi: true,
-    reconnectAttempt: 0,
-    lastSuggestionAt: now,
-    lastResponseAt: now,
-    error:
-      'Session socket closed abnormally. code=1006 reason=see wss://api.ultravox.ai/join?token=super-secret',
+  const started = await post(
+    harness.base,
+    `/api/sessions/${fixture.sessionId}/ai-call`,
+    {},
+    fixture.customerKey
+  );
+  assert.equal(started.status, 200);
+
+  const upstream = FakeUpstream.latest();
+  upstream.open();
+  upstream.message({ type: 'ready', model: 'whisper+qwen', sampleRate: 16000 });
+
+  const audioSocket = new WebSocket(started.body.aiSocketUrl);
+  const fromServer: any[] = [];
+  audioSocket.on('message', (raw) => {
+    try {
+      fromServer.push(JSON.parse(raw.toString()));
+    } catch {
+      // ignore
+    }
   });
+  await new Promise<void>((resolve, reject) => {
+    audioSocket.once('open', () => resolve());
+    audioSocket.once('error', reject);
+  });
+  audioSocket.send(
+    JSON.stringify({ type: 'audio.start', protocol: 'salescopilot-ai/1', sampleRate: 16000, format: 'pcm_s16le' })
+  );
 
-  const relayed = await salesperson.next((message) => message.type === 'ai_status');
-  assert.equal(relayed.state, 'connected');
-  assert.equal(relayed.connected, true);
-  assert.equal(relayed.audioReachingAi, true);
-  assert.equal(relayed.lastSuggestionAt, now);
-  assert.doesNotMatch(JSON.stringify(relayed), /super-secret/);
-  assert.doesNotMatch(JSON.stringify(relayed), /wss:\/\//);
-  assert.match(relayed.error, /code=1006/);
-  assert.match(relayed.error, /\[url redacted\]/);
+  // 100 ms of PCM16 at 16 kHz.
+  const frame = Buffer.alloc(3200, 7);
+  audioSocket.send(frame);
+  const deadline = Date.now() + 2000;
+  while (upstream.audio.length === 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(upstream.audio.length, 1, 'the customer frame is forwarded upstream');
+  assert.deepEqual(upstream.audio[0], frame);
 
-  // Server-persisted copy is available to the salesperson without the relay.
-  const sessionResponse = await get(
+  // The ticket is single-use: a replay cannot add a second audio source.
+  const replayClose = await new Promise<number>((resolve, reject) => {
+    const replay = new WebSocket(started.body.aiSocketUrl);
+    replay.on('close', (code) => resolve(code));
+    replay.on('error', reject);
+  });
+  assert.equal(replayClose, 4401);
+
+  upstream.message({ type: 'status', status: 'thinking' });
+  upstream.message({ type: 'transcript', speaker: 'user', text: 'We need this live by June.', isFinal: true, ordinal: 1 });
+  upstream.message({ type: 'suggestion', speaker: 'agent', text: 'What is driving the June date?', isFinal: true, ordinal: 2 });
+
+  const speech = await salesperson.next((message) => message.type === 'customer_speech_transcript');
+  assert.equal(speech.text, 'We need this live by June.');
+  const suggestion = await salesperson.next((message) => message.type === 'ai_suggestion');
+  assert.equal(suggestion.text, 'What is driving the June date?');
+
+  // Duplicate model output must not flood the panel.
+  upstream.message({ type: 'suggestion', text: 'What is driving the June date?', isFinal: true, ordinal: 3 });
+  await assert.rejects(
+    salesperson.next((message) => message.type === 'ai_suggestion', 600),
+    /Timed out/
+  );
+
+  // The customer page never receives AI text, only transport status.
+  await assert.rejects(
+    customer.next(
+      (message) => message.type === 'ai_suggestion' || message.type === 'customer_speech_transcript',
+      600
+    ),
+    /Timed out/
+  );
+
+  const status = await salesperson.next(
+    (message) => message.type === 'ai_status' && message.audioReachingAi === true
+  );
+  assert.equal(status.state, 'connected');
+  assert.equal(status.connected, true);
+  assert.equal(status.audioReachingAi, true);
+  // No upstream URL or token ever reaches a browser or the dashboard.
+  assert.doesNotMatch(JSON.stringify(status), /ai\.invalid|secret/);
+  const clientStatuses = fromServer.filter((message) => message.type === 'status');
+  assert.ok(clientStatuses.some((message) => message.status === 'listening'));
+  assert.ok(!fromServer.some((message) => message.type === 'suggestion' || message.type === 'transcript'));
+
+  // Persisted state is the bridge state, so a polling dashboard agrees.
+  const sessionState = await get(
     harness.base,
     `/api/sessions/${fixture.sessionId}`,
     fixture.salespersonKey
   );
-  assert.equal(sessionResponse.body.session.ai.state, 'connected');
-  assert.equal(sessionResponse.body.session.ai.connected, true);
-  assert.equal(sessionResponse.body.session.ai.audioReachingAi, true);
-  assert.equal(sessionResponse.body.session.aiCallCreated, false, 'no Ultravox call exists in this test');
-  assert.equal(sessionResponse.body.session.aiReady, false);
+  assert.equal(sessionState.body.session.ai.state, 'connected');
+  assert.equal(sessionState.body.session.ai.connected, true);
+  assert.equal(sessionState.body.session.aiCallCreated, true);
 
-  const diagnostics = await get(
+  // A second audio socket supersedes the first (one active audio source).
+  const firstClosed = new Promise<number>((resolve) => {
+    audioSocket.once('close', (code) => resolve(code));
+  });
+  const secondTicket = await post(
     harness.base,
-    `/api/sessions/${fixture.sessionId}/diagnostics`,
-    fixture.salespersonKey
+    `/api/sessions/${fixture.sessionId}/ai-call`,
+    {},
+    fixture.customerKey
   );
-  assert.equal(diagnostics.body.diagnostics.ai.connected, true);
-  assert.equal(diagnostics.body.diagnostics.ai.state, 'connected');
-  assert.equal(diagnostics.body.diagnostics.aiCallId, null);
-  assert.ok(!JSON.stringify(diagnostics.body).includes('super-secret'));
-
-  // A "connected" claim whose state is not connected is refused.
-  customer.send({
-    type: 'ai_status',
-    sessionId: fixture.sessionId,
-    state: 'closed',
-    connected: true,
+  assert.equal(secondTicket.body.isReused, true);
+  const replacement = new WebSocket(secondTicket.body.aiSocketUrl);
+  await new Promise<void>((resolve, reject) => {
+    replacement.once('open', () => resolve());
+    replacement.once('error', reject);
   });
-  const closed = await salesperson.next(
-    (message) => message.type === 'ai_status' && message.state === 'closed'
+  assert.equal(await firstClosed, 4001);
+  const replacementClosed = new Promise<void>((resolve) => replacement.once('close', () => resolve()));
+  replacement.close();
+  await replacementClosed;
+
+  // Closing the audio socket ends the upstream call (no idle GPU spend). A new
+  // start request creates a fresh bridge whose failure is reported, not fatal.
+  const restarted = await post(
+    harness.base,
+    `/api/sessions/${fixture.sessionId}/ai-call`,
+    {},
+    fixture.customerKey
   );
-  assert.equal(closed.connected, false, 'connected must match the reported state');
-
-  // Unknown states are rejected with a machine-readable code.
-  customer.send({ type: 'ai_status', sessionId: fixture.sessionId, state: 'teleported' });
-  const invalid = await customer.next(
-    (message) => message.type === 'error' && message.code === 'INVALID_SIGNALING_PAYLOAD'
+  assert.equal(restarted.status, 200);
+  const upstream2 = FakeUpstream.latest();
+  upstream2.open();
+  upstream2.message({ type: 'ready' });
+  upstream2.close(1006, 'network');
+  const reconnecting = await salesperson.next(
+    (message) => message.type === 'ai_status' && message.state === 'reconnecting'
   );
-  assert.match(invalid.message, /AI state/);
+  assert.match(String(reconnecting.error), /closed|network/i);
 
-  // Role enforcement: only the customer reports, only the salesperson requests.
-  salesperson.send({ type: 'ai_status', sessionId: fixture.sessionId, state: 'connected', connected: true });
-  const wrongReporter = await salesperson.next(
-    (message) => message.type === 'error' && message.code === 'INVALID_SIGNALING_ROLE'
-  );
-  assert.match(wrongReporter.message, /Only the customer/);
+  // Signaling still works while the AI recovers.
+  salesperson.send({
+    type: 'offer',
+    sessionId: fixture.sessionId,
+    offer: { type: 'offer', sdp: 'v=0 still-alive' },
+  });
+  const offer = await customer.next((message) => message.type === 'offer');
+  assert.equal(offer.offer.sdp, 'v=0 still-alive');
 
-  customer.send({ type: 'ai_reconnect', sessionId: fixture.sessionId });
-  const wrongRequester = await customer.next(
-    (message) => message.type === 'error' && message.code === 'INVALID_SIGNALING_ROLE'
-  );
-  assert.match(wrongRequester.message, /Only the salesperson/);
-
-  salesperson.send({ type: 'ai_reconnect', sessionId: fixture.sessionId, reason: 'dashboard button' });
-  const request = await customer.next((message) => message.type === 'ai_reconnect');
-  assert.equal(request.reason, 'dashboard button');
-
-  // A reconnecting salesperson dashboard receives the last known state on join.
   salesperson.close();
-  const salesperson2 = await openSocket(harness.base);
-  t.after(() => salesperson2.close());
-  const rejoin = await join(salesperson2, {
-    sessionId: fixture.sessionId,
-    role: 'salesperson',
-    credential: fixture.salespersonKey,
-  });
-  assert.equal(rejoin.type, 'joined');
-  assert.equal(rejoin.ai.state, 'closed');
-  assert.equal(rejoin.ai.connected, false);
-
-  // When the customer device disconnects, persisted AI state must stop
-  // claiming a live session (it existed only on that device).
   customer.close();
-  const started = Date.now();
-  let lastAi: any = null;
-  while (Date.now() - started < 2000) {
-    const response = await get(harness.base, `/api/sessions/${fixture.sessionId}`, fixture.salespersonKey);
-    lastAi = response.body.session.ai;
-    if (lastAi.connected === false && lastAi.state === 'disconnected') break;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  assert.equal(lastAi.connected, false);
-  assert.equal(lastAi.state, 'disconnected');
-  assert.match(String(lastAi.error), /customer device disconnected/i);
-
-  // A brand new invitation/session starts with no AI state carried over.
-  const freshFixture = await createFixture(harness.base, 'fresh');
-  const fresh = await get(harness.base, `/api/sessions/${freshFixture.sessionId}`, freshFixture.salespersonKey);
-  assert.equal(fresh.body.session.ai.state, null);
-  assert.equal(fresh.body.session.ai.connected, false);
 });
 

@@ -11,7 +11,7 @@
  * Negotiation policy: the salesperson is always the offerer, the customer is
  * always the answerer. This removes glare by construction.
  */
-import { AiSessionStatus, AiVoiceSession, Medium, Role, SelfHostedAiSession } from './aiSession';
+import { AiSessionStatus, AiVoiceSession, Medium, SelfHostedAiSession } from './aiSession';
 import {
   AI_RECONNECT_DELAYS_MS,
   AI_RECONNECT_MAX_ATTEMPTS,
@@ -1165,7 +1165,6 @@ export class CallEngine {
         audioReachingAi:
           this.ai.connected && !muted && Boolean(this.aiVoice?.micSourceNode),
       };
-      this.reportAiStatus();
     }
 
     const track = this.localStream?.getAudioTracks()[0];
@@ -2367,9 +2366,6 @@ export class CallEngine {
       // Start the AI once per engine. Recovery (after a terminal session) is
       // owned by the bounded AI recovery loop, not by signaling reconnects.
       if (this.ai.state === 'off') void this.startAi({ replace: true });
-      // Re-publish the live state on the new socket so the server/salesperson
-      // do not keep a state that changed while signaling was down.
-      else this.reportAiStatus();
     } else if (this.options.role === 'salesperson') {
       // Last known AI state reported by the customer device (server-persisted).
       this.hydrateRemoteAi(data.ai ?? data.session?.ai);
@@ -2879,13 +2875,12 @@ export class CallEngine {
 
       const call = (await response.json()) as {
         callId?: string;
-        joinUrl?: string;
+        /** Same-origin audio upload URL minted by the server. */
+        aiSocketUrl?: string;
         isReused?: boolean;
       };
-      if (!call.callId || !call.joinUrl) throw new Error('The server returned an incomplete AI call.');
-      if (call.isReused) {
-        // Defensive: this client always asks for replacement.
-        throw new Error('The server reused an existing AI call; a fresh call is required.');
+      if (!call.callId || !call.aiSocketUrl) {
+        throw new Error('The server returned an incomplete AI call.');
       }
       if (generation !== this.aiGeneration) return;
 
@@ -2967,42 +2962,6 @@ export class CallEngine {
         });
       });
 
-      session.addEventListener('transcripts', () => {
-        if (isStale()) return;
-        const timestamp = new Date().toLocaleTimeString();
-        let lastSuggestionAt = this.ai.lastSuggestionAt;
-        let lastResponseAt = this.ai.lastResponseAt;
-        for (const transcript of session.transcripts) {
-          if (transcript.speaker === Role.AGENT && transcript.text.trim()) {
-            this.sendSignal({
-              type: 'ai_suggestion',
-              text: transcript.text,
-              isFinal: transcript.isFinal,
-              ordinal: transcript.ordinal,
-              timestamp,
-            });
-            lastResponseAt = Date.now();
-            if (transcript.isFinal) lastSuggestionAt = lastResponseAt;
-          } else if (transcript.speaker === Role.USER) {
-            this.customerSpeech = transcript.text;
-            if (transcript.isFinal && transcript.text.trim()) {
-              this.sendSignal({
-                type: 'customer_speech_transcript',
-                text: transcript.text,
-                isFinal: true,
-                ordinal: transcript.ordinal,
-                timestamp,
-              });
-            }
-          }
-        }
-        this.setAi(
-          { lastResponseAt, lastSuggestionAt, lastEventAt: Date.now() },
-          { report: false }
-        );
-        this.reportAiStatus();
-      });
-
       session.addEventListener('error', (event) => {
         if (isStale()) return;
         const error = (event as unknown as { error?: Error }).error;
@@ -3024,7 +2983,7 @@ export class CallEngine {
       }, AI_CONNECT_TIMEOUT_MS);
 
       this.log(`Joining the new AI call (${String(call.callId).slice(0, 8)}).`);
-      session.joinCall(call.joinUrl);
+      session.joinCall(call.aiSocketUrl);
     } catch (err) {
       failure = sanitizeAiDetail((err as Error)?.message) || 'AI setup failed.';
       this.log(`AI setup failed: ${failure}`);
@@ -3060,23 +3019,9 @@ export class CallEngine {
       : this.ai.state;
     this.aiError = this.ai.error;
     this.emit();
-    if (options.report !== false) this.reportAiStatus();
-  }
-
-  /** Forwards the customer's real AI state to the server/salesperson. */
-  private reportAiStatus(): void {
-    if (this.options.role !== 'customer' || !this.options.enableAi) return;
-    this.sendSignal({
-      type: 'ai_status',
-      state: this.ai.state,
-      connected: this.ai.connected,
-      error: this.ai.error,
-      callId: this.ai.callId,
-      reconnectAttempt: this.ai.reconnectAttempt,
-      audioReachingAi: this.ai.audioReachingAi,
-      lastResponseAt: this.ai.lastResponseAt,
-      lastSuggestionAt: this.ai.lastSuggestionAt,
-    });
+    // AI state is owned by the server bridge now: nothing is reported from the
+    // browser. `options` is kept for call-site compatibility.
+    void options;
   }
 
   /** Mirrors customer-reported AI state into the salesperson's engine. */

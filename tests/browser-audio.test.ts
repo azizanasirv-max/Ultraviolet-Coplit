@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Browser, BrowserContext, Page, chromium } from 'playwright';
 import WebSocket from 'ws';
+import type { AiBridgeSocket } from '../server/aiBridge';
 
 process.env.NODE_ENV = 'production';
 process.env.AI_SERVICE_URL = 'https://ai.invalid';
@@ -61,6 +62,67 @@ const fakeAiServiceFetch = (async () => {
     { status: 200, headers: { 'Content-Type': 'application/json' } }
   );
 }) as unknown as typeof fetch;
+
+/**
+ * Server-side stand-in for the Modal WebSocket. The browser talks to our server
+ * only; this object plays the model so the UI path can be exercised end-to-end.
+ */
+class BrowserFakeUpstream implements AiBridgeSocket {
+  static instances: BrowserFakeUpstream[] = [];
+  readyState = 0;
+  bufferedAmount = 0;
+  readonly sent: Array<string | Buffer> = [];
+  private handlers = new Map<string, Array<(...args: any[]) => void>>();
+
+  constructor(readonly url: string) {
+    BrowserFakeUpstream.instances.push(this);
+  }
+
+  static latest(): BrowserFakeUpstream {
+    const instance = BrowserFakeUpstream.instances.at(-1);
+    assert.ok(instance, 'the server created an upstream AI socket');
+    return instance;
+  }
+
+  send(data: string | Buffer): void {
+    this.sent.push(data);
+  }
+
+  close(code = 1000, reason = ''): void {
+    if (this.readyState === 3) return;
+    this.readyState = 3;
+    this.emit('close', code, reason);
+  }
+
+  on(event: string, handler: (...args: any[]) => void): void {
+    const list = this.handlers.get(event) ?? [];
+    list.push(handler);
+    this.handlers.set(event, list);
+  }
+
+  emit(event: string, ...args: any[]): void {
+    for (const handler of this.handlers.get(event) ?? []) handler(...args);
+  }
+
+  open(): void {
+    this.readyState = 1;
+    this.emit('open');
+  }
+
+  message(payload: unknown): void {
+    this.emit('message', JSON.stringify(payload));
+  }
+
+  get audio(): Buffer[] {
+    return this.sent.filter((item): item is Buffer => Buffer.isBuffer(item));
+  }
+
+  get json(): any[] {
+    return this.sent
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => JSON.parse(item));
+  }
+}
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -233,7 +295,12 @@ test('prototype2 role-specific interfaces', async (t) => {
 });
 
 test('prototype2 three-path audio with synthetic media', async (t) => {
-  const server = await createPrototype2Server({ port: 0, serveFrontend: true, aiServiceFetch: fakeAiServiceFetch });
+  const server = await createPrototype2Server({
+    port: 0,
+    serveFrontend: true,
+    aiServiceFetch: fakeAiServiceFetch,
+    aiSocketFactory: (url: string) => new BrowserFakeUpstream(url),
+  });
   const base = `http://127.0.0.1:${server.port}`;
   const browser = await launchBrowser();
   t.after(async () => {
@@ -458,49 +525,30 @@ test('prototype2 three-path audio with synthetic media', async (t) => {
   });
 
   await t.test('AI response text reaches this salesperson dashboard', async () => {
-    // The customer leaves so a protocol-level customer connection can stand in
-    // for the AI agent. This exercises the real server route and the real
-    // salesperson UI render path (text relay: customer -> server -> dashboard).
-    await customerPage.click('[data-testid="leave-call"]');
-    await sleep(400);
-
-    const inviteToken = decodeURIComponent(inviteUrl.split('invite=')[1]);
-    const customerKey = await customerPage.evaluate(
-      (token) =>
-        JSON.parse(sessionStorage.getItem(`sc.prototype2.customer.${token}`) || '{}').customerKey as string,
-      inviteToken
+    // The customer's real (synthetic-device) microphone must reach the
+    // server-side bridge, and model text must render only for the salesperson.
+    const upstream = BrowserFakeUpstream.latest();
+    upstream.open();
+    upstream.message({ type: 'ready', model: 'faster-whisper+Qwen2.5-3B-Instruct' });
+    await waitFor(
+      () => Promise.resolve(upstream.audio.length),
+      (frames) => frames > 0,
+      15000
     );
-    const sessionId = await salespersonPage.evaluate(
-      () => JSON.parse(localStorage.getItem('sc.prototype2.salesperson') || '{}').sessionId as string
-    );
-
-    const socket = new WebSocket(`${base.replace('http', 'ws')}/ws`);
-    await new Promise<void>((resolve, reject) => {
-      socket.once('open', () => resolve());
-      socket.once('error', reject);
+    upstream.message({
+      type: 'transcript',
+      speaker: 'user',
+      text: 'We need this live by June.',
+      isFinal: true,
+      ordinal: 1,
     });
-    socket.send(JSON.stringify({ type: 'join', sessionId, role: 'customer', credential: customerKey }));
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('join ack timeout')), 5000);
-      socket.on('message', (raw) => {
-        const message = JSON.parse(raw.toString());
-        if (message.type === 'joined') {
-          clearTimeout(timer);
-          resolve();
-        }
-      });
+    upstream.message({
+      type: 'suggestion',
+      speaker: 'agent',
+      text: 'TEST-AI-SUGGESTION-123: ask about the renewal date.',
+      isFinal: true,
+      ordinal: 2,
     });
-
-    socket.send(
-      JSON.stringify({
-        type: 'ai_suggestion',
-        sessionId,
-        text: 'TEST-AI-SUGGESTION-123: ask about the renewal date.',
-        isFinal: true,
-        ordinal: 7,
-        timestamp: '10:00',
-      })
-    );
 
     await salespersonPage.waitForFunction(
       () =>
@@ -509,7 +557,15 @@ test('prototype2 three-path audio with synthetic media', async (t) => {
     );
     const rendered = await salespersonPage.textContent('[data-testid="ai-suggestion-latest"]');
     assert.match(rendered || '', /renewal date/);
-    socket.close();
+
+    // The suggestion is text in the panel; nothing is spoken or injected.
+    assert.equal(await salespersonPage.locator('[data-testid="ai-suggestions"] audio').count(), 0);
+    const customerText = (await customerPage.textContent('[data-testid="role-customer"]')) || '';
+    assert.ok(!customerText.includes('TEST-AI-SUGGESTION-123'));
+    assert.equal(await customerPage.locator('[data-testid="ai-suggestions"]').count(), 0);
+    // The human call is still connected on both sides.
+    assert.equal((await snapshot(salespersonPage)).callState, 'connected');
+    assert.equal((await snapshot(customerPage)).callState, 'connected');
   });
 
   await t.test('server receives client diagnostics from the salesperson', async () => {

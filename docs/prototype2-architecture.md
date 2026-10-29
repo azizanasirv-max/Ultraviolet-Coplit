@@ -5,15 +5,20 @@ root cause of the broken human-to-human audio, the authorization model, the
 three media paths, the tests that were actually executed, and the remaining
 limitations.
 
-> **AI provider note (current implementation).** The hosted Ultravox dependency
-> has been replaced by a self-hosted model service deployed on Modal. The
-> customer browser now streams 16 kHz PCM over WSS to that service instead of
-> running `ultravox-client`, and the server calls `POST /v1/calls` on it instead
-> of `api.ultravox.ai`. Human-to-human WebRTC, sessions, invitations,
-> TURN/Admin Settings, authentication and the dashboards are unchanged. See
-> [self-hosted-ai-modal.md](./self-hosted-ai-modal.md) for deployment, cost and
-> the device verification checklist. Provider-specific details below that still
-> name Ultravox are historical and describe the code that was replaced.
+> **AI transport note (current implementation).** The hosted Ultravox dependency
+> is gone. The customer browser streams 16 kHz PCM to **this server** at
+> `/ws/ai` using a short-lived, single-use, customer-bound ticket. The server
+> (`server/aiBridge.ts`) is the only process that talks to the Modal model: it
+> creates the call with `POST /v1/calls` and opens the single upstream WebSocket.
+> Model output is text, and the server relays it to the salesperson over the
+> existing signaling socket. The browser never receives a Modal URL or
+> credential, and salesperson audio can never enter the AI path (a salesperson
+> ticket is rejected at `/ws/ai` with code 4403). Human-to-human WebRTC,
+> sessions, invitations, TURN/Admin Settings, authentication and the dashboards
+> are unchanged. See [self-hosted-ai-modal.md](./self-hosted-ai-modal.md) for
+> deployment, cost and the device verification checklist. Sections below that
+> still describe the old customer-device/browser-relayed AI path are historical.
+
 
 ## 1. Routes and participant interfaces
 
@@ -66,7 +71,7 @@ POST /api/sessions/:id/invitations     (Bearer salespersonKey) -> rotate invite
 POST /api/sessions/:id/invitations/revoke (Bearer salespersonKey)
 GET  /api/sessions/:id/diagnostics     (Bearer salespersonKey) -> server view
 POST /api/invitations/redeem           { inviteToken, customerKey? } -> customerKey
-POST /api/sessions/:id/ai-call         (Bearer customerKey) -> { joinUrl }
+POST /api/sessions/:id/ai-call         (Bearer participant) -> { callId, aiSocketUrl }
 GET  /api/sessions/:id/ice-config      (Bearer participant credential) STUN/TURN
 GET  /api/health                       capability flags only (no keys)
 WS   /ws                               join + signaling relay
@@ -235,9 +240,9 @@ The lifecycle is implemented as:
 * `POST /api/sessions/:id/ai-call { replace: true }` discards the session's
   cached call record, best-effort `DELETE`s the superseded provider call, and
   creates a new one. The client always sends `replace: true`; the no-body form
-  remains for idempotent reads. `/ultravox-call` is a deprecated alias of the
-  same handler. Concurrent creations for one session return
-  `409 AI_CALL_IN_PROGRESS`.
+  returns a fresh single-use ticket for the same live upstream call, so recovery
+  does not spawn a second GPU call. `/ultravox-call` was removed. Concurrent
+  creations for one session return `409 AI_CALL_IN_PROGRESS`.
 * Every AI attempt gets a monotonically increasing generation. All session callbacks
   (`status`, `transcripts`, `error`) and the 20 s connect timeout ignore events
   from an older generation, so a dead session cannot overwrite a new one.
@@ -245,10 +250,11 @@ The lifecycle is implemented as:
   session that stayed live for ≥ 60 s earns a fresh budget. After the bound the
   dashboard shows the real provider error plus "recovery stopped after 3
   attempts"; it never shows a false connected state.
-* The customer device reports its real state over `ai_status`; the server stores
-  it (`session.ai`) and relays it to the salesperson. The salesperson's **Restart
-  AI** button sends `ai_reconnect` back over signaling; only the customer device
-  can create the AI session because only it holds the microphone.
+* The **server bridge** owns the live AI state. It stores it (`session.ai`),
+  pushes `ai_status` to the salesperson and transport `status` to the customer's
+  `/ws/ai` socket. The salesperson's **Restart AI** button sends `ai_reconnect`;
+  the server restarts the upstream call. AI text is never sent by a browser:
+  both roles receive `INVALID_SIGNALING_ROLE` if they try.
 * `ai_status` is observational: if the salesperson is offline it is still stored,
   and it is hydrated into the salesperson dashboard from `joined` /
   `session_state` / the 5 s session poll.
@@ -274,9 +280,10 @@ no longer used as evidence of a live session.
 
 ### Duplicate customer capture: trade-off
 
-The customer device captures the microphone twice: once for the AI session
-(its own capture, released on teardown) and once for the peer connection. This
-is the one unavoidable duplication:
+The customer device captures the microphone twice: once for the AI audio
+socket (`/ws/ai`, released on teardown) and once for the peer connection. The
+AI capture is never connected to the peer connection, so it cannot leak into
+the human call. This is the one unavoidable duplication:
 
 * Routing the AI `micSourceNode` into the PC would require a renegotiation
   initiated by the answerer, adding glare handling and an AudioContext that may

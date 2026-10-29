@@ -377,7 +377,7 @@ const installFetch = (
       });
     }
     if (url.includes('/ai-call')) {
-      return jsonResponse({ callId: 'call_test', joinUrl: 'wss://ai.invalid/join', isReused: false });
+      return jsonResponse({ callId: 'call_test', aiSocketUrl: 'wss://ai.invalid/join', isReused: false });
     }
     return jsonResponse({});
   };

@@ -200,6 +200,10 @@ class SuggestionEngine:
         return transcript, clean_suggestion(raw)
 
 
+# Declared before the class: decorators evaluate module globals immediately.
+service_secret = modal.Secret.from_name("ai-service")
+
+
 @app.cls(
     image=image,
     # T4 is the cheapest option that runs a 3B model in fp16 (~$0.000164/s).
@@ -226,8 +230,6 @@ class AiService:
     @modal.asgi_app()
     def web(self) -> Any:
         return create_app(self.engine)
-
-service_secret = modal.Secret.from_name("ai-service")
 
 
 
@@ -454,6 +456,7 @@ async def _run_call(engine: SuggestionEngine, socket: Any, record: dict[str, Any
     )
     await send({"type": "status", "status": "listening"})
 
+    residual = b''
     try:
         while True:
             if time.monotonic() - started > max_seconds:
@@ -475,8 +478,14 @@ async def _run_call(engine: SuggestionEngine, socket: Any, record: dict[str, Any
                 if len(audio) > MAX_FRAME_BYTES:
                     # A malformed client must not grow the server buffer.
                     continue
-                for segment in segmenter.push(audio):
-                    await process(segment)
+                # Chunks are not guaranteed to be frame-aligned; keep the tail
+                # so no audio is dropped at chunk boundaries.
+                data = residual + audio
+                aligned = len(data) - (len(data) % FRAME_BYTES)
+                residual = data[aligned:]
+                if aligned:
+                    for segment in segmenter.push(data[:aligned]):
+                        await process(segment)
                 continue
 
             text = message.get("text")
@@ -490,7 +499,26 @@ async def _run_call(engine: SuggestionEngine, socket: Any, record: dict[str, Any
                 continue
 
             kind = event.get("type")
-            if kind == "ping":
+            if kind == "audio.start":
+                # The audio contract is enforced here too, not only in the app
+                # server, so a leaked call URL cannot feed another format.
+                protocol = event.get("protocol")
+                rate = event.get("sampleRate")
+                audio_format = event.get("format")
+                if (
+                    (protocol is not None and protocol != PROTOCOL)
+                    or (rate is not None and int(rate) != SAMPLE_RATE)
+                    or (audio_format is not None and audio_format != "pcm_s16le")
+                ):
+                    await send(
+                        {
+                            "type": "error",
+                            "code": "PROTOCOL_ERROR",
+                            "message": "Unsupported audio contract.",
+                        }
+                    )
+                    break
+            elif kind == "ping":
                 await send({"type": "pong", "at": event.get("at")})
             elif kind in ("audio.end", "stop"):
                 final = segmenter.flush()

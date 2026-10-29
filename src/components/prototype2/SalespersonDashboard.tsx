@@ -372,10 +372,10 @@ export const SalespersonDashboard: React.FC = () => {
   /**
    * AI status shown to the salesperson.
    *
-   * The Ultravox session lives on the customer device. `snapshot.ai` is the
-   * live value relayed over signaling; `sessionState.ai` is the server's
+   * The AI session is owned by the server's Modal bridge. `snapshot.ai` is the
+   * live state relayed over signaling; `sessionState.ai` is the server's
    * persisted copy (used before the first relay or after a signaling blip).
-   * Both are real reported states, never "the server has an API key".
+   * Both are real bridge states, never "the server has an API key".
    */
   const aiView = useMemo(() => {
     const live = snapshot?.ai;
@@ -713,7 +713,7 @@ export const SalespersonDashboard: React.FC = () => {
             ) : null}
           </section>
 
-          {/* AI copilot status: the real customer-side Ultravox session */}
+          {/* AI copilot status: the real server-side Modal session */}
           <Panel
             title="AI copilot status"
             icon={<Sparkles className="w-3.5 h-3.5" />}
@@ -726,8 +726,8 @@ export const SalespersonDashboard: React.FC = () => {
                   !engineStarted
                     ? 'Start the call first'
                     : !sessionState?.customerConnected
-                      ? 'The customer device must be connected to restart the AI'
-                      : 'Ask the customer device to create a fresh AI session'
+                      ? 'The customer must be connected to restart the AI'
+                      : 'Restart the server-side AI session'
                 }
                 className="text-[10px] px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold disabled:opacity-40"
               >
@@ -765,7 +765,7 @@ export const SalespersonDashboard: React.FC = () => {
                 testId="ai-last-response"
               />
               <StatusLine
-                label="Ultravox call created"
+                label="AI service call created"
                 value={aiView.callCreated ? 'yes (not proof of connection)' : 'no'}
                 tone={aiView.callCreated ? 'indigo' : 'slate'}
                 detail={`state source: ${aiView.source}${aiView.callId ? ` · call ${aiView.callId.slice(0, 8)}` : ''}`}
@@ -775,18 +775,18 @@ export const SalespersonDashboard: React.FC = () => {
                 <p className="text-[11px] text-amber-300" data-testid="ai-reconnecting">
                   {aiView.state === 'reconnecting'
                     ? `Reconnecting AI (attempt ${aiView.reconnectAttempt} of ${aiView.maxReconnectAttempts}); the customer call audio is unaffected.`
-                    : 'The customer device is creating/connecting a new AI session…'}
+                    : 'The server is creating/connecting a new AI session…'}
                 </p>
               ) : null}
               {snapshot?.aiReconnectRequestedAt && !aiView.reconnecting && !aiView.connected ? (
                 <p className="text-[11px] text-slate-400" data-testid="ai-reconnect-pending">
                   Restart requested at {new Date(snapshot.aiReconnectRequestedAt).toLocaleTimeString()}; waiting for the
-                  customer device to report the new session.
+                  server to confirm the new AI session.
                 </p>
               ) : null}
               {!sessionState?.customerConnected ? (
                 <p className="text-[11px] text-slate-500">
-                  The AI runs on the customer device. It cannot start or recover until the customer is connected.
+                  The AI runs on the server and listens to the customer's voice only. It cannot start until the customer is connected.
                 </p>
               ) : null}
             </div>

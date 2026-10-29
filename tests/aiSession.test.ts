@@ -118,7 +118,7 @@ const makeHarness = (options: {
       return new Response(
         JSON.stringify({
           callId: `call_${callNumber}`,
-          joinUrl: `wss://ai.invalid/join-${callNumber}`,
+          aiSocketUrl: `wss://ai.invalid/join-${callNumber}`,
           isReused: false,
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } }
@@ -179,10 +179,8 @@ test('manual retry creates a brand new AI call and a new AI session', async () =
     assert.equal(state.ai.connected, false);
     assert.equal(state.ai.callId, 'call_1');
 
-    const reported = signals.filter((signal) => signal.type === 'ai_status');
-    assert.ok(reported.length > 0, 'AI state is reported over signaling');
-    assert.equal(reported.at(-1).connected, false);
-    assert.equal(reported.at(-1).state, 'connecting');
+    // The browser no longer reports AI state: the server bridge owns it.
+    assert.equal(signals.filter((signal) => signal.type === 'ai_status').length, 0);
     assert.doesNotMatch(JSON.stringify(state.logs), /wss:\/\/ai\.invalid/);
   } finally {
     await engine.stop('test');
@@ -210,17 +208,8 @@ test('a live SDK status is the only way to become connected, and audio reaching 
     assert.equal(state.ai.audioReachingAi, true);
     assert.equal(session.outputMedium, 'text', 'AI output stays text-only');
 
-    const last = signals.filter((signal) => signal.type === 'ai_status').at(-1);
-    assert.equal(last.state, 'connected');
-    assert.equal(last.connected, true);
-    assert.equal(last.audioReachingAi, true);
-
     engine.setMicMuted(true);
     assert.equal(snapshot(engine).ai.audioReachingAi, false);
-    assert.equal(
-      signals.filter((signal) => signal.type === 'ai_status').at(-1).audioReachingAi,
-      false
-    );
   } finally {
     await engine.stop('test');
     restoreFetch();
@@ -362,7 +351,7 @@ test('concurrent retry requests do not create duplicate calls', async () => {
     assert.equal(sessions.length, 0, 'no SDK session before the call exists');
 
     resolveFetch(
-      new Response(JSON.stringify({ callId: 'call_slow', joinUrl: 'wss://ai.invalid/slow' }), {
+      new Response(JSON.stringify({ callId: 'call_slow', aiSocketUrl: 'wss://ai.invalid/slow' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       })

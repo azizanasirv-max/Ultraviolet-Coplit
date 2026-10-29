@@ -35,7 +35,7 @@ export interface AiCall {
 }
 
 const DEFAULT_MAX_CALL_SECONDS = 3600;
-const DEFAULT_MODEL_LABEL = 'selfhosted-qwen2.5-3b';
+const DEFAULT_MODEL_LABEL = 'faster-whisper-small.en+Qwen2.5-3B-Instruct';
 const CALL_REQUEST_TIMEOUT_MS = 15_000;
 const MAX_JOIN_URL_LENGTH = 2048;
 
@@ -166,7 +166,11 @@ export class AiServiceError extends Error {
 
 const isAcceptableJoinUrl = (value: string, settings: AiServiceSettings): boolean => {
   if (!value || value.length > MAX_JOIN_URL_LENGTH) return false;
-  if (!/^wss:\/\/\S+$/i.test(value)) return false;
+  // Production must be TLS. A plain `ws://` URL is accepted only when the
+  // configured service itself is loopback http (local Modal/dev harness).
+  const secure = /^wss:\/\/\S+$/i.test(value);
+  const loopback = settings.baseUrl.startsWith('http://') && /^ws:\/\/\S+$/i.test(value);
+  if (!secure && !loopback) return false;
   try {
     return new URL(value).host === settings.joinHost;
   } catch {

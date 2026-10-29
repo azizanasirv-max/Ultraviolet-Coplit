@@ -210,9 +210,8 @@ test('invitation tokens are unguessable and never stored in plaintext', () => {
 test('a session AI call can be cleared so a dead join URL is never handed out again', () => {
   const store = makeStore();
   const created = store.createSession('AI lifecycle');
-  store.setUltravoxCall(created.sessionId, {
+  store.setAiCall(created.sessionId, {
     callId: 'call_old',
-    joinUrl: 'wss://ai.invalid/join-old?token=secret',
     createdAt: Date.now(),
     createdByParticipantId: 'p1',
   });
@@ -221,9 +220,9 @@ test('a session AI call can be cleared so a dead join URL is never handed out ag
   assert.equal(store.publicState(session).aiCallCreated, true);
   assert.equal(store.publicState(session).ai.connected, false);
 
-  const cleared = store.clearUltravoxCall(created.sessionId);
+  const cleared = store.clearAiCall(created.sessionId);
   assert.equal(cleared?.callId, 'call_old');
-  assert.equal(store.getUltravoxCall(created.sessionId), null);
+  assert.equal(store.getAiCall(created.sessionId), null);
   const after = store.getSession(created.sessionId)!;
   assert.equal(store.publicState(after).aiCallCreated, false);
   assert.equal(store.publicState(after).aiReady, false);
@@ -232,9 +231,8 @@ test('a session AI call can be cleared so a dead join URL is never handed out ag
 test('AI runtime liveness is reported separately from "a call record exists"', () => {
   const store = makeStore();
   const created = store.createSession('AI runtime');
-  store.setUltravoxCall(created.sessionId, {
+  store.setAiCall(created.sessionId, {
     callId: 'call_live',
-    joinUrl: 'wss://ai.invalid/join-live',
     createdAt: Date.now(),
     createdByParticipantId: 'p1',
   });

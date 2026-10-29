@@ -3,16 +3,20 @@
  *
  * The customer's browser captures its microphone a second time (the first
  * capture belongs to the human-to-human WebRTC call), downsamples it to 16 kHz
- * mono PCM and streams it over a WebSocket to the self-hosted Modal service.
- * The service answers with text events: `transcript` (what the customer said)
- * and `suggestion` (the copilot text for the salesperson).
+ * mono PCM and streams it to OUR server over a same-origin WebSocket at
+ * `/ws/ai`. The server forwards it to the Modal model; model text goes to the
+ * salesperson, never back to this page and never into the call.
+ *
+ * The only URL this class ever receives is the short-lived, single-use ticket
+ * URL minted by `POST /api/sessions/:id/ai-call`. A cross-origin URL is refused
+ * so a misconfiguration can never expose the Modal endpoint to a browser.
  *
  * The public surface deliberately mirrors the small subset of the previous SDK
  * that `CallEngine` used, so the AI lifecycle, recovery logic and dashboards are
  * unchanged:
  *
  *   status, transcripts, micSourceNode
- *   joinCall(url), leaveCall(), muteMic(), unmuteMic(),
+ *   joinCall(ticketUrl), leaveCall(), muteMic(), unmuteMic(),
  *   muteSpeaker(), setOutputMedium(medium)
  *   events: 'status', 'transcripts', 'error'
  *
@@ -163,6 +167,22 @@ export const resampleToPcm16 = (input: Float32Array, inputRate: number): Int16Ar
   return output;
 };
 
+/**
+ * Rejects any AI socket URL that is not this page's origin. Node/test harnesses
+ * have no `location`, so the check is skipped there (the server is authoritative).
+ */
+const isSameOriginSocketUrl = (value: string): boolean => {
+  const location = (globalThis as { location?: Location }).location;
+  if (!location || !location.host) return true;
+  try {
+    const url = new URL(value, location.href);
+    if (url.protocol !== 'wss:' && url.protocol !== 'ws:') return false;
+    return url.host === location.host;
+  } catch {
+    return false;
+  }
+};
+
 const LIVE_STATUSES: ReadonlySet<string> = new Set([
   AiSessionStatus.IDLE,
   AiSessionStatus.LISTENING,
@@ -204,7 +224,8 @@ export class SelfHostedAiSession extends EventTarget implements AiVoiceSession {
     this.options = options;
   }
 
-  joinCall(joinUrl: string): void {
+  /** Joins the server's AI audio socket. `socketUrl` must be same-origin. */
+  joinCall(socketUrl: string): void {
     if (this.socket || this.status !== AiSessionStatus.DISCONNECTED) {
       void this.leaveCall();
     }
@@ -217,9 +238,14 @@ export class SelfHostedAiSession extends EventTarget implements AiVoiceSession {
     this.micSourceNode = null;
     this.setStatus(AiSessionStatus.CONNECTING);
 
+    if (!isSameOriginSocketUrl(socketUrl)) {
+      this.fail('The AI audio connection must use this application origin.');
+      return;
+    }
+
     let socket: WebSocket;
     try {
-      socket = this.createSocket(joinUrl);
+      socket = this.createSocket(socketUrl);
     } catch {
       this.fail('Could not open a connection to the AI service.');
       return;

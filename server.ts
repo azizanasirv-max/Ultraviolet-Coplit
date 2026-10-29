@@ -13,6 +13,7 @@
  */
 import express, { Request, Response } from 'express';
 import http from 'http';
+import { randomBytes } from 'crypto';
 import { pathToFileURL } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import dotenv from 'dotenv';
@@ -57,13 +58,19 @@ import {
 } from './server/expressTurn';
 import {
   AiServiceError,
+  AiServiceSettings,
   aiServiceReadiness,
-  createAiCall,
-  endAiCallQuietly,
   resolveAiServiceSettings,
-  sanitizeAiCallId,
   sanitizeProviderDetail,
 } from './server/aiService';
+import {
+  AI_MAX_FRAME_BYTES,
+  AI_PROTOCOL,
+  AI_SYSTEM_PROMPT,
+  AiBridgeEvent,
+  AiBridgeManager,
+  AiBridgeSocket,
+} from './server/aiBridge';
 
 dotenv.config();
 
@@ -83,43 +90,6 @@ const configuredPublicUrl = (): string | null => {
   if (!value || value === 'MY_APP_URL') return null;
   if (!/^https?:\/\//i.test(value)) return null;
   return value.replace(/\/+$/, '');
-};
-
-/** AI lifecycle states the customer device is allowed to report. */
-const AI_STATES = new Set([
-  'off',
-  'creating',
-  'connecting',
-  'connected',
-  'reconnecting',
-  'disconnected',
-  'closed',
-  'error',
-]);
-
-/**
- * Removes anything that could be a credential or an authenticated endpoint from
- * provider/SDK error text before it is stored, relayed or rendered.
- */
-const sanitizeAiDetail = (value: unknown, maxLength = 300): string | null => {
-  if (typeof value !== 'string') return null;
-  let text = value;
-  text = text.replace(/wss?:\/\/[^\s"']+/gi, '[url redacted]');
-  text = text.replace(/https?:\/\/[^\s"']+/gi, '[url redacted]');
-  text = text.replace(
-    /((?:token|api[_-]?key|authorization|credential|password|secret)\s*[=:]\s*)[^\s&,;"']+/gi,
-    '$1[redacted]'
-  );
-  text = text.replace(/\s+/g, ' ').trim();
-  if (!text) return null;
-  return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
-};
-
-/** Rejects non-epoch or far-future timestamps from a browser. */
-const sanitizeTimestamp = (value: unknown): number | null => {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-  if (value <= 0 || value > Date.now() + 60_000) return null;
-  return Math.round(value);
 };
 
 /** APP_URL sanity checks: invitation links and WSS depend on it. */
@@ -179,13 +149,15 @@ export interface CreateServerOptions {
   serveFrontend?: boolean;
   /**
    * Injected for tests so no real self-hosted AI call is created.
-   *
-   * `ultravoxFetch` is accepted as a deprecated alias so older test harnesses
-   * keep working; it has the same meaning.
    */
   aiServiceFetch?: typeof fetch;
-  /** @deprecated Use `aiServiceFetch`. */
-  ultravoxFetch?: typeof fetch;
+  /**
+   * Explicit AI service settings. Production reads them from the environment;
+   * tests inject them (or null to prove the AI-off path).
+   */
+  aiSettings?: AiServiceSettings | null;
+  /** Test seam: replace the upstream Modal WebSocket client. */
+  aiSocketFactory?: (url: string) => AiBridgeSocket;
   /** Injected for tests so no real TURN credential provider is called. */
   turnFetch?: typeof fetch;
   /** Per-server cache for provider-issued TURN credentials. */
@@ -206,7 +178,7 @@ interface SocketState {
 
 export async function createPrototype2Server(options: CreateServerOptions = {}) {
   const store = options.store ?? new SessionStore();
-  const aiServiceFetch = options.aiServiceFetch ?? options.ultravoxFetch ?? fetch;
+  const aiServiceFetch = options.aiServiceFetch ?? fetch;
   const turnFetch = options.turnFetch ?? fetch;
   const turnCache = options.turnCache ?? new Map<string, ProviderIceResult>();
   const rstreamCache = options.rstreamCache ?? new Map<string, RstreamTurnResult>();
@@ -235,6 +207,8 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
 
   const server = http.createServer(app);
   const wss = new WebSocketServer({ noServer: true });
+  /** Customer -> server audio upload only. Not a participant socket. */
+  const aiWss = new WebSocketServer({ noServer: true, maxPayload: AI_MAX_FRAME_BYTES });
 
   /** Authoritative map participantId -> live socket. */
   const sockets = new Map<string, WebSocket>();
@@ -300,6 +274,401 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
 
   const counterpartOf = (session: SessionRecord, role: ParticipantRole) =>
     role === 'salesperson' ? session.customer : session.salesperson;
+
+  // -------------------------------------------------------------------------
+  // Server-side AI bridge
+  //
+  // ONE outbound path to the Modal service. The browser only ever receives a
+  // single-use same-origin ticket; the upstream URL and credentials never leave
+  // this process. Only the customer's audio socket may feed it.
+  // -------------------------------------------------------------------------
+
+  const AI_TICKET_TTL_MS = 120_000;
+  const AI_TICKET_MAX = 2_000;
+  const aiTickets = new Map<
+    string,
+    { sessionId: string; role: ParticipantRole; expiresAt: number }
+  >();
+  /** sessionId -> the single live customer audio socket. */
+  const aiSockets = new Map<string, WebSocket>();
+
+  const pruneAiTickets = (now = Date.now()) => {
+    for (const [token, ticket] of aiTickets) {
+      if (ticket.expiresAt <= now) aiTickets.delete(token);
+    }
+    while (aiTickets.size >= AI_TICKET_MAX) {
+      const oldest = aiTickets.keys().next().value;
+      if (!oldest) break;
+      aiTickets.delete(oldest);
+    }
+  };
+
+  /**
+   * A ticket is bound to the session AND to the role that requested it. Only a
+   * customer ticket can ever open `/ws/ai`, so a salesperson cannot feed their
+   * own microphone (or any other audio) to the model.
+   */
+  const mintAiTicket = (sessionId: string, role: ParticipantRole) => {
+    pruneAiTickets();
+    const token = randomBytes(32).toString('base64url');
+    const expiresAt = Date.now() + AI_TICKET_TTL_MS;
+    aiTickets.set(token, { sessionId, role, expiresAt });
+    return { token, expiresAt };
+  };
+
+  const consumeAiTicket = (
+    token: string
+  ): { sessionId: string; role: ParticipantRole } | null => {
+    const ticket = aiTickets.get(token);
+    if (!ticket) return null;
+    aiTickets.delete(token);
+    if (ticket.expiresAt <= Date.now()) return null;
+    return { sessionId: ticket.sessionId, role: ticket.role };
+  };
+
+  const aiSocketUrlFor = (req: Request, token: string): string =>
+    `${publicBaseUrl(req).replace(/^http/i, 'ws')}/ws/ai?ticket=${encodeURIComponent(token)}`;
+
+  const sendSalesperson = (session: SessionRecord, payload: unknown): boolean => {
+    const salesperson = session.salesperson;
+    if (!salesperson?.connected) return false;
+    return safeSend(sockets.get(salesperson.participantId), payload);
+  };
+
+  /**
+   * Translates bridge events into the two existing text channels: the
+   * salesperson's signaling messages and the customer audio socket's status.
+   * Audio is never involved and the model can never address the customer page.
+   */
+  const handleAiEvent = (sessionId: string, event: AiBridgeEvent): void => {
+    const session = store.getSession(sessionId);
+    if (!session) return;
+    const timestamp = new Date().toISOString();
+
+    if (event.type === 'status') {
+      // Expose the dashboard's lifecycle vocabulary: the bridge's finer states
+      // (`listening`/`thinking`) map to `connected`, never to a fake `speaking`.
+      const lifecycle =
+        event.state === 'listening' || event.state === 'thinking'
+          ? 'connected'
+          : event.state === 'connecting'
+            ? 'connecting'
+            : event.state === 'reconnecting'
+              ? 'reconnecting'
+              : event.state === 'error'
+                ? 'error'
+                : 'disconnected';
+      store.setAiRuntime(sessionId, {
+        state: lifecycle,
+        connected: event.connected,
+        error: event.error,
+        callId: event.callId,
+        reconnectAttempt: event.reconnectAttempt,
+        audioReachingAi: event.audioReachingAi,
+        lastResponseAt: event.lastResponseAt,
+        lastSuggestionAt: event.lastSuggestionAt,
+      });
+      sendSalesperson(session, {
+        type: 'ai_status',
+        state: lifecycle,
+        connected: event.connected,
+        listening: event.listening,
+        error: event.error,
+        callId: event.callId,
+        reconnectAttempt: event.reconnectAttempt,
+        maxReconnectAttempts: 2,
+        audioReachingAi: event.audioReachingAi,
+        lastResponseAt: event.lastResponseAt,
+        lastSuggestionAt: event.lastSuggestionAt,
+        timestamp,
+      });
+
+      const audioSocket = aiSockets.get(sessionId);
+      if (audioSocket) {
+        if (event.state === 'error') {
+          // Fatal bridge failure: the browser session reports an error and its
+          // bounded recovery asks the server for a fresh ticket. The human call
+          // is never touched.
+          safeSend(audioSocket, {
+            type: 'error',
+            message: event.error ?? 'The AI session failed.',
+            code: 'AI_ERROR',
+          });
+        } else {
+          const transportStatus =
+            event.state === 'listening' || event.state === 'thinking'
+              ? event.state
+              : event.state === 'connecting' || event.state === 'reconnecting'
+                ? 'connecting'
+                : 'disconnecting';
+          safeSend(audioSocket, { type: 'status', status: transportStatus });
+        }
+      }
+
+      broadcastSession(store.getSession(sessionId) as SessionRecord);
+      return;
+    }
+
+    if (event.type === 'transcript') {
+      // The customer's own speech, used by the salesperson for context. It is
+      // sent only to the salesperson; the customer page never receives it back.
+      sendSalesperson(session, {
+        type: 'customer_speech_transcript',
+        text: event.text,
+        isFinal: event.isFinal,
+        ordinal: event.ordinal,
+        timestamp,
+      });
+      return;
+    }
+
+    store.countSignal(sessionId, 'aiSuggestions');
+    store.setAiRuntime(sessionId, {
+      state: 'listening',
+      connected: true,
+      error: null,
+      audioReachingAi: true,
+      lastResponseAt: Date.now(),
+      lastSuggestionAt: Date.now(),
+    });
+    sendSalesperson(session, {
+      type: 'ai_suggestion',
+      text: event.text,
+      isFinal: event.isFinal,
+      ordinal: event.ordinal,
+      timestamp,
+    });
+    broadcastSession(store.getSession(sessionId) as SessionRecord);
+  };
+
+  const aiBridge = new AiBridgeManager({
+    settings:
+      options.aiSettings !== undefined
+        ? options.aiSettings
+        : resolveAiServiceSettings(process.env),
+    fetchImpl: aiServiceFetch,
+    systemPrompt: AI_SYSTEM_PROMPT,
+    createSocket: options.aiSocketFactory,
+    onEvent: handleAiEvent,
+  });
+
+  /** Restart requested over signaling by the salesperson. Never touches media. */
+  const restartAiFromSignaling = async (
+    session: SessionRecord,
+    participant: NonNullable<ReturnType<typeof store.getParticipant>>
+  ): Promise<void> => {
+    try {
+      const call = await aiBridge.restart(session.sessionId);
+      store.setAiCall(session.sessionId, {
+        callId: call.callId,
+        createdAt: Date.now(),
+        createdByParticipantId: participant.participant.participantId,
+      });
+    } catch (err) {
+      const message =
+        sanitizeProviderDetail((err as Error)?.message, 200) ??
+        'The AI service could not be restarted.';
+      store.setAiRuntime(session.sessionId, {
+        state: 'error',
+        connected: false,
+        error: message,
+        audioReachingAi: false,
+      });
+      sendSalesperson(session, {
+        type: 'ai_status',
+        state: 'error',
+        connected: false,
+        listening: false,
+        error: message,
+        callId: null,
+        reconnectAttempt: 0,
+        maxReconnectAttempts: 2,
+        audioReachingAi: false,
+        timestamp: new Date().toISOString(),
+      });
+      broadcastSession(store.getSession(session.sessionId) as SessionRecord);
+    }
+  };
+
+  /**
+   * Customer audio upload socket.
+   *
+   * Authorization is a single-use ticket minted by `/api/sessions/:id/ai-call`
+   * for an authorized session participant. Only binary PCM16 frames are
+   * accepted; `audio.start` must declare the verified contract (16 kHz, mono,
+   * PCM signed 16-bit little-endian). The salesperson has no way to reach this
+   * path, so salesperson speech can never enter the AI pipeline.
+   */
+  aiWss.on('connection', (ws: WebSocket, request) => {
+    let url: URL;
+    try {
+      url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
+    } catch {
+      ws.close(4400, 'bad request');
+      return;
+    }
+    const ticket = url.searchParams.get('ticket') ?? '';
+    const granted = consumeAiTicket(ticket);
+    if (!granted) {
+      ws.close(4401, 'invalid ticket');
+      return;
+    }
+    if (granted.role !== 'customer') {
+      // Defense in depth: salesperson audio must never enter the AI pipeline.
+      ws.close(4403, 'customer audio only');
+      return;
+    }
+    const sessionId = granted.sessionId;
+    const session = store.getSession(sessionId);
+    if (!session || store.isExpiredSession(sessionId)) {
+      ws.close(4404, 'session not found');
+      return;
+    }
+    if (!session.customer?.connected) {
+      ws.close(4409, 'customer not connected');
+      return;
+    }
+
+    // One audio socket per room. A reconnect supersedes the old socket instead
+    // of creating a second audio source (and a second bridge consumer).
+    const previous = aiSockets.get(sessionId);
+    if (previous && previous !== ws) {
+      aiSockets.delete(sessionId);
+      try {
+        previous.close(4001, 'superseded');
+      } catch {
+        // Ignore.
+      }
+    }
+    aiSockets.set(sessionId, ws);
+    store.setAiRuntime(sessionId, {
+      state: 'creating',
+      connected: false,
+      error: null,
+      audioReachingAi: false,
+      reconnectAttempt: 0,
+    });
+
+    const MAX_AUDIO_BYTES = Math.max(1, Number(process.env.AI_MAX_CALL_SECONDS) || 3600) * 16000 * 2;
+    let started = false;
+    let audioBytes = 0;
+    let ended = false;
+
+    const endBridge = (reason: string) => {
+      if (ended) return;
+      ended = true;
+      if (aiSockets.get(sessionId) === ws) aiSockets.delete(sessionId);
+      aiBridge.end(sessionId, reason);
+    };
+
+    ws.on('message', (raw, isBinary) => {
+      const data = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as ArrayBuffer);
+      if (isBinary) {
+        if (!started) return;
+        if (data.length === 0 || data.length > AI_MAX_FRAME_BYTES || data.length % 2 !== 0) return;
+        audioBytes += data.length;
+        if (audioBytes > MAX_AUDIO_BYTES) {
+          safeSend(ws, {
+            type: 'error',
+            code: 'MAX_DURATION',
+            message: 'The AI audio stream reached its maximum duration.',
+          });
+          endBridge('max-duration');
+          try {
+            ws.close(4008, 'max audio');
+          } catch {
+            // Ignore.
+          }
+          return;
+        }
+        aiBridge.pushAudio(sessionId, data);
+        return;
+      }
+
+      if (data.length > 4096) return;
+      let message: Record<string, unknown>;
+      try {
+        const parsed = JSON.parse(data.toString('utf8')) as unknown;
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+        message = parsed as Record<string, unknown>;
+      } catch {
+        return;
+      }
+
+      if (!started) {
+        if (message.type !== 'audio.start' && message.type !== 'join') {
+          safeSend(ws, {
+            type: 'error',
+            code: 'AI_PROTOCOL',
+            message: 'The first AI message must be audio.start.',
+          });
+          return;
+        }
+        if (message.protocol !== undefined && message.protocol !== AI_PROTOCOL) {
+          safeSend(ws, {
+            type: 'error',
+            code: 'AI_PROTOCOL',
+            message: 'Unsupported AI audio protocol.',
+          });
+          try {
+            ws.close(4400, 'protocol');
+          } catch {
+            // Ignore.
+          }
+          return;
+        }
+        if (message.sampleRate !== undefined && Number(message.sampleRate) !== 16000) {
+          safeSend(ws, {
+            type: 'error',
+            code: 'AI_AUDIO_FORMAT',
+            message: 'The AI pipeline accepts 16 kHz audio only.',
+          });
+          return;
+        }
+        if (message.format !== undefined && message.format !== 'pcm_s16le') {
+          safeSend(ws, {
+            type: 'error',
+            code: 'AI_AUDIO_FORMAT',
+            message: 'The AI pipeline accepts PCM signed 16-bit little-endian audio only.',
+          });
+          return;
+        }
+        started = true;
+        safeSend(ws, { type: 'ready', protocol: AI_PROTOCOL, sampleRate: 16000, frameBytes: 3200 });
+        const status = aiBridge.status(sessionId);
+        safeSend(ws, {
+          type: 'status',
+          status:
+            status?.state === 'thinking'
+              ? 'thinking'
+              : status?.state === 'listening'
+                ? 'listening'
+                : 'connecting',
+        });
+        return;
+      }
+
+      if (message.type === 'ping') {
+        safeSend(ws, { type: 'pong', at: message.at });
+        return;
+      }
+      if (message.type === 'audio.end' || message.type === 'stop') {
+        endBridge('client stopped');
+        try {
+          ws.close(1000, 'done');
+        } catch {
+          // Ignore.
+        }
+      }
+    });
+
+    ws.on('close', () => {
+      endBridge('audio socket closed');
+    });
+    ws.on('error', (err) => {
+      console.error('[ai] audio socket error:', (err as Error)?.message);
+    });
+  });
 
   // -------------------------------------------------------------------------
   // HTTP API: sessions, invitations, diagnostics
@@ -426,16 +795,14 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
   });
 
   /**
-   * Creates (or, when `replace` is true, replaces) the single AI call for this
-   * session on the self-hosted service. Only the customer may fetch the join URL:
-   * it is a short-lived media credential that costs GPU time while connected.
+   * Starts (or restarts) the server-side AI bridge for one session.
    *
-   * Why replacement exists: a call has a finite lifetime and its signed join URL
-   * belongs to that call. Once the socket closes, the same join URL cannot
-   * revive it, so "Reconnect" and new invitations must ask for a fresh call.
+   * The response contains a short-lived, single-use same-origin ticket URL. The
+   * Modal endpoint, the signed upstream join URL and every credential stay on
+   * the server. Audio is accepted only from the customer at `/ws/ai`.
    *
-   * `/ai-call` is the current path. `/ultravox-call` is kept as an alias for
-   * older clients; both share this single handler.
+   * Both participants may start/restart the AI (the salesperson owns the
+   * suggestion panel); neither may submit audio through this route.
    */
   const createAiCallRoute = async (req: Request, res: Response) => {
     const session = store.getSession(req.params.sessionId);
@@ -444,34 +811,29 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       return;
     }
 
-    const isCustomer = Boolean(store.authorizeCustomer(session.sessionId, bearer(req)));
-    if (!isCustomer) {
+    const credential = bearer(req);
+    const isCustomer = Boolean(store.authorizeCustomer(session.sessionId, credential));
+    const isSalesperson = Boolean(store.authorizeSalesperson(session.sessionId, credential));
+    if (!isCustomer && !isSalesperson) {
       store.countSignal(session.sessionId, 'rejectedMessages');
       console.warn(
-        `[session:${session.sessionId.slice(0, 8)}] rejected AI call request: not the session customer`
+        `[session:${session.sessionId.slice(0, 8)}] rejected AI call request: not a session participant`
       );
       res.status(403).json({
         error: 'FORBIDDEN',
-        message: 'Only the authorized customer of this session may start the AI conversation.',
-      });
-      return;
-    }
-
-    const replace = req.body?.replace === true || req.body?.rotate === true;
-    const existing = store.getUltravoxCall(session.sessionId);
-    if (existing && !replace) {
-      res.json({
-        callId: existing.callId,
-        joinUrl: existing.joinUrl,
-        isReused: true,
-        createdAt: existing.createdAt,
-        model: aiReadiness().model,
+        message: 'Only a participant of this session may start the AI copilot.',
       });
       return;
     }
 
     const settings = resolveAiServiceSettings(process.env);
     if (!settings) {
+      store.setAiRuntime(session.sessionId, {
+        state: 'error',
+        connected: false,
+        error: 'The AI service is not configured on the server.',
+        audioReachingAi: false,
+      });
       res.status(503).json({
         error: 'AI_SERVICE_NOT_CONFIGURED',
         message:
@@ -483,58 +845,33 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     if (aiCallInFlight.has(session.sessionId)) {
       res.status(409).json({
         error: 'AI_CALL_IN_PROGRESS',
-        message: 'A new AI call is already being created for this session. Retry in a moment.',
+        message: 'An AI session is already being created for this session. Retry in a moment.',
       });
       return;
     }
     aiCallInFlight.add(session.sessionId);
 
-    // Forget the old record before contacting the service: if creation fails, a
-    // subsequent retry must not hand out the dead join URL again.
-    const previous = replace ? store.clearUltravoxCall(session.sessionId) : null;
-    if (previous) void endAiCallQuietly(aiServiceFetch, settings, previous.callId);
-
-    // The prompt is operator-controlled: a customer must not be able to steer the
-    // model with arbitrary instructions.
-    const systemPrompt =
-      'You are an AI sales copilot assisting a salesperson in a live sales call. Listen attentively to the customer statements, questions, and objections. Generate concise, natural, 1-2 sentence ready-to-read sales responses and qualification questions for the salesperson to read aloud.';
+    const replace = req.body?.replace === true || req.body?.rotate === true;
 
     try {
-      const call = await createAiCall(aiServiceFetch, settings, {
-        sessionId: session.sessionId,
-        systemPrompt,
-      });
-      const callId = sanitizeAiCallId(call.callId);
-      if (!callId) {
-        throw new AiServiceError(
-          'AI_SERVICE_INVALID_RESPONSE',
-          502,
-          'The self-hosted AI service did not return a usable call id and join URL.'
-        );
-      }
-
-      store.setUltravoxCall(session.sessionId, {
-        callId,
-        joinUrl: call.joinUrl,
+      const call = replace
+        ? await aiBridge.restart(session.sessionId)
+        : await aiBridge.ensure(session.sessionId);
+      store.setAiCall(session.sessionId, {
+        callId: call.callId,
         createdAt: Date.now(),
-        createdByParticipantId: session.customer?.participantId || 'unknown',
+        createdByParticipantId:
+          session.customer?.participantId || session.salesperson?.participantId || 'unknown',
       });
-      store.setAiRuntime(session.sessionId, {
-        state: 'creating',
-        connected: false,
-        error: null,
-        callId,
-        reconnectAttempt: 0,
-        audioReachingAi: false,
-      });
-      broadcastSession(store.getSession(session.sessionId) as SessionRecord);
-
+      const ticket = mintAiTicket(session.sessionId, isCustomer ? 'customer' : 'salesperson');
       res.json({
-        callId,
-        joinUrl: call.joinUrl,
-        isReused: false,
+        callId: call.callId,
+        aiSocketUrl: aiSocketUrlFor(req, ticket.token),
+        ticketExpiresAt: ticket.expiresAt,
+        isReused: !replace && Boolean((call as { reused?: boolean }).reused),
         createdAt: Date.now(),
         model: call.model,
+        audio: { sampleRate: 16000, format: 'pcm_s16le', transport: 'websocket' },
       });
     } catch (err) {
       const failure =
@@ -548,10 +885,15 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
             );
 
       store.recordError(session.sessionId, `AI service: ${failure.code}`);
+      store.setAiRuntime(session.sessionId, {
+        state: 'error',
+        connected: false,
+        error: failure.message,
+        audioReachingAi: false,
+      });
+      broadcastSession(store.getSession(session.sessionId) as SessionRecord);
       console.warn(
-        `[ai] call creation failed for session ${session.sessionId.slice(0, 8)}: ${failure.code} (${
-          failure.status
-        })`
+        `[ai] call creation failed for session ${session.sessionId.slice(0, 8)}: ${failure.code} (${failure.status})`
       );
       res.status(failure.status).json({
         error: failure.code,
@@ -565,8 +907,6 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
   };
 
   app.post('/api/sessions/:sessionId/ai-call', createAiCallRoute);
-  /** Deprecated alias kept for older clients; same handler, same rules. */
-  app.post('/api/sessions/:sessionId/ultravox-call', createAiCallRoute);
 
   // -------------------------------------------------------------------------
   // Shared session endpoints
@@ -1201,30 +1541,6 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       safeSend(ws, { type: 'error', code, message });
     };
 
-    /**
-     * AI status is observational: if the counterpart is not connected yet it is
-     * still stored server-side and must not surface as a signaling error on the
-     * customer dashboard.
-     */
-    const relayStatusToCounterpart = (
-      session: SessionRecord,
-      current: NonNullable<ReturnType<typeof store.getParticipant>>,
-      type: string,
-      data: Record<string, unknown>
-    ) => {
-      const counterpart = counterpartOf(session, current.participant.role);
-      const targetWs = counterpart?.connected ? sockets.get(counterpart.participantId) : undefined;
-      if (!targetWs) return;
-      safeSend(targetWs, {
-        ...data,
-        type,
-        sessionId: session.sessionId,
-        from: current.participant.participantId,
-        fromRole: current.participant.role,
-        relayedAt: Date.now(),
-      });
-    };
-
     const handleMessage = (data: Record<string, unknown>) => {
       if (!state) return;
       const type = typeof data.type === 'string' ? data.type : '';
@@ -1260,54 +1576,18 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
         return;
       }
 
-      /**
-       * Customer-reported AI lifecycle. The Ultravox session exists only on the
-       * customer device, so this is the authoritative live state. It is stored
-       * for polling/diagnostics and relayed to the salesperson.
-       */
+      // AI lifecycle is owned by the server bridge. A browser (either role) is
+      // not an authority on model state and cannot feed or fake it.
       if (type === 'ai_status') {
-        if (state.role !== 'customer') {
-          rejectMessage(session.sessionId, 'INVALID_SIGNALING_ROLE', 'Only the customer may report AI status.');
-          return;
-        }
-        const aiState = typeof data.state === 'string' && AI_STATES.has(data.state) ? data.state : null;
-        if (!aiState) {
-          rejectMessage(session.sessionId, 'INVALID_SIGNALING_PAYLOAD', 'A known AI state is required.');
-          return;
-        }
-        const connected = data.connected === true && aiState === 'connected';
-        const runtime = store.setAiRuntime(session.sessionId, {
-          state: aiState,
-          connected,
-          error: sanitizeAiDetail(data.error),
-          callId: sanitizeAiCallId(data.callId),
-          reconnectAttempt:
-            typeof data.reconnectAttempt === 'number' &&
-            Number.isFinite(data.reconnectAttempt) &&
-            data.reconnectAttempt >= 0
-              ? Math.min(Math.round(data.reconnectAttempt), 20)
-              : 0,
-          audioReachingAi: connected && data.audioReachingAi === true,
-          lastResponseAt: sanitizeTimestamp(data.lastResponseAt),
-          lastSuggestionAt: sanitizeTimestamp(data.lastSuggestionAt),
-        });
-        if (!runtime) return;
-        relayStatusToCounterpart(session, current, 'ai_status', {
-          state: runtime.state,
-          connected: runtime.connected,
-          error: runtime.error,
-          callId: runtime.callId,
-          reconnectAttempt: runtime.reconnectAttempt,
-          audioReachingAi: runtime.audioReachingAi,
-          lastResponseAt: runtime.lastResponseAt,
-          lastSuggestionAt: runtime.lastSuggestionAt,
-          updatedAt: runtime.updatedAt,
-        });
-        broadcastSession(session);
+        rejectMessage(
+          session.sessionId,
+          'INVALID_SIGNALING_ROLE',
+          'AI status is reported by the server, not by a browser.'
+        );
         return;
       }
 
-      /** The salesperson may ask the customer device to create a fresh AI call. */
+      /** The salesperson may restart the server-side AI bridge at any time. */
       if (type === 'ai_reconnect') {
         if (state.role !== 'salesperson') {
           rejectMessage(
@@ -1317,9 +1597,7 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
           );
           return;
         }
-        relayToCounterpart(session, current, 'ai_reconnect', {
-          reason: typeof data.reason === 'string' ? data.reason.slice(0, 120) : 'salesperson requested',
-        });
+        void restartAiFromSignaling(session, current);
         return;
       }
 
@@ -1382,25 +1660,14 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       }
 
       if (type === 'ai_suggestion' || type === 'customer_speech_transcript') {
-        if (state.role !== 'customer') {
-          rejectMessage(
-            session.sessionId,
-            'INVALID_SIGNALING_ROLE',
-            'Only the customer may send AI suggestions or transcripts.'
-          );
-          return;
-        }
-        if (typeof data.text !== 'string') {
-          rejectMessage(session.sessionId, 'INVALID_SIGNALING_PAYLOAD', 'Suggestion text is required.');
-          return;
-        }
-        store.countSignal(session.sessionId, 'aiSuggestions');
-        relayToCounterpart(session, current, type, {
-          text: data.text.slice(0, 4000),
-          isFinal: Boolean(data.isFinal),
-          ordinal: typeof data.ordinal === 'number' ? data.ordinal : 0,
-          timestamp: typeof data.timestamp === 'string' ? data.timestamp.slice(0, 40) : '',
-        });
+        // Obsolete browser-relayed AI path: the server generates and delivers
+        // suggestions itself. Accepting these would let either browser inject
+        // fake AI output into the salesperson's panel.
+        rejectMessage(
+          session.sessionId,
+          'INVALID_SIGNALING_ROLE',
+          'AI text is delivered by the server, not sent by a browser.'
+        );
         return;
       }
 
@@ -1473,13 +1740,24 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       if (!detached) return;
       const session = detached.session;
 
-      // The AI session and microphone live on the customer device. Once that
-      // device disconnects, the server must not keep reporting a live AI.
-      if (detached.role === 'customer' && session.ai) {
+      // The AI bridge is fed only by the customer's audio socket. When that
+      // participant leaves, stop the upstream call so no GPU time is spent on a
+      // room nobody is in, and close the audio upload socket too.
+      if (detached.role === 'customer') {
+        const audioSocket = aiSockets.get(session.sessionId);
+        aiSockets.delete(session.sessionId);
+        if (audioSocket) {
+          try {
+            audioSocket.close(1000, 'customer left');
+          } catch {
+            // Ignore.
+          }
+        }
+        aiBridge.end(session.sessionId, 'customer left');
         store.setAiRuntime(session.sessionId, {
           state: 'disconnected',
           connected: false,
-          error: 'The customer device disconnected; the AI session ended with it.',
+          error: 'The customer left; the AI session ended.',
           audioReachingAi: false,
           reconnectAttempt: 0,
         });
@@ -1502,7 +1780,8 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
     });
   });
 
-  // Upgrade HTTP requests to WebSocket for /ws
+  // Upgrade HTTP requests to WebSocket. `/ws` is the participant signaling
+  // socket; `/ws/ai` is the customer's audio upload socket for the AI bridge.
   server.on('upgrade', (request, socket, head) => {
     const pathname = request.url
       ? new URL(request.url, `http://${request.headers.host}`).pathname
@@ -1511,9 +1790,15 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit('connection', ws, request);
       });
-    } else {
-      socket.destroy();
+      return;
     }
+    if (pathname === '/ws/ai') {
+      aiWss.handleUpgrade(request, socket, head, (ws) => {
+        aiWss.emit('connection', ws, request);
+      });
+      return;
+    }
+    socket.destroy();
   });
 
   // Vite is a build/dev-time dependency only: production serves the built
@@ -1575,7 +1860,22 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
   for (const warning of appUrlDiagnostics().warnings) console.warn(`[app-url] ${warning}`);
 
   // Periodically release expired sessions / stale participants.
-  const sweeper = setInterval(() => store.sweep(), 60_000);
+  const sweeper = setInterval(() => {
+    store.sweep();
+    // An expired/removed session must not keep an upstream GPU call alive.
+    for (const sessionId of aiBridge.activeSessions()) {
+      if (!store.getSession(sessionId) || store.isExpiredSession(sessionId)) {
+        const audioSocket = aiSockets.get(sessionId);
+        aiSockets.delete(sessionId);
+        try {
+          audioSocket?.close(1000, 'session expired');
+        } catch {
+          // Ignore.
+        }
+        aiBridge.end(sessionId, 'session expired');
+      }
+    }
+  }, 60_000);
   sweeper.unref?.();
 
   const port = options.port ?? (Number(process.env.PORT) || 3000);
@@ -1596,11 +1896,21 @@ export async function createPrototype2Server(options: CreateServerOptions = {}) 
       }
     }
     sockets.clear();
+    for (const audioSocket of [...aiSockets.values()]) {
+      try {
+        audioSocket.close(1001, 'server_shutdown');
+      } catch {
+        // Ignore close errors.
+      }
+    }
+    aiSockets.clear();
+    aiBridge.stopAll();
     wss.close();
+    aiWss.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   };
 
-  return { app, server, wss, store, port: actualPort, close };
+  return { app, server, wss, aiWss, store, aiBridge, port: actualPort, close };
 }
 
 const isMain =

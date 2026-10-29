@@ -1,6 +1,5 @@
 {
   "name": "Sales Copilot",
-  "description": "Sales copilot using the Ultravox ultravox-v0.7 API with live audio, private AI suggestions, connection diagnostics, and ExpressTURN relay setup.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "description": "Sales copilot with direct WebRTC customer/salesperson audio, server-forwarded customer audio to a self-hosted Modal model for private text suggestions, connection diagnostics, and ExpressTURN relay setup.",
+  "requestFramePermissions": []
 }
