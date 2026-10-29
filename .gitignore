@@ -7,6 +7,12 @@ coverage/
 .env*
 !.env.example
 
+# Python (Modal service)
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
 # Local browser test dependencies (no root in sandbox)
 .browser-libs/
 .apt/
